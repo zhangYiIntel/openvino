@@ -43,7 +43,7 @@ public:
 
     virtual std::unique_ptr<MemoryDesc> clone() const = 0;
 
-    // clone descriptor with new dims. Throws an exception if some of the new dims conflicts with the internal shape (i.e. its defined dims and rank)
+    // clone descriptor with new dims. Throws an exception if some of the new dims conflicts with the internal shape (i.e. its defined dims ,rank, upper bounds)
     virtual std::unique_ptr<MemoryDesc> cloneWithNewDims(const std::vector<size_t>& dims) const = 0;
 
     // InitTensorsAreEqual

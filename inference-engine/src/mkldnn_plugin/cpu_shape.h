@@ -13,6 +13,8 @@
 
 namespace MKLDNNPlugin {
 
+inline std::string dim2str(size_t dim);
+
 class Shape {
 public:
     Shape() = default;
@@ -95,6 +97,46 @@ public:
         return ngraph::PartialShape(nGraphDims);
     }
 
+    bool isCompatible(const std::vector<size_t>& vecDims) const {
+        if (getRank() != vecDims.size()) {
+            return false;
+        }
+
+        auto comparator = [](size_t lhs, size_t rhs) {
+            return (lhs == rhs) || (lhs == Shape::UNDEFINED_DIM);
+        };
+
+        if (!std::equal(getDims().begin(), getDims().end(), vecDims.begin(), comparator)) {
+            return false;
+        }
+
+        if (!std::equal(getMaxDims().begin(), getMaxDims().end(), vecDims.begin(), [](size_t lhs, size_t rhs) { return lhs >= rhs; })) {
+            return false;
+        }
+
+        if (!std::equal(getMinDims().begin(), getMinDims().end(), vecDims.begin(), [](size_t lhs, size_t rhs) { return lhs <= rhs; })) {
+            return false;
+        }
+        return true;
+    }
+
+    std::string toString() const {
+        std::stringstream output;
+        output << "{";
+
+        size_t i = 0;
+        do {
+            if (dims[i] == Shape::UNDEFINED_DIM) {
+                output << dim2str(minDims[i]) << " - " << dim2str(maxDims[i]);
+            } else {
+                output << dims[i];
+            }
+        } while (++i < dims.size() && output << ", ");
+
+        output << "}";
+        return output.str();
+    }
+
     // TODO [DS]: Added for migration period. Should be deleted once we will get rid of MKLDNNDims.
     operator MKLDNNDims() const {
         return MKLDNNDims(getStaticDims());
@@ -150,17 +192,17 @@ inline bool isEqualOrUndefined(const std::vector<size_t> lhs, const std::vector<
     return true;
 }
 
+inline std::string dim2str(size_t dim) {
+    return dim == Shape::UNDEFINED_DIM ? "?" : std::to_string(dim);
+}
+
 inline std::string dims2str(const std::vector<size_t>& dims) {
     std::stringstream output;
     output << "{";
 
     auto itr = dims.begin();
     do {
-       if (*itr == Shape::UNDEFINED_DIM) {
-           output << "?";
-       } else {
-           output << *itr;
-       }
+        output << dim2str(*itr);
     } while (++itr != dims.end() && output << ", ");
 
     output << "}";
