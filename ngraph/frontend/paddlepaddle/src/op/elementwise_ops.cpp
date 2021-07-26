@@ -96,6 +96,11 @@ namespace ngraph
                     return elementwise_ops<ngraph::opset6::Power>(node_context);
                 }
 
+                NamedOutputs elementwise_equal(const NodeContext& node_context)
+                {
+                    return elementwise_ops<ngraph::opset6::Equal>(node_context);
+                }
+
             } // namespace op
         }     // namespace pdpd
     }         // namespace frontend

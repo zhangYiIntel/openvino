@@ -18,7 +18,10 @@ namespace ngraph
                 NamedOutputs rnn(const NodeContext& node)
                 {
                     auto mode = node.get_attribute<std::string>("mode");
-                    PDPD_ASSERT(mode == "LSTM", "RNN only support LSTM now");
+                    PDPD_ASSERT(mode == "LSTM",
+                                "[Paddle Frontend]RNN Only Supports LSTM Ops Conversion now, don't "
+                                "support " +
+                                    mode);
                     return lstm(node);
                 }
 

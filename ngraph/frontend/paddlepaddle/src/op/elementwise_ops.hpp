@@ -20,6 +20,7 @@ namespace ngraph
                 NamedOutputs elementwise_min(const NodeContext& node_context);
                 NamedOutputs elementwise_max(const NodeContext& node_context);
                 NamedOutputs elementwise_pow(const NodeContext& node_context);
+                NamedOutputs elementwise_equal(const NodeContext& node_context);
             } // namespace op
         }     // namespace pdpd
     }         // namespace frontend

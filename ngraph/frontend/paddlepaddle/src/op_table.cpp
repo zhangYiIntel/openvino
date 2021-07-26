@@ -62,7 +62,7 @@ namespace ngraph
                     {"elementwise_mul", op::elementwise_mul},
                     {"elementwise_pow", op::elementwise_pow},
                     {"elementwise_sub", op::elementwise_sub},
-                    {"equal", op::equal},
+                    {"equal", op::elementwise_equal},
                     {"expand_v2", op::expand_v2},
                     {"fill_constant_batch_size_like", op::fill_constant_batch_size_like},
                     {"fill_constant", op::fill_constant},

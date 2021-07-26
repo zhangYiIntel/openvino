@@ -21,10 +21,17 @@ namespace ngraph
                     auto transpose_b = node.get_attribute<bool>("transpose_Y", false);
                     auto mm =
                         std::make_shared<ngraph::opset6::MatMul>(x, y, transpose_a, transpose_b);
-                    auto alpha_node =
-                        ngraph::opset6::Constant::create(ngraph::element::f32, {1}, {alpha});
-                    return node.default_single_output_mapping(
-                        {std::make_shared<ngraph::opset6::Multiply>(mm, alpha_node)}, {"Out"});
+                    if (alpha == 1)
+                    {
+                        return node.default_single_output_mapping({mm}, {"Out"});
+                    }
+                    else
+                    {
+                        auto alpha_node =
+                            ngraph::opset6::Constant::create(ngraph::element::f32, {1}, {alpha});
+                        return node.default_single_output_mapping(
+                            {std::make_shared<ngraph::opset6::Multiply>(mm, alpha_node)}, {"Out"});
+                    }
                 }
 
             } // namespace op
