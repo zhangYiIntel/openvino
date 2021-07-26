@@ -452,6 +452,28 @@ public:
         return &supportedPrimitiveDescriptors[selectedPrimitiveDescriptorIndex];
     }
 
+    const MemoryDesc* getOutputMemDescAtPort(size_t portNum) const {
+        if (auto primDesc = getSelectedPrimitiveDescriptor()) {
+            const auto& outConfs = primDesc->getConfig().outConfs;
+            if (outConfs.size() < portNum) {
+                return nullptr;
+            }
+            return outConfs[portNum].desc.get();
+        }
+        return nullptr;
+    }
+
+    const MemoryDesc* getInputMemDescAtPort(size_t portNum) const {
+        if (auto primDesc = getSelectedPrimitiveDescriptor()) {
+            const auto& inConfs = primDesc->getConfig().inConfs;
+            if (inConfs.size() < portNum) {
+                return nullptr;
+            }
+            return inConfs[portNum].desc.get();
+        }
+        return nullptr;
+    }
+
     void selectPrimitiveDescriptorByIndex(int index) {
         if (index < 0 || index >= supportedPrimitiveDescriptors.size())
             selectedPrimitiveDescriptorIndex = -1;
@@ -654,7 +676,7 @@ protected:
         this->type = type;
     }
 
-    virtual int getMaxBatch();
+    virtual size_t getMaxBatch();
 
 
     virtual std::unique_ptr<MemoryDesc> getDefinedInputDesc(const NodeConfig &config, size_t idx) const;
@@ -753,7 +775,7 @@ protected:
             PortConfig portConfig;
             portConfig.inPlace = portConfigurator.inPlace;
             portConfig.constant = portConfigurator.constant;
-            portConfig.desc = portConfigurator.blockedDescCreator->createUniqueDesc(prc, shape.getStaticDims());
+            portConfig.desc = portConfigurator.blockedDescCreator->createUniqueDesc(prc, shape);
 
             port.push_back(std::move(portConfig));
 

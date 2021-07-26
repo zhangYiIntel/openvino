@@ -87,6 +87,8 @@ public:
         return MKLDNNPlugin::make_unique<MKLDNNMemoryDesc>(*this);
     }
 
+    std::unique_ptr<MemoryDesc> cloneWithNewDims(const std::vector<size_t>& dims) const override;
+
     bool checkGeneralLayout(GeneralLayout layoutType) const override;
 
     std::string serializeFormat() const override;
@@ -100,6 +102,8 @@ public:
     bool isCompatible(const MemoryDesc& rhs) const override;
     bool isCompatible(const BlockedMemoryDesc& rhs) const;
     bool isCompatible(const MKLDNNMemoryDesc& rhs) const;
+
+    size_t getMaxMemSize() const override;
 
 private:
     size_t getMemSizeImp() const override;
@@ -175,11 +179,22 @@ public:
     }
 
     void Create(const MemoryDesc& desc, const void* data = nullptr, bool pads_zeroing = true);
+    void Create(MemoryDescPtr desc, const void* data = nullptr, bool pads_zeroing = true);
+
+    // Redefines descriptor. The memory descriptor will be replaced with the new one.
+    // Memory will not be reallocated if the new tensor size is less or equal the upper bound.
+    // Caution!!! This action invalidates the previous data layout. The old data may become unreachable.
+    void redefineDesc(const MemoryDesc& desc);
+    void redefineDesc(MemoryDescPtr desc);
 
     // Like a plain format
     void SetData(mkldnn::memory::data_type dataType, mkldnn::memory::format_tag format, const void* data, size_t size, bool ftz = true) const;
     void SetData(const MKLDNNMemory& memory, size_t size = 0, bool ftz = true) const;
     void FillZero();
+
+    bool hasExternalStorage() const {
+        return useExternalStorage;
+    }
 
     static mkldnn::memory::format_tag GetPlainFormatByRank(size_t rank);
     static InferenceEngine::Layout GetPlainLayout(const mkldnn::memory::dims& dims);
@@ -205,6 +220,8 @@ private:
     MemoryDescPtr pMemDesc;
     std::shared_ptr<mkldnn::memory> prim;
     mkldnn::engine eng;
+    bool useExternalStorage = false;
+    size_t memUpperBound = 0ul;
 };
 
 using MKLDNNMemoryPtr = std::shared_ptr<MKLDNNMemory>;
