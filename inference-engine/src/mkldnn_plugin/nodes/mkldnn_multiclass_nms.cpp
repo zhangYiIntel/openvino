@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "base.hpp"
 #include "ie_parallel.hpp"
 #include "utils/general_utils.h"
 
@@ -113,24 +112,25 @@ void MKLDNNMultiClassNmsNode::initSupportedPrimitiveDescriptors() {
     checkPrecision(getOriginalOutputPrecisionAtPort(NMS_SELECTEDOUTPUTS), supportedFloatPrecision, "selected_outputs", outType);
     checkPrecision(getOriginalOutputPrecisionAtPort(NMS_SELECTEDNUM), supportedIntOutputPrecision, "selected_num", outType);
 
-    std::vector<DataConfigurator> inDataConf;
+    std::vector<PortConfigurator> inDataConf;
     inDataConf.reserve(getOriginalInputsNumber());
     for (int i = 0; i < getOriginalInputsNumber(); ++i) {
         Precision inPrecision = Precision::FP32;
-        inDataConf.emplace_back(TensorDescCreatorTypes::ncsp, inPrecision);
+        inDataConf.emplace_back(GeneralLayout::ncsp, inPrecision);
     }
 
-    std::vector<DataConfigurator> outDataConf;
+    std::vector<PortConfigurator> outDataConf;
     outDataConf.reserve(getOriginalOutputsNumber());
     for (int i = 0; i < getOriginalOutputsNumber(); ++i) {
         Precision outPrecision = i == NMS_SELECTEDOUTPUTS ? Precision::FP32 : Precision::I32;
-        outDataConf.emplace_back(TensorDescCreatorTypes::ncsp, outPrecision);
+        outDataConf.emplace_back(GeneralLayout::ncsp, outPrecision);
     }
 
     addSupportedPrimDesc(inDataConf, outDataConf, impl_desc_type::ref_any);
 }
 
 void MKLDNNMultiClassNmsNode::execute(mkldnn::stream strm) {
+    /*
     const float* boxes = reinterpret_cast<const float*>(getParentEdgeAt(NMS_BOXES)->getMemoryPtr()->GetPtr());
     const float* scores = reinterpret_cast<const float*>(getParentEdgeAt(NMS_SCORES)->getMemoryPtr()->GetPtr());
 
@@ -244,7 +244,7 @@ void MKLDNNMultiClassNmsNode::execute(mkldnn::stream strm) {
         });
     }
 
-    const size_t selectedBoxesNum = getChildEdgeAt(NMS_SELECTEDINDICES)->getDesc().getDims()[0];
+    const size_t selectedBoxesNum = getChildEdgeAt(NMS_SELECTEDINDICES)->getShape()->getStaticDims()[0];
     const size_t validOutputs = std::min(filtBoxes.size(), selectedBoxesNum);
 
     std::vector<size_t> m_selected_num;
@@ -278,7 +278,7 @@ void MKLDNNMultiClassNmsNode::execute(mkldnn::stream strm) {
         output_offset += selectedBoxesNum_perBatch;
         original_offset += real_boxes;
     }
-
+    */
     return;
 }
 

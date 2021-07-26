@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include "base.hpp"
 #include "ie_parallel.hpp"
 #include "ngraph/opsets/opset8.hpp"
 #include "ngraph_ops/nms_static_shape_ie.hpp"
@@ -25,7 +24,7 @@ using ngNmseDcayFunction = ngraph::op::v8::MatrixNms::DecayFunction;
 
 bool MKLDNNMatrixNmsNode::isSupportedOperation(const std::shared_ptr<ngraph::Node>& op, std::string& errorMessage) noexcept {
     try {
-        const auto nms = std::dynamic_pointer_cast<const MatrixNmsIEInternal>(op);
+        const auto nms = std::dynamic_pointer_cast<const ngraph::op::v8::MatrixNms>(op);
         if (!nms) {
             errorMessage = "Only internal MatrixNms operation is supported";
             return false;
@@ -42,11 +41,11 @@ bool MKLDNNMatrixNmsNode::isSupportedOperation(const std::shared_ptr<ngraph::Nod
             return false;
         }
 
-        if (nms->get_input_shape(NMS_BOXES)[1] != nms->get_input_shape(NMS_SCORES)[2]) {
-            errorMessage = "Input Box Dimension 1: " + std::to_string(nms->get_input_shape(NMS_BOXES)[1]) +
-                           " doesn't match Score Dimension 2: " + std::to_string(nms->get_input_shape(NMS_SCORES)[2]);
-            return false;
-        }
+        // if (nms->get_input_shape(NMS_BOXES)[1] != nms->get_input_shape(NMS_SCORES)[2]) {
+        //     errorMessage = "Input Box Dimension 1: " + std::to_string(nms->get_input_shape(NMS_BOXES)[1]) +
+        //                    " doesn't match Score Dimension 2: " + std::to_string(nms->get_input_shape(NMS_SCORES)[2]);
+        //     return false;
+        // }
     } catch (...) {
         return false;
     }
@@ -61,7 +60,7 @@ MKLDNNMatrixNmsNode::MKLDNNMatrixNmsNode(const std::shared_ptr<ngraph::Node>& op
     }
 
     errorPrefix = "MatrixNMS layer with name '" + getName() + "' ";
-    const auto matrix_nms = std::dynamic_pointer_cast<const MatrixNmsIEInternal>(op);
+    const auto matrix_nms = std::dynamic_pointer_cast<const ngraph::op::v8::MatrixNms>(op);
 
     if (getOriginalInputsNumber() != 2)
         IE_THROW() << errorPrefix << "has incorrect number of input edges: " << getOriginalInputsNumber();
@@ -171,13 +170,13 @@ void MKLDNNMatrixNmsNode::initSupportedPrimitiveDescriptors() {
     checkPrecision(getOriginalOutputPrecisionAtPort(NMS_SELECTED_OUTPUTS), supportedFloatPrecision, "selected_outputs", outType);
     checkPrecision(getOriginalOutputPrecisionAtPort(NMS_SELECTED_INDICES), supportedIntOutputPrecision, "selected_indices", outType);
 
-    std::vector<DataConfigurator> inDataConf(NMS_SCORES + 1, {TensorDescCreatorTypes::ncsp, Precision::FP32});
+    std::vector<PortConfigurator> inDataConf(NMS_SCORES + 1, {GeneralLayout::ncsp, Precision::FP32});
 
-    std::vector<DataConfigurator> outDataConf;
+    std::vector<PortConfigurator> outDataConf;
     outDataConf.reserve(getOriginalOutputsNumber());
     for (int i = 0; i < getOriginalOutputsNumber(); ++i) {
         Precision outPrecision = i == NMS_SELECTED_OUTPUTS ? Precision::FP32 : Precision::I32;
-        outDataConf.emplace_back(TensorDescCreatorTypes::ncsp, outPrecision);
+        outDataConf.emplace_back(GeneralLayout::ncsp, outPrecision);
     }
 
     addSupportedPrimDesc(inDataConf, outDataConf, impl_desc_type::ref_any);
@@ -352,17 +351,15 @@ void MKLDNNMatrixNmsNode::execute(mkldnn::stream strm) {
         startOffset += m_numPerBatch[i];
     }
 
-    m_filteredBoxes.resize(startOffset);
-
     if (m_sortResultAcrossBatch) { /* sort across batch */
         if (m_sortResultType == MatrixNmsSortResultType::SCORE) {
-            parallel_sort(m_filteredBoxes.begin(), m_filteredBoxes.end(), [](const BoxInfo& l, const BoxInfo& r) {
+            parallel_sort(m_filteredBoxes.begin(), m_filteredBoxes.begin() + startOffset, [](const BoxInfo& l, const BoxInfo& r) {
                 return (l.score > r.score) || (l.score == r.score && l.batchIndex < r.batchIndex) ||
                        (l.score == r.score && l.batchIndex == r.batchIndex && l.classIndex < r.classIndex) ||
                        (l.score == r.score && l.batchIndex == r.batchIndex && l.classIndex == r.classIndex && l.index < r.index);
             });
         } else if (m_sortResultType == MatrixNmsSortResultType::CLASSID) {
-            parallel_sort(m_filteredBoxes.begin(), m_filteredBoxes.end(), [](const BoxInfo& l, const BoxInfo& r) {
+            parallel_sort(m_filteredBoxes.begin(), m_filteredBoxes.begin() + startOffset, [](const BoxInfo& l, const BoxInfo& r) {
                 return (l.classIndex < r.classIndex) || (l.classIndex == r.classIndex && l.batchIndex < r.batchIndex) ||
                        (l.classIndex == r.classIndex && l.batchIndex == r.batchIndex && l.score > r.score) ||
                        (l.classIndex == r.classIndex && l.batchIndex == r.batchIndex && l.score == r.score && l.index < r.index);
@@ -370,30 +367,28 @@ void MKLDNNMatrixNmsNode::execute(mkldnn::stream strm) {
         }
     }
 
+    auto selectedOutputsMemPtr = getChildEdgesAtPort(NMS_SELECTED_OUTPUTS)[0]->getMemoryPtr();
+    auto selectedIndicesMemPtr =  getChildEdgesAtPort(NMS_SELECTED_INDICES)[0]->getMemoryPtr();
+    SizeVector newOutPutsDims = {startOffset, 6};
+    SizeVector newIndicesDims = {startOffset, 1};
+
+    selectedOutputsMemPtr->redefineDesc(getOutputMemDescAtPort(NMS_SELECTED_OUTPUTS)->cloneWithNewDims(newOutPutsDims));
+    selectedIndicesMemPtr->redefineDesc(getOutputMemDescAtPort(NMS_SELECTED_INDICES)->cloneWithNewDims(newIndicesDims));
+
     float* selectedOutputs = reinterpret_cast<float*>(getChildEdgesAtPort(NMS_SELECTED_OUTPUTS)[0]->getMemoryPtr()->GetPtr());
     int* selectedIndices = reinterpret_cast<int*>(getChildEdgesAtPort(NMS_SELECTED_INDICES)[0]->getMemoryPtr()->GetPtr());
     int* validOutputs = reinterpret_cast<int*>(getChildEdgesAtPort(NMS_VALID_OUTPUTS)[0]->getMemoryPtr()->GetPtr());
     std::copy(m_numPerBatch.begin(), m_numPerBatch.end(), validOutputs);
 
-    int64_t outputOffset = 0;
-    int64_t originalOffset = 0;
-    for (size_t i = 0; i < m_numBatches; i++) {
-        auto real_boxes = m_numPerBatch[i];
-        for (size_t j = 0; j < real_boxes; j++) {
-            auto originalIndex = originalOffset + j;
-            selectedIndices[j + outputOffset] = static_cast<int>(m_filteredBoxes[originalIndex].index);
-            auto selectedBase = selectedOutputs + (outputOffset + j) * 6;
-            selectedBase[0] = m_filteredBoxes[originalIndex].classIndex;
-            selectedBase[1] = m_filteredBoxes[originalIndex].score;
-            selectedBase[2] = m_filteredBoxes[originalIndex].box.x1;
-            selectedBase[3] = m_filteredBoxes[originalIndex].box.y1;
-            selectedBase[4] = m_filteredBoxes[originalIndex].box.x2;
-            selectedBase[5] = m_filteredBoxes[originalIndex].box.y2;
-        }
-        std::fill_n(selectedOutputs + (outputOffset + real_boxes) * 6, (m_maxBoxesPerBatch - real_boxes) * 6, -1);
-        std::fill_n(selectedIndices + (outputOffset + real_boxes), m_maxBoxesPerBatch - real_boxes, -1);
-        outputOffset += m_maxBoxesPerBatch;
-        originalOffset += real_boxes;
+    for (size_t i = 0; i < startOffset; i++) {
+        selectedIndices[i] = static_cast<int>(m_filteredBoxes[i].index);
+        auto selectedBase = selectedOutputs + i * 6;
+        selectedBase[0] = m_filteredBoxes[i].classIndex;
+        selectedBase[1] = m_filteredBoxes[i].score;
+        selectedBase[2] = m_filteredBoxes[i].box.x1;
+        selectedBase[3] = m_filteredBoxes[i].box.y1;
+        selectedBase[4] = m_filteredBoxes[i].box.x2;
+        selectedBase[5] = m_filteredBoxes[i].box.y2;
     }
 }
 
