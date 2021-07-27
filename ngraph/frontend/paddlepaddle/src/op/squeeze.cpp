@@ -23,7 +23,7 @@ namespace ngraph
                     }
 
                     std::shared_ptr<Node> out;
-                    if (axes.size())
+                    if (!axes.empty())
                     {
                         auto axesNode =
                             ngraph::opset6::Constant::create(ngraph::element::i32, {axes.size()}, axes);
