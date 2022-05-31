@@ -165,7 +165,7 @@ void FullyConnected::getSupportedDescriptors() {
         IE_THROW()<< errorPrefix << " has incorrect number of output edges";
 
     auto inputDataType = DnnlExtensionUtils::IEPrecisionToDataType(getOriginalInputPrecisionAtPort(DATA_ID));
-    auto outputDataType = DnnlExtensionUtils::IEPrecisionToDataType(getOriginalOutputPrecisionAtPort(DATA_ID));
+    outputDataType = DnnlExtensionUtils::IEPrecisionToDataType(getOriginalOutputPrecisionAtPort(DATA_ID));
 
     if (inputDataType == memory::data_type::f32) {
         outputDataType = memory::data_type::f32;
@@ -393,8 +393,135 @@ void FullyConnected::setPostOps(dnnl::primitive_attr &attr, const VectorDims &di
         return binaryShape;
     };
 
-    for (auto &node : fusedWith) {
+    for (int i = 0; i < fusedWith.size(); i++) {
+        auto& node = fusedWith[i];
+        printf("*******fc fused post ops %s\n", node->getOriginalLayers().c_str());
         if (auto* fakeQuantizeNode = dynamic_cast<FakeQuantize *>(node.get())) {
+            const Dim OC = dims[1];
+            if (i == 0) {
+                bool hasSubsequentSum = false;
+                bool hasSubsequentFQ = false;
+                for (int j = i + 1; j < fusedWith.size(); j++) {
+                    auto &nextNode = fusedWith[j];
+
+                    auto *nextEltwiseNode = dynamic_cast<Eltwise *>(nextNode.get());
+                    if (nextEltwiseNode && nextEltwiseNode->isSpecialConvolutionAddFusing()) {
+                        hasSubsequentSum = true;
+                    }
+
+                    auto *nextQuantizeNode = dynamic_cast<FakeQuantize *>(nextNode.get());
+                    if (nextQuantizeNode) {
+                        hasSubsequentFQ = true;
+                    }
+                }
+
+                if (fakeQuantizeNode->getAlgorithm() == Algorithm::FQCommon &&
+                    hasSubsequentSum &&
+                    hasSubsequentFQ) {
+                    std::vector<float> fqScale = fakeQuantizeNode->getFQScales();
+                    if (!fqScale.empty()) {
+                        size_t size = fqScale.size();
+                        if (size == 1) {
+                            fqScale.resize(OC);
+                            for (size_t k = 0; k < OC; k++)
+                                fqScale[k] = fqScale[0];
+                        }
+                        printf("Use FQ Scales for post Ops\n");
+                        attr.set_output_scales(1 << 1, fqScale);
+
+                        continue;
+                    }
+                }
+
+                if (node == fusedWith[fusedWith.size() - 1]) {
+                    auto &cl = fakeQuantizeNode->getCropLow();
+                    auto &ch = fakeQuantizeNode->getCropHigh();
+                    auto &isc = fakeQuantizeNode->getInputScale();
+                    auto &ish = fakeQuantizeNode->getInputShift();
+                    auto &osc = fakeQuantizeNode->getOutputScale();
+                    auto &osh = fakeQuantizeNode->getOutputShift();
+                    if (fakeQuantizeNode->getAlgorithm() == Algorithm::FQQuantization) {
+                        if (outputDataType == memory::data_type::u8 &&
+                            std::all_of(cl.cbegin(), cl.cend(), [](float val) { return val == 0.0f; }) &&
+                            std::all_of(ish.cbegin(), ish.cend(), [](float val) { return val == 0.0f; })) {
+                            std::vector<float> outScale = isc;
+                            if (!outScale.empty()) {
+                                size_t size = outScale.size();
+                                if (size == 1) {
+                                    outScale.resize(OC);
+                                    for (size_t k = 0; k < OC; k++)
+                                        outScale[k] = outScale[0];
+                                }
+
+                                attr.set_output_scales(1 << 1, outScale);
+                                printf("Mimic [0,255] zp and symmetric quantization\n");
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (outputDataType == memory::data_type::s8 &&
+                        std::all_of(ish.cbegin(), ish.cend(), [](float val) { return std::abs(val - 128.f) < 0.0001f; }) &&
+                        std::all_of(osc.cbegin(), osc.cend(), [](float val) { return val == 1.f; }) &&
+                        std::all_of(osh.cbegin(), osh.cend(), [](float val) { return std::abs(val + 128.f) < 0.0001f; })) {
+                        bool isCropAligned = true;
+                        for (int i = 0; i < std::max(cl.size(), isc.size()); i++) {
+                            if (std::abs(cl[cl.size() == 1 ? 0 : i] * isc[isc.size() == 1 ? 0 : i] + 128.f) > 0.0001f) {
+                                isCropAligned = false;
+                            }
+                        }
+
+                        for (int i = 0; i < std::max(ch.size(), isc.size()); i++) {
+                            if (std::abs(ch[ch.size() == 1 ? 0 : i] * isc[isc.size() == 1 ? 0 : i] - 127.f) > 0.0001f) {
+                                isCropAligned = false;
+                            }
+                        }
+
+                        if (isCropAligned) {
+                            std::vector<float> outScale = isc;
+                            if (!outScale.empty()) {
+                                size_t size = outScale.size();
+                                if (size == 1) {
+                                    outScale.resize(OC);
+                                    for (size_t k = 0; k < OC; k++)
+                                        outScale[k] = outScale[0];
+                                }
+
+                                attr.set_output_scales(1 << 1, outScale);
+                                printf("Mimic [-127,128] zp and symmetric quantization\n");
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (node == fusedWith[fusedWith.size() - 1] &&
+                outputDataType == memory::data_type::u8 &&
+                fakeQuantizeNode->getAlgorithm() == Algorithm::FQQuantization &&
+                ops.len() == 1 && ops.kind(0) == primitive::kind::sum
+                /*levels == 256*/) {
+                auto &cl = fakeQuantizeNode->getCropLow();
+                auto &isc = fakeQuantizeNode->getInputScale();
+                auto &ish = fakeQuantizeNode->getInputShift();
+
+                if (std::all_of(cl.cbegin(), cl.cend(), [](float val) { return val == 0.0f; }) &&
+                    std::all_of(isc.cbegin(), isc.cend(), [&](float val) { return val == isc[0]; }) &&
+                    std::all_of(ish.cbegin(), ish.cend(), [&](float val) { return val == 0; })) {
+                    std::vector<float> outScales;
+                    int mask = 1 << 1;
+                    attr.get_output_scales(mask, outScales);
+
+                    for (int j = 0; j < outScales.size(); j++) {
+                        outScales[j] *= isc[0];
+                    }
+                    attr.set_output_scales(mask, outScales);
+
+                    ops.get()->entry_[0].sum.scale = isc[0];
+
+                    continue;
+                }
+            }
             fakeQuantizeNode->appendBinPostOps(ops, getBinPostOpShape(), postOpsArgs);
             continue;
         }
@@ -420,6 +547,8 @@ bool FullyConnected::created() const {
 
 const std::vector<impl_desc_type>& FullyConnected::getPrimitivesPriority() {
     std::vector<impl_desc_type> priorities = {
+            impl_desc_type::brgemm_avx512_amx,
+            impl_desc_type::brgemm_avx512,
             impl_desc_type::unknown,
             impl_desc_type::gemm_blas,
             impl_desc_type::gemm_avx512,

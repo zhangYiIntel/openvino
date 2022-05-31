@@ -474,7 +474,7 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
             updatePrecision = false;
             supportedPrecisions = std::vector<PrecisionsRestriction>({});
         }
-
+        ngraph::plot_graph(nGraphFunc, "ngraph_before_lpt.svg");
         ngraph::pass::Manager lptManager;
         lptManager.register_pass<ngraph::pass::low_precision::LowPrecision>(
             supportedPrecisions,
@@ -494,7 +494,13 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
         lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::MultiplyToGroupConvolutionTransformation>([](const_node_ptr& node) -> bool {
             return true;//MultiplyToGroupConvolutionTransformation::isDynamicOrScalar(node);
         });
+        // lptManager.get_pass_config()->set_callback([&nGraphFunc](const_node_ptr& node) -> bool {
+        //     static int count = 0;
+        //     ngraph::plot_graph(nGraphFunc, std::to_string(count)+"_lpt_" + node->get_friendly_name() + ".svg");
+        //     return false;
+        // });
         lptManager.run_passes(nGraphFunc);
+        ngraph::plot_graph(nGraphFunc, "ngraph_after_lpt.svg");
     }
 
     ngraph::pass::Manager postLPTPassManager;
@@ -710,7 +716,7 @@ Engine::LoadExeNetworkImpl(const InferenceEngine::CNNNetwork &network, const std
     ApplyPerformanceHints(config, nGraphFunc);
 
     ConvertToCPUSpecificOpset(nGraphFunc);
-
+    ngraph::plot_graph(nGraphFunc, "ngraph_after_cputransformation.svg");
     // update the props after the perf mode translated to configs
     // TODO: Clarify the behavior of SetConfig method. Skip eng_config or not?
     Config conf = engConfig;

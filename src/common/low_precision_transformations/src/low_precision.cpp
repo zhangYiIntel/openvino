@@ -240,7 +240,7 @@ bool ngraph::pass::low_precision::LowPrecision::run_on_model(const std::shared_p
     common->add_matcher<ngraph::pass::low_precision::TransposeTransformation>(params);
     common->add_matcher<ngraph::pass::low_precision::UnsqueezeTransformation>(params);
     common->add_matcher<ngraph::pass::low_precision::VariadicSplitTransformation>(params);
-
+    common->set_print(true);
     std::shared_ptr<ngraph::pass::GraphRewrite> cleanup = manager.register_pass<ngraph::pass::GraphRewrite>();
     cleanup->add_matcher<ngraph::pass::low_precision::FoldConvertTransformation>(params);
     cleanup->add_matcher<ngraph::pass::low_precision::FuseConvertTransformation>(params);
