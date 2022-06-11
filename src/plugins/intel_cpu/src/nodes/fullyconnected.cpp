@@ -395,7 +395,7 @@ void FullyConnected::setPostOps(dnnl::primitive_attr &attr, const VectorDims &di
 
     for (int i = 0; i < fusedWith.size(); i++) {
         auto& node = fusedWith[i];
-        printf("*******fc fused post ops %s\n", node->getOriginalLayers().c_str());
+        // printf("*******fc fused post ops %s\n", node->getOriginalLayers().c_str());
         if (auto* fakeQuantizeNode = dynamic_cast<FakeQuantize *>(node.get())) {
             const Dim OC = dims[1];
             if (i == 0) {
@@ -426,7 +426,7 @@ void FullyConnected::setPostOps(dnnl::primitive_attr &attr, const VectorDims &di
                             for (size_t k = 0; k < OC; k++)
                                 fqScale[k] = fqScale[0];
                         }
-                        printf("Use FQ Scales for post Ops\n");
+                        // printf("Use FQ Scales for post Ops\n");
                         attr.set_output_scales(1 << 1, fqScale);
 
                         continue;
@@ -454,7 +454,7 @@ void FullyConnected::setPostOps(dnnl::primitive_attr &attr, const VectorDims &di
                                 }
 
                                 attr.set_output_scales(1 << 1, outScale);
-                                printf("Mimic [0,255] zp and symmetric quantization\n");
+                                // printf("Mimic [0,255] zp and symmetric quantization\n");
                                 continue;
                             }
                         }
@@ -488,7 +488,7 @@ void FullyConnected::setPostOps(dnnl::primitive_attr &attr, const VectorDims &di
                                 }
 
                                 attr.set_output_scales(1 << 1, outScale);
-                                printf("Mimic [-127,128] zp and symmetric quantization\n");
+                                // printf("Mimic [-127,128] zp and symmetric quantization\n");
                                 continue;
                             }
                         }

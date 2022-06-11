@@ -32,6 +32,7 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     manager.register_pass<AlignMatMulInputRanks>();
     manager.register_pass<ConvertTileToSeqTiles>();
     manager.register_pass<FullyConnectedBiasFusion>();
+    // manager.register_pass<ConvertFQToScale>();
     manager.register_pass<ConvertToPowerStatic>();
     manager.register_pass<ConvertToLeakyRelu>();
     manager.register_pass<ConvertToSwishCPU>();
@@ -43,8 +44,9 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     manager.register_pass<ngraph::pass::ReshapeSequenceFusion>();
     manager.register_pass<ngraph::pass::ConstantFolding>();
     manager.register_pass<ngraph::pass::ConvertPrecision>(precisions_array {{ ngraph::element::i64, ngraph::element::i32 }});
-    ngraph::plot_graph(nGraphFunc, "Before_ConvertToCPUSpecificOpset.svg");
+    // ngraph::plot_graph(nGraphFunc, "Before_ConvertToCPUSpecificOpset.svg");
     manager.run_passes(nGraphFunc);
+    // ngraph::plot_graph(nGraphFunc, "After_ConvertToCPUSpecificOpset.svg");
 }
 
 }   // namespace intel_cpu

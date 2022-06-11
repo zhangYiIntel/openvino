@@ -81,6 +81,7 @@
 #include <transformations/rt_info/fused_names_attribute.hpp>
 #include <transformations/op_conversions/fq_decomposition.hpp>
 #include <transformations/utils/utils.hpp>
+#include <transformations/serialize.hpp>
 #include <snippets/pass/collapse_subgraph.hpp>
 #include "ngraph_transformations/snippets_mark_skipped.hpp"
 
@@ -105,6 +106,7 @@
 #include <low_precision/low_precision.hpp>
 #include <low_precision/multiply_to_group_convolution.hpp>
 #include <low_precision/network_helper.hpp>
+#include <low_precision/move_fake_quantize.hpp>
 #include "openvino/runtime/core.hpp"
 #include "openvino/util/common_util.hpp"
 
@@ -118,6 +120,7 @@
 #include "ngraph_transformations/move_eltwise_up_data_movement.hpp"
 #include "transformations/smart_reshape/smart_reshape.hpp"
 #include "ngraph_transformations/swap_convert_transpose.hpp"
+#include "low_precision/fake_quantize_decomposition.hpp"
 
 #if !defined(__arm__) && !defined(_M_ARM) && !defined(__aarch64__) && !defined(_M_ARM64)
 #ifndef __GNUC_PREREQ
@@ -474,7 +477,8 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
             updatePrecision = false;
             supportedPrecisions = std::vector<PrecisionsRestriction>({});
         }
-        ngraph::plot_graph(nGraphFunc, "ngraph_before_lpt.svg");
+        if (getenv("YI_DEBUG"))
+            ngraph::plot_graph(nGraphFunc, "ngraph_before_lpt.svg");
         ngraph::pass::Manager lptManager;
         lptManager.register_pass<ngraph::pass::low_precision::LowPrecision>(
             supportedPrecisions,
@@ -491,6 +495,26 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
             return LayerTransformation::isAsymmetricQuantization(node, defaultPrecisions) ||
                 WeightableLayerTransformation::isAsymmetricOnWeights(node, defaultPrecisions);
         });
+        lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::MoveFakeQuantize>(
+            [&defaultPrecisions](const_node_ptr& node) -> bool {
+            bool result = !LayerTransformation::isAsymmetricQuantization(node, defaultPrecisions);
+            auto consumers = node->get_users(false);
+            auto consumer = consumers[0];
+            result = result && ov::is_type<ov::op::v0::MatMul>(consumer);
+            printf("process node %s isSymm %d consumer %ld isConcat %d\n", node->get_friendly_name().c_str(), result,
+                consumers.size(), ov::is_type<ov::op::v0::Concat>(consumer));
+            return result;
+        });
+        // lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::FakeQuantizeDecompositionTransformation>(
+        //     [&defaultPrecisions](const_node_ptr& node) -> bool {
+        //     bool result = !LayerTransformation::isAsymmetricQuantization(node, defaultPrecisions);
+        //     auto consumers = node->get_users(false);
+        //     auto consumer = consumers[0];
+        //     result = result && ov::is_type<ov::op::v0::Concat>(consumer);
+        //     printf("process node %s isSymm %d consumer %ld isConcat %d\n", node->get_friendly_name().c_str(), result,
+        //         consumers.size(), ov::is_type<ov::op::v0::Concat>(consumer));
+        //     return result;
+        // });
         lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::MultiplyToGroupConvolutionTransformation>([](const_node_ptr& node) -> bool {
             return true;//MultiplyToGroupConvolutionTransformation::isDynamicOrScalar(node);
         });
@@ -500,7 +524,8 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
         //     return false;
         // });
         lptManager.run_passes(nGraphFunc);
-        ngraph::plot_graph(nGraphFunc, "ngraph_after_lpt.svg");
+        if (getenv("YI_DEBUG"))
+            ngraph::plot_graph(nGraphFunc, "ngraph_after_lpt.svg");
     }
 
     ngraph::pass::Manager postLPTPassManager;
@@ -716,7 +741,7 @@ Engine::LoadExeNetworkImpl(const InferenceEngine::CNNNetwork &network, const std
     ApplyPerformanceHints(config, nGraphFunc);
 
     ConvertToCPUSpecificOpset(nGraphFunc);
-    ngraph::plot_graph(nGraphFunc, "ngraph_after_cputransformation.svg");
+    // ngraph::plot_graph(nGraphFunc, "ngraph_after_cputransformation.svg");
     // update the props after the perf mode translated to configs
     // TODO: Clarify the behavior of SetConfig method. Skip eng_config or not?
     Config conf = engConfig;

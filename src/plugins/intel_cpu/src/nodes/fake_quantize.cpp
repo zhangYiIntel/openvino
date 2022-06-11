@@ -1169,6 +1169,7 @@ FakeQuantize::FakeQuantize(const std::shared_ptr<ngraph::Node>& op, const dnnl::
 
                 isFakeQuantization = isFakeQuantization && il == ol && ih == oh;
                 isFakeQuantizationWithScale = isFakeQuantizationWithScale && ol != 0 && oh != 0 && (il / ol - ih / oh < 0.1f);
+                // printf("FQ  %s ol %f oh %f il %f ih %f diff %f\n", getName().c_str(), ol, oh, il, ih, (il / ol - ih / oh));
             }
 
             if (isFakeQuantizationWithScale) {

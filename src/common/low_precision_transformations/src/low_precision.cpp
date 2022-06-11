@@ -24,6 +24,7 @@
 #include <low_precision/markup_quantization_granularity.hpp>
 #include "low_precision/propagate_precisions.hpp"
 #include "low_precision/align_quantization_parameters.hpp"
+#include "low_precision/convert_fq_to_scale.hpp"
 
 #include "transformations/common_optimizations/lin_op_sequence_fusion.hpp"
 #include "low_precision/fold_convert.hpp"
@@ -240,19 +241,22 @@ bool ngraph::pass::low_precision::LowPrecision::run_on_model(const std::shared_p
     common->add_matcher<ngraph::pass::low_precision::TransposeTransformation>(params);
     common->add_matcher<ngraph::pass::low_precision::UnsqueezeTransformation>(params);
     common->add_matcher<ngraph::pass::low_precision::VariadicSplitTransformation>(params);
-    common->set_print(true);
+    if (getenv("YI_DEBUG"))
+        common->set_print(true);
     std::shared_ptr<ngraph::pass::GraphRewrite> cleanup = manager.register_pass<ngraph::pass::GraphRewrite>();
     cleanup->add_matcher<ngraph::pass::low_precision::FoldConvertTransformation>(params);
     cleanup->add_matcher<ngraph::pass::low_precision::FuseConvertTransformation>(params);
     cleanup->add_matcher<ngraph::pass::low_precision::FuseSubtractToFakeQuantizeTransformation>(params);
     cleanup->add_matcher<ngraph::pass::low_precision::FuseMultiplyToFakeQuantizeTransformation>(params);
+    // cleanup->add_matcher<ngraph::pass::low_precision::ConvertFQToScale>(params);
     // WA: precision restrictions for groupConv must be propagated to MultiplyToGroupConvolution transformation
     cleanup->add_matcher<ngraph::pass::low_precision::MultiplyToGroupConvolutionTransformation>(
         params,
         PrecisionsRestriction::getPrecisionsByOperationType<opset1::GroupConvolution>(precisionRestrictions));
     manager.register_pass<ngraph::pass::low_precision::FoldFakeQuantizeTransformation>(params);
     manager.register_pass<ngraph::pass::ConstantFolding>();
-
+    if (getenv("ENABLE_FQ_SACLES"))
+        manager.register_pass<ngraph::pass::low_precision::ConvertFQToScale>();
     manager.run_passes(f);
     return false;
 }

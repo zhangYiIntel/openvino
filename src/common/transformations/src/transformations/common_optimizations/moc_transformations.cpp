@@ -189,7 +189,7 @@ bool ngraph::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph
     fq_fusions->add_matcher<ngraph::pass::FakeQuantizeMulFusion>();
     fq_fusions->add_matcher<ngraph::pass::FakeQuantizeReshapeFusion>();
     fq_fusions->add_matcher<ngraph::pass::PullTransposeThroughFQUp>();
-    fq_fusions->add_matcher<ngraph::pass::ReluFakeQuantizeFusion>();
+    // fq_fusions->add_matcher<ngraph::pass::ReluFakeQuantizeFusion>();
     fq_fusions->add_matcher<ngraph::pass::AddFakeQuantizeFusion>();
     fq_fusions->add_matcher<ngraph::pass::MulFakeQuantizeFusion>();
     fq_fusions->set_name("ngraph::pass::FakeQuantizeFusions");
