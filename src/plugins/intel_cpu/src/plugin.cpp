@@ -500,7 +500,7 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
             bool result = !LayerTransformation::isAsymmetricQuantization(node, defaultPrecisions);
             auto consumers = node->get_users(false);
             auto consumer = consumers[0];
-            result = result && ov::is_type<ov::op::v0::MatMul>(consumer);
+            result = result && ov::is_type<ov::op::v0::MatMul>(consumer) && ov::is_type<ov::op::v0::Concat>(node->get_input_node_ptr(0)));
             printf("process node %s isSymm %d consumer %ld isConcat %d\n", node->get_friendly_name().c_str(), result,
                 consumers.size(), ov::is_type<ov::op::v0::Concat>(consumer));
             return result;
