@@ -201,8 +201,8 @@ bool ngraph::pass::low_precision::LowPrecision::run_on_model(const std::shared_p
     prerequisites->add_matcher<PullReshapeThroughDequantization>(supportedTypes);
     prerequisites->add_matcher<PullTransposeThroughDequantization>(supportedTypes);
     prerequisites->add_matcher<ngraph::pass::LinOpSequenceFusion>();
-    prerequisites->add_matcher<ngraph::pass::low_precision::MoveFakeQuantize>();
-
+    if (getenv("YI_MOVE_FQ"))
+        prerequisites->add_matcher<ngraph::pass::low_precision::MoveFakeQuantize>();
     manager.register_pass<TypeRelaxedReplacer>();
 
     AttributeParameters attributeParams(params.deqPrecision, params.defaultPrecisions);

@@ -4,6 +4,7 @@
 
 #include "extension.h"
 #include "ngraph_transformations/op/fully_connected.hpp"
+#include "ngraph_transformations/op/interaction.hpp"
 #include "ngraph_transformations/op/leaky_relu.hpp"
 #include "ngraph_transformations/op/power_static.hpp"
 #include "ngraph_transformations/op/swish_cpu.hpp"
