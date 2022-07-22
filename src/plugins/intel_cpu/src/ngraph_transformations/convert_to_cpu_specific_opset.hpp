@@ -19,6 +19,8 @@
 #include "transformations/utils/utils.hpp"
 #include "rnn_sequences_optimization.hpp"
 #include "transformations/common_optimizations/reshape_sequence_fusion.hpp"
+#include "convert_to_interaction.hpp"
+#include "ngraph/graph_util.hpp"
 
 #include "itt.hpp"
 
@@ -28,6 +30,7 @@ namespace intel_cpu {
 inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphFunc) {
     RUN_ON_FUNCTION_SCOPE(ConvertToCPUSpecificOpset);
     ngraph::pass::Manager manager;
+    manager.register_pass<ConvertToInteraction>();
     manager.register_pass<ConvertMatMulToFC>();
     manager.register_pass<AlignMatMulInputRanks>();
     manager.register_pass<ConvertTileToSeqTiles>();
@@ -45,6 +48,9 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     manager.register_pass<ngraph::pass::ConvertPrecision>(precisions_array {{ ngraph::element::i64, ngraph::element::i32 }});
 
     manager.run_passes(nGraphFunc);
+    // std::cout << "going to plot fusing" << std::endl;
+    // ngraph::plot_graph(nGraphFunc, "interaction.svg");
+    // std::cout << "end to plot fusing" << std::endl;
 }
 
 }   // namespace intel_cpu

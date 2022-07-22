@@ -5,11 +5,13 @@
 #include "interaction.hpp"
 #include "../itt.hpp"
 
-ov::intel_cpu::InteractionNode::InteractionNode(const OutputVector& args) {
+ov::intel_cpu::InteractionNode::InteractionNode(const OutputVector& args) :
+    Op(args) {
     validate_and_infer_types();
 }
 
-ov::intel_cpu::InteractionNode::InteractionNode(const NodeVector& args) {
+ov::intel_cpu::InteractionNode::InteractionNode(const NodeVector& args) :
+    InteractionNode(as_output_vector(args)) {
     validate_and_infer_types();
 }
 
@@ -22,7 +24,17 @@ std::shared_ptr<ngraph::Node> ov::intel_cpu::InteractionNode::clone_with_new_inp
 
 void ov::intel_cpu::InteractionNode::validate_and_infer_types() {
     INTERNAL_OP_SCOPE(InteractionNode_validate_and_infer_types);
-    //TODO
+    const auto input_size = get_input_size();
+    const auto dense_pshape = get_input_partial_shape(0);
+    NODE_VALIDATION_CHECK(this,
+        dense_pshape.rank().is_static() &&
+        dense_pshape.rank() == 2 &&
+        dense_pshape[1].is_static(),
+        "feature shape must be static");
+    const auto batch_size = dense_pshape[0];
+    const auto feature_size = dense_pshape[1];
+    int64_t output_feature_size = input_size * (input_size - 1) / 2 + feature_size.get_length();
+    set_output_type(0, element::f32, PartialShape{batch_size, output_feature_size});
     return;
 }
 
