@@ -40,8 +40,10 @@ private:
     VectorDims inDims;
     VectorDims outDims;
 
-    bool withBiases = false;
-
+    int64_t batchSize = 0;
+    int64_t featureSize = 0;
+    int64_t inputSizes = 0;
+    int64_t outputFeaturesLen = 0;
     std::string errorPrefix;
     dnnl::memory::data_type outputDataType;
 };
