@@ -14,6 +14,7 @@
 #include "utils/general_utils.h"
 #include <onednn/dnnl.h>
 #include <dnnl_extension_utils.h>
+#include <immintrin.h>
 
 namespace ov {
 namespace intel_cpu {
@@ -55,11 +56,32 @@ void Interaction::initSupportedPrimitiveDescriptors() {
     addSupportedPrimDesc(inPortConfigs, outPortConfigs, impl_desc_type::ref_any, true);
 }
 
-template <typename dst_type, typename src_type>
-inline void mov_ker(dst_type* inout, src_type* in, int len) {
-  for (int i = 0; i < len; i++) {
-    *(inout + i) = *(in + i);
+namespace ref {
+    template <typename dst_type, typename src_type>
+    inline void mov_ker(dst_type* inout, src_type* in, int len) {
+    for (int i = 0; i < len; i++) {
+        *(inout + i) = *(in + i);
+    }
+    }
+}
+
+static inline void move_ker(float* out, const float* in, int64_t len) {
+  int64_t i = 0;
+#if 1
+#pragma unroll(4)
+  for (i = 0; i < len - 15; i += 16) {
+    auto in0 = _mm512_loadu_ps(in + i);
+    _mm512_storeu_ps(out + i, in0);
   }
+
+  if (i < len) {
+    auto mask = ((1 << (len - i)) - 1);
+    auto in0 = _mm512_maskz_loadu_ps(mask, in + i);
+    _mm512_mask_storeu_ps(out + i, mask, in0);
+  }
+#else
+  ref::mov_ker(out, in, len);
+#endif
 }
 
 template <typename T>
@@ -79,19 +101,19 @@ void Interaction::execute(dnnl::stream strm) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
     using namespace dnnl;
-    std::vector<int64_t> lhsShape({inputSizes, featureSize});
-    std::vector<int64_t> lhsStride({featureSize, 1});
-    std::vector<int64_t> rhsShape({featureSize, inputSizes});
-    std::vector<int64_t> rhsStride({1, featureSize});
-    std::vector<int64_t> resShape({inputSizes, inputSizes});
-    std::vector<int64_t> resStride({inputSizes, 1});
-    auto src_md = memory::desc(lhsShape, dt::f32, lhsStride);
-    auto weights_md = memory::desc(rhsShape, dt::f32, rhsStride);
-    auto dst_md = memory::desc(resShape, dt::f32, resStride);
-    auto matmul_d = matmul::desc(src_md, weights_md, dst_md);
-    primitive_attr matmul_attr;
-    auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, strm.get_engine());
-    auto matmul_prim = matmul(matmul_pd);
+    // std::vector<int64_t> lhsShape({inputSizes, featureSize});
+    // std::vector<int64_t> lhsStride({featureSize, 1});
+    // std::vector<int64_t> rhsShape({featureSize, inputSizes});
+    // std::vector<int64_t> rhsStride({1, featureSize});
+    // std::vector<int64_t> resShape({inputSizes, inputSizes});
+    // std::vector<int64_t> resStride({inputSizes, 1});
+    // auto src_md = memory::desc(lhsShape, dt::f32, lhsStride);
+    // auto weights_md = memory::desc(rhsShape, dt::f32, rhsStride);
+    // auto dst_md = memory::desc(resShape, dt::f32, resStride);
+    // auto matmul_d = matmul::desc(src_md, weights_md, dst_md);
+    // primitive_attr matmul_attr;
+    // auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, strm.get_engine());
+    // auto matmul_prim = matmul(matmul_pd);
     auto outFeaturesPtr = reinterpret_cast<float*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
     for (int64_t start = 0; start < batchSize; start++) {
         // float catBuf[inputSizes * featureSize] __attribute__((aligned(64)));
@@ -101,7 +123,7 @@ void Interaction::execute(dnnl::stream strm) {
             auto inputPtr = reinterpret_cast<const float*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
             inputPtrs[n] = &inputPtr[start * featureSize];
         }
-        mov_ker(&outFeaturesPtr[start * outputFeaturesLen], inputPtrs[0], featureSize);
+        move_ker(&outFeaturesPtr[start * outputFeaturesLen], inputPtrs[0], featureSize);
     }
     return;
 }
