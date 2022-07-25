@@ -44,12 +44,15 @@ private:
     int64_t featureSize = 0;
     int64_t inputSizes = 0;
     int64_t outputFeaturesLen = 0;
+    int64_t interactFeatureSize = 0;
     std::string errorPrefix;
     dnnl::memory::data_type outputDataType;
     InferenceEngine::Blob::Ptr inputPtr;
     InferenceEngine::Blob::Ptr outputPtr;
     MemoryPtr inputMemPtr;
     MemoryPtr outputMemPtr;
+    std::vector<float> flatBuffer;
+    std::vector<uint32_t> featureSizes;
 };
 
 }   // namespace node

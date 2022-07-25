@@ -101,7 +101,7 @@ static inline void cat(
 template <typename T>
 static inline void cat(
     T* out,
-    const std::vector<T*>& in,
+    const std::vector<const T*>& in,
     const std::vector<uint32_t>& feature_sizes,
     int64_t bs) {
   size_t offset = 0;
@@ -111,26 +111,42 @@ static inline void cat(
   }
 }
 
+template <typename T>
+static inline void flat_triangle(const T* in, T* out, size_t size) {
+  size_t offset = 0;
+  for (int i = 1; i < size; i++) {
+    move_ker(&out[offset], &in[i * size], i);
+    offset += i;
+  }
+}
+
 void Interaction::execute(dnnl::stream strm) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
     using namespace dnnl;
 
     auto outFeaturesPtr = reinterpret_cast<float*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
+    std::vector<const float*> inputPtrs(inputSizes);
+    for (uint32_t n = 0; n < inputSizes; n++) {
+        auto inputPtr = reinterpret_cast<const float*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
+        inputPtrs[n] = inputPtr;
+    }
     for (int64_t start = 0; start < batchSize; start++) {
-        // float catBuf[inputSizes * featureSize] __attribute__((aligned(64)));
-        // float mmBuf[inputSizes * inputSizes] __attribute__((aligned(64)));
-        std::vector<const float*> inputPtrs(inputSizes);
-        for (uint32_t n = 0; n < inputSizes; n++) {
-            auto inputPtr = reinterpret_cast<const float*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
-            inputPtrs[n] = &inputPtr[start * featureSize];
-        }
+        cat<float>(inputPtr->buffer().as<float*>(), inputPtrs, featureSizes, start);
         std::unordered_map<int, memory> mem_ags {
             {DNNL_ARG_SRC, inputMemPtr->GetPrimitive()},
             {DNNL_ARG_WEIGHTS, inputMemPtr->GetPrimitive()},
             {DNNL_ARG_DST, outputMemPtr->GetPrimitive()}};
         (*prim).execute(strm, mem_ags);
-        move_ker(&outFeaturesPtr[start * outputFeaturesLen], inputPtrs[0], featureSize);
+        flat_triangle<float>(outputPtr->buffer().as<float*>(), flatBuffer.data(), inputSizes);
+        //in1 dense feature
+        //in2 flatted interaction features
+        cat<float>(
+          &inputPtrs[0][start * featureSize],
+          flatBuffer.data(),
+          &outFeaturesPtr[start * outputFeaturesLen],
+          featureSize,
+          interactFeatureSize);
     }
     return;
 }
@@ -147,7 +163,8 @@ void Interaction::prepareParams() {
     batchSize = denseFeatureDims[0];
     featureSize = denseFeatureDims[1];
     inputSizes = inputShapes.size();
-    outputFeaturesLen = inputSizes * (inputSizes - 1) / 2 + featureSize;
+    interactFeatureSize = inputSizes * (inputSizes - 1) / 2;
+    outputFeaturesLen = interactFeatureSize + featureSize;
     std::vector<int64_t> lhsShape({inputSizes, featureSize});
     std::vector<int64_t> lhsStride({featureSize, 1});
     std::vector<int64_t> rhsShape({featureSize, inputSizes});
@@ -162,6 +179,8 @@ void Interaction::prepareParams() {
     auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, getEngine());
     std::cout << "!!!!initialize prim" << std::endl;
     prim.reset(new matmul(matmul_pd));
+    flatBuffer.resize(interactFeatureSize, 0.0);
+    featureSizes.resize(inputSizes, featureSize);
     InferenceEngine::TensorDesc inputDesc(
         InferenceEngine::Precision::FP32,
         denseFeatureDims,
