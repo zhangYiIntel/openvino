@@ -46,6 +46,10 @@ private:
     int64_t outputFeaturesLen = 0;
     std::string errorPrefix;
     dnnl::memory::data_type outputDataType;
+    InferenceEngine::Blob::Ptr inputPtr;
+    InferenceEngine::Blob::Ptr outputPtr;
+    MemoryPtr inputMemPtr;
+    MemoryPtr outputMemPtr;
 };
 
 }   // namespace node

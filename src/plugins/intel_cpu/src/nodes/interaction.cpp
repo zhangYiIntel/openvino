@@ -15,6 +15,9 @@
 #include <onednn/dnnl.h>
 #include <dnnl_extension_utils.h>
 #include <immintrin.h>
+#include "nodes/common/cpu_convert.h"
+#include "memory_desc/cpu_memory_desc_utils.h"
+#include "memory_desc/dnnl_blocked_memory_desc.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -86,13 +89,24 @@ static inline void move_ker(float* out, const float* in, int64_t len) {
 
 template <typename T>
 static inline void cat(
+    const T* in1,
+    const T* in2,
     T* out,
-    const std::vector<T*>& in_ptr,
+    size_t in1_size,
+    size_t in2_size) {
+  move_ker(out, in1, in1_size);
+  move_ker(&out[in1_size], in2, in2_size);
+}
+
+template <typename T>
+static inline void cat(
+    T* out,
+    const std::vector<T*>& in,
     const std::vector<uint32_t>& feature_sizes,
-    int feature_num) {
+    int64_t bs) {
   size_t offset = 0;
-  for (int j = 0; j < feature_num; j++) {
-    move_ker(&out[offset], in_ptr[j], feature_sizes[j]);
+  for (int j = 0; j < feature_sizes.size(); j++) {
+    move_ker(&out[offset], &in[j][bs * feature_sizes[j]], feature_sizes[j]);
     offset += feature_sizes[j];
   }
 }
@@ -101,19 +115,7 @@ void Interaction::execute(dnnl::stream strm) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
     using namespace dnnl;
-    // std::vector<int64_t> lhsShape({inputSizes, featureSize});
-    // std::vector<int64_t> lhsStride({featureSize, 1});
-    // std::vector<int64_t> rhsShape({featureSize, inputSizes});
-    // std::vector<int64_t> rhsStride({1, featureSize});
-    // std::vector<int64_t> resShape({inputSizes, inputSizes});
-    // std::vector<int64_t> resStride({inputSizes, 1});
-    // auto src_md = memory::desc(lhsShape, dt::f32, lhsStride);
-    // auto weights_md = memory::desc(rhsShape, dt::f32, rhsStride);
-    // auto dst_md = memory::desc(resShape, dt::f32, resStride);
-    // auto matmul_d = matmul::desc(src_md, weights_md, dst_md);
-    // primitive_attr matmul_attr;
-    // auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, strm.get_engine());
-    // auto matmul_prim = matmul(matmul_pd);
+
     auto outFeaturesPtr = reinterpret_cast<float*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
     for (int64_t start = 0; start < batchSize; start++) {
         // float catBuf[inputSizes * featureSize] __attribute__((aligned(64)));
@@ -123,6 +125,11 @@ void Interaction::execute(dnnl::stream strm) {
             auto inputPtr = reinterpret_cast<const float*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
             inputPtrs[n] = &inputPtr[start * featureSize];
         }
+        std::unordered_map<int, memory> mem_ags {
+            {DNNL_ARG_SRC, inputMemPtr->GetPrimitive()},
+            {DNNL_ARG_WEIGHTS, inputMemPtr->GetPrimitive()},
+            {DNNL_ARG_DST, outputMemPtr->GetPrimitive()}};
+        (*prim).execute(strm, mem_ags);
         move_ker(&outFeaturesPtr[start * outputFeaturesLen], inputPtrs[0], featureSize);
     }
     return;
@@ -133,11 +140,46 @@ bool Interaction::created() const {
 }
 
 void Interaction::prepareParams() {
+    using tag = dnnl::memory::format_tag;
+    using dt = dnnl::memory::data_type;
+    using namespace dnnl;
     const auto& denseFeatureDims = getParentEdgeAt(0)->getMemory().getStaticDims();
     batchSize = denseFeatureDims[0];
     featureSize = denseFeatureDims[1];
     inputSizes = inputShapes.size();
     outputFeaturesLen = inputSizes * (inputSizes - 1) / 2 + featureSize;
+    std::vector<int64_t> lhsShape({inputSizes, featureSize});
+    std::vector<int64_t> lhsStride({featureSize, 1});
+    std::vector<int64_t> rhsShape({featureSize, inputSizes});
+    std::vector<int64_t> rhsStride({1, featureSize});
+    std::vector<int64_t> resShape({inputSizes, inputSizes});
+    std::vector<int64_t> resStride({inputSizes, 1});
+    auto src_md = memory::desc(lhsShape, dt::f32, lhsStride);
+    auto weights_md = memory::desc(rhsShape, dt::f32, rhsStride);
+    auto dst_md = memory::desc(resShape, dt::f32, resStride);
+    auto matmul_d = matmul::desc(src_md, weights_md, dst_md);
+    primitive_attr matmul_attr;
+    auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, getEngine());
+    std::cout << "!!!!initialize prim" << std::endl;
+    prim.reset(new matmul(matmul_pd));
+    InferenceEngine::TensorDesc inputDesc(
+        InferenceEngine::Precision::FP32,
+        denseFeatureDims,
+        InferenceEngine::Layout::HW);
+    InferenceEngine::TensorDesc outputDesc(
+        InferenceEngine::Precision::FP32,
+        {inputShapes.size(), inputShapes.size()},
+        InferenceEngine::Layout::HW);
+    inputPtr = InferenceEngine::make_shared_blob<float>(inputDesc);
+    inputPtr->allocate();
+    outputPtr = InferenceEngine::make_shared_blob<float>(outputDesc);
+    outputPtr->allocate();
+    inputMemPtr = std::make_shared<Memory>(getEngine());
+    outputMemPtr = std::make_shared<Memory>(getEngine());
+    auto inDesc = MemoryDescUtils::convertToDnnlBlockedMemoryDesc(inputPtr->getTensorDesc());
+    auto outDesc = MemoryDescUtils::convertToDnnlBlockedMemoryDesc(outputPtr->getTensorDesc());
+    inputMemPtr->Create(inDesc, inputPtr->buffer());
+    outputMemPtr->Create(outDesc, outputPtr->buffer());
     return;
 }
 
