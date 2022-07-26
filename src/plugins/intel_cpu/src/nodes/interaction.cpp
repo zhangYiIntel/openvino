@@ -18,6 +18,8 @@
 #include "nodes/common/cpu_convert.h"
 #include "memory_desc/cpu_memory_desc_utils.h"
 #include "memory_desc/dnnl_blocked_memory_desc.h"
+#include "common/bfloat16.hpp"
+#include "common/cpu_memcpy.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -36,12 +38,15 @@ Interaction::Interaction(const std::shared_ptr<ngraph::Node>& op, const dnnl::en
 void Interaction::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
+    dataPrecision = getOriginalInputPrecisionAtPort(0);
+    if (!one_of(dataPrecision, InferenceEngine::Precision::BF16, InferenceEngine::Precision::FP32))
+        IE_THROW() << errorPrefix << " has unsupported 'data' input precision: " << dataPrecision.name();
     // initialize input ports
     std::vector<PortConfigurator> inPortConfigs;
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
         inPortConfigs.emplace_back(
             LayoutType::ncsp,
-            InferenceEngine::Precision::FP32,
+            dataPrecision,
             getInputShapeAtPort(i),
             false, -1);
     }
@@ -49,7 +54,7 @@ void Interaction::initSupportedPrimitiveDescriptors() {
     std::vector<PortConfigurator> outPortConfigs = {
         PortConfigurator {
             LayoutType::ncsp,
-            InferenceEngine::Precision::FP32,
+            dataPrecision,
             getOutputShapeAtPort(0),
             false,
             -1
@@ -68,23 +73,27 @@ namespace ref {
     }
 }
 
-static inline void move_ker(float* out, const float* in, int64_t len) {
-  int64_t i = 0;
-#if 1
-#pragma unroll(4)
-  for (i = 0; i < len - 15; i += 16) {
-    auto in0 = _mm512_loadu_ps(in + i);
-    _mm512_storeu_ps(out + i, in0);
-  }
+// static inline void move_ker(float* out, const float* in, int64_t len) {
+//   int64_t i = 0;
+// #if 1
+// #pragma unroll(4)
+//   for (i = 0; i < len - 15; i += 16) {
+//     auto in0 = _mm512_loadu_ps(in + i);
+//     _mm512_storeu_ps(out + i, in0);
+//   }
 
-  if (i < len) {
-    auto mask = ((1 << (len - i)) - 1);
-    auto in0 = _mm512_maskz_loadu_ps(mask, in + i);
-    _mm512_mask_storeu_ps(out + i, mask, in0);
-  }
-#else
-  ref::mov_ker(out, in, len);
-#endif
+//   if (i < len) {
+//     auto mask = ((1 << (len - i)) - 1);
+//     auto in0 = _mm512_maskz_loadu_ps(mask, in + i);
+//     _mm512_mask_storeu_ps(out + i, mask, in0);
+//   }
+// #else
+//   ref::mov_ker(out, in, len);
+// #endif
+// }
+template <typename T>
+static inline void move_ker(T* out, const T* in, int64_t len) {
+    cpu_memcpy(out, in, sizeof(T) * len);
 }
 
 template <typename T>
@@ -120,34 +129,51 @@ static inline void flat_triangle(const T* in, T* out, size_t size) {
   }
 }
 
-void Interaction::execute(dnnl::stream strm) {
+template <typename Prec>
+void Interaction::run(dnnl::stream strm) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
     using namespace dnnl;
 
-    auto outFeaturesPtr = reinterpret_cast<float*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
-    std::vector<const float*> inputPtrs(inputSizes);
+    auto outFeaturesPtr = reinterpret_cast<Prec*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
+    std::vector<const Prec*> inputPtrs(inputSizes);
+    std::vector<Prec> flatBuffer(interactFeatureSize, 0.0);
     for (uint32_t n = 0; n < inputSizes; n++) {
-        auto inputPtr = reinterpret_cast<const float*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
+        auto inputPtr = reinterpret_cast<const Prec*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
         inputPtrs[n] = inputPtr;
     }
     for (int64_t start = 0; start < batchSize; start++) {
-        cat<float>(inputPtr->buffer().as<float*>(), inputPtrs, featureSizes, start);
+        cat<Prec>(inputPtr->buffer().as<Prec*>(), inputPtrs, featureSizes, start);
         std::unordered_map<int, memory> mem_ags {
             {DNNL_ARG_SRC, inputMemPtr->GetPrimitive()},
             {DNNL_ARG_WEIGHTS, inputMemPtr->GetPrimitive()},
             {DNNL_ARG_DST, outputMemPtr->GetPrimitive()}};
         (*prim).execute(strm, mem_ags);
-        flat_triangle<float>(outputPtr->buffer().as<float*>(), flatBuffer.data(), inputSizes);
+        flat_triangle<Prec>(outputPtr->buffer().as<Prec*>(),
+            flatPtr->buffer().as<Prec*>(), inputSizes);
         //in1 dense feature
         //in2 flatted interaction features
-        cat<float>(
+        cat<Prec>(
           &inputPtrs[0][start * featureSize],
-          flatBuffer.data(),
+          flatPtr->buffer().as<Prec*>(),
           &outFeaturesPtr[start * outputFeaturesLen],
           featureSize,
           interactFeatureSize);
     }
+}
+
+
+
+void Interaction::execute(dnnl::stream strm) {
+    if (dataPrecision == InferenceEngine::Precision::FP32) {
+        run<float>(strm);
+    } else if (dataPrecision == InferenceEngine::Precision::BF16) {
+        run<int16_t>(strm);
+    }
+    // InteractionCtx ctx = {this, strm};
+    // OV_SWITCH(intel_cpu, InteractionExecute, ctx, dataPrecision,
+    //           OV_CASE(InferenceEngine::Precision::BF16, int16_t),
+    //           OV_CASE(InferenceEngine::Precision::FP32, float))
     return;
 }
 
@@ -171,34 +197,51 @@ void Interaction::prepareParams() {
     std::vector<int64_t> rhsStride({1, featureSize});
     std::vector<int64_t> resShape({inputSizes, inputSizes});
     std::vector<int64_t> resStride({inputSizes, 1});
-    auto src_md = memory::desc(lhsShape, dt::f32, lhsStride);
-    auto weights_md = memory::desc(rhsShape, dt::f32, rhsStride);
-    auto dst_md = memory::desc(resShape, dt::f32, resStride);
+    auto dataType = DnnlExtensionUtils::IEPrecisionToDataType(dataPrecision);
+    auto src_md = memory::desc(lhsShape, dataType, lhsStride);
+    auto weights_md = memory::desc(rhsShape, dataType, rhsStride);
+    auto dst_md = memory::desc(resShape, dataType, resStride);
     auto matmul_d = matmul::desc(src_md, weights_md, dst_md);
     primitive_attr matmul_attr;
     auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, getEngine());
     std::cout << "!!!!initialize prim" << std::endl;
     prim.reset(new matmul(matmul_pd));
-    flatBuffer.resize(interactFeatureSize, 0.0);
     featureSizes.resize(inputSizes, featureSize);
     InferenceEngine::TensorDesc inputDesc(
-        InferenceEngine::Precision::FP32,
+        dataPrecision,
         denseFeatureDims,
         InferenceEngine::Layout::HW);
     InferenceEngine::TensorDesc outputDesc(
-        InferenceEngine::Precision::FP32,
+        dataPrecision,
         {inputShapes.size(), inputShapes.size()},
         InferenceEngine::Layout::HW);
-    inputPtr = InferenceEngine::make_shared_blob<float>(inputDesc);
-    inputPtr->allocate();
-    outputPtr = InferenceEngine::make_shared_blob<float>(outputDesc);
-    outputPtr->allocate();
+    InferenceEngine::TensorDesc flatDesc(
+        dataPrecision,
+        {interactFeatureSize},
+        InferenceEngine::Layout::ANY);
+    if (dataPrecision == InferenceEngine::Precision::FP32) {
+        inputPtr = InferenceEngine::make_shared_blob<float>(inputDesc);
+        inputPtr->allocate();
+        outputPtr = InferenceEngine::make_shared_blob<float>(outputDesc);
+        outputPtr->allocate();
+        flatPtr = InferenceEngine::make_shared_blob<float>(flatDesc);
+        flatPtr->allocate();
+    } else {
+        inputPtr = InferenceEngine::make_shared_blob<int16_t>(inputDesc);
+        inputPtr->allocate();
+        outputPtr = InferenceEngine::make_shared_blob<int16_t>(outputDesc);
+        outputPtr->allocate();
+        flatPtr = InferenceEngine::make_shared_blob<int16_t>(flatDesc);
+        flatPtr->allocate();
+    }
+
     inputMemPtr = std::make_shared<Memory>(getEngine());
     outputMemPtr = std::make_shared<Memory>(getEngine());
     auto inDesc = MemoryDescUtils::convertToDnnlBlockedMemoryDesc(inputPtr->getTensorDesc());
     auto outDesc = MemoryDescUtils::convertToDnnlBlockedMemoryDesc(outputPtr->getTensorDesc());
     inputMemPtr->Create(inDesc, inputPtr->buffer());
     outputMemPtr->Create(outDesc, outputPtr->buffer());
+    std::cout << "internal output size " << outputMemPtr->GetSize() << std::endl;
     return;
 }
 

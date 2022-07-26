@@ -34,7 +34,8 @@ void ov::intel_cpu::InteractionNode::validate_and_infer_types() {
     const auto batch_size = dense_pshape[0];
     const auto feature_size = dense_pshape[1];
     int64_t output_feature_size = input_size * (input_size - 1) / 2 + feature_size.get_length();
-    set_output_type(0, element::f32, PartialShape{batch_size, output_feature_size});
+    auto output_type = m_output_type == ngraph::element::undefined ? get_input_element_type(0) : m_output_type;
+    set_output_type(0, output_type, PartialShape{batch_size, output_feature_size});
     return;
 }
 

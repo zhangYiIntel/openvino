@@ -34,11 +34,18 @@ private:
     void createDescriptorInternal(const dnnl::memory::desc &inputDesc,
                                   const dnnl::memory::desc &outputDesc);
 
-    VectorDims makeDummyInputDims() const;
-    VectorDims makeDummyOutputDims(const VectorDims& inDims) const;
-
-    VectorDims inDims;
-    VectorDims outDims;
+    template <typename Prec>
+    void run(dnnl::stream strm);
+    struct InteractionCtx {
+        Interaction* node;
+        dnnl::stream strm;
+    };
+    template<typename T>
+    struct InteractionExecute {
+        void operator()(InteractionCtx& ctx) {
+            ctx.node->run<T>(ctx.strm);
+        }
+    };
 
     int64_t batchSize = 0;
     int64_t featureSize = 0;
@@ -49,10 +56,12 @@ private:
     dnnl::memory::data_type outputDataType;
     InferenceEngine::Blob::Ptr inputPtr;
     InferenceEngine::Blob::Ptr outputPtr;
+    InferenceEngine::Blob::Ptr flatPtr;
     MemoryPtr inputMemPtr;
     MemoryPtr outputMemPtr;
-    std::vector<float> flatBuffer;
+    // std::vector<float> flatBuffer;
     std::vector<uint32_t> featureSizes;
+    InferenceEngine::Precision dataPrecision;
 };
 
 }   // namespace node

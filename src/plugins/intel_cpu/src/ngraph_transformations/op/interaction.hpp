@@ -27,6 +27,7 @@ public:
     std::shared_ptr<Node> clone_with_new_inputs(const ngraph::OutputVector& new_args) const override;
 
 private:
+    ngraph::element::Type m_output_type;
 };
 
 }   // namespace intel_cpu
