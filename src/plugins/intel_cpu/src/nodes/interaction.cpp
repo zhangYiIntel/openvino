@@ -137,7 +137,6 @@ void Interaction::run(dnnl::stream strm) {
 
     auto outFeaturesPtr = reinterpret_cast<Prec*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
     std::vector<const Prec*> inputPtrs(inputSizes);
-    std::vector<Prec> flatBuffer(interactFeatureSize, 0.0);
     for (uint32_t n = 0; n < inputSizes; n++) {
         auto inputPtr = reinterpret_cast<const Prec*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
         inputPtrs[n] = inputPtr;
@@ -204,35 +203,27 @@ void Interaction::prepareParams() {
     auto matmul_d = matmul::desc(src_md, weights_md, dst_md);
     primitive_attr matmul_attr;
     auto matmul_pd = matmul::primitive_desc(matmul_d, matmul_attr, getEngine());
-    std::cout << "!!!!initialize prim" << std::endl;
     prim.reset(new matmul(matmul_pd));
     featureSizes.resize(inputSizes, featureSize);
-    InferenceEngine::TensorDesc inputDesc(
-        dataPrecision,
-        denseFeatureDims,
-        InferenceEngine::Layout::HW);
-    InferenceEngine::TensorDesc outputDesc(
-        dataPrecision,
-        {inputShapes.size(), inputShapes.size()},
-        InferenceEngine::Layout::HW);
-    InferenceEngine::TensorDesc flatDesc(
-        dataPrecision,
-        {interactFeatureSize},
-        InferenceEngine::Layout::ANY);
+    std::vector<InferenceEngine::TensorDesc> internalMemDesc = {
+        InferenceEngine::TensorDesc(
+            dataPrecision,
+            denseFeatureDims,
+            InferenceEngine::Layout::HW),
+        InferenceEngine::TensorDesc(
+            dataPrecision,
+            {inputShapes.size(), inputShapes.size()},
+            InferenceEngine::Layout::HW),
+        InferenceEngine::TensorDesc(
+            dataPrecision,
+            {interactFeatureSize},
+            InferenceEngine::Layout::ANY)
+    };
+
     if (dataPrecision == InferenceEngine::Precision::FP32) {
-        inputPtr = InferenceEngine::make_shared_blob<float>(inputDesc);
-        inputPtr->allocate();
-        outputPtr = InferenceEngine::make_shared_blob<float>(outputDesc);
-        outputPtr->allocate();
-        flatPtr = InferenceEngine::make_shared_blob<float>(flatDesc);
-        flatPtr->allocate();
+        initializeInternalMemory<float>(internalMemDesc);
     } else {
-        inputPtr = InferenceEngine::make_shared_blob<int16_t>(inputDesc);
-        inputPtr->allocate();
-        outputPtr = InferenceEngine::make_shared_blob<int16_t>(outputDesc);
-        outputPtr->allocate();
-        flatPtr = InferenceEngine::make_shared_blob<int16_t>(flatDesc);
-        flatPtr->allocate();
+        initializeInternalMemory<int16_t>(internalMemDesc);
     }
 
     inputMemPtr = std::make_shared<Memory>(getEngine());

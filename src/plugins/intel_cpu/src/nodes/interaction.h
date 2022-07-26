@@ -46,7 +46,15 @@ private:
             ctx.node->run<T>(ctx.strm);
         }
     };
-
+    template<typename Prec>
+    void inline initializeInternalMemory(const std::vector<InferenceEngine::TensorDesc>& descs) {
+        inputPtr = InferenceEngine::make_shared_blob<Prec>(descs[0]);
+        outputPtr = InferenceEngine::make_shared_blob<Prec>(descs[1]);
+        flatPtr = InferenceEngine::make_shared_blob<Prec>(descs[2]);
+        inputPtr->allocate();
+        outputPtr->allocate();
+        flatPtr->allocate();
+    }
     int64_t batchSize = 0;
     int64_t featureSize = 0;
     int64_t inputSizes = 0;
