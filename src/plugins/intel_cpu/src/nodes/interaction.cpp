@@ -64,33 +64,51 @@ void Interaction::initSupportedPrimitiveDescriptors() {
     addSupportedPrimDesc(inPortConfigs, outPortConfigs, impl_desc_type::ref_any, true);
 }
 
-namespace ref {
-    template <typename dst_type, typename src_type>
-    inline void mov_ker(dst_type* inout, src_type* in, int len) {
-    for (int i = 0; i < len; i++) {
-        *(inout + i) = *(in + i);
-    }
-    }
+template <typename dst_type, typename src_type>
+inline __attribute__((always_inline)) void move_ker(
+    dst_type* inout,
+    const src_type* in,
+    int64_t len) {
+#pragma omp simd
+  for (int64_t i = 0; i < len; i++) {
+    *(inout + i) = *(in + i);
+  }
 }
 
-// static inline void move_ker(float* out, const float* in, int64_t len) {
-//   int64_t i = 0;
-// #if 1
-// #pragma unroll(4)
-//   for (i = 0; i < len - 15; i += 16) {
-//     auto in0 = _mm512_loadu_ps(in + i);
-//     _mm512_storeu_ps(out + i, in0);
-//   }
+static inline void move_ker(float* out, const float* in, int64_t len) {
+  int64_t i = 0;
+#pragma unroll(4)
+  for (i = 0; i < len - 15; i += 16) {
+    auto in0 = _mm512_loadu_ps(in + i);
+    _mm512_storeu_ps(out + i, in0);
+  }
 
-//   if (i < len) {
-//     auto mask = ((1 << (len - i)) - 1);
-//     auto in0 = _mm512_maskz_loadu_ps(mask, in + i);
-//     _mm512_mask_storeu_ps(out + i, mask, in0);
-//   }
-// #else
-//   ref::mov_ker(out, in, len);
-// #endif
-// }
+  if (i < len) {
+    auto mask = ((1 << (len - i)) - 1);
+    auto in0 = _mm512_maskz_loadu_ps(mask, in + i);
+    _mm512_mask_storeu_ps(out + i, mask, in0);
+  }
+}
+
+template <>
+inline __attribute__((always_inline)) void move_ker(
+    int16_t* out,
+    const int16_t* in,
+    int64_t len) {
+  int64_t i = 0;
+#pragma unroll(4)
+  for (i = 0; i < len - 31; i += 32) {
+    auto in0 = _mm512_loadu_si512(in + i);
+    _mm512_storeu_si512(out + i, in0);
+  }
+
+  if (i < len) {
+    auto mask = (1 << (len - i)) - 1;
+    auto in0 = _mm512_maskz_loadu_epi16(mask, in + i);
+    _mm512_mask_storeu_epi16(out + i, mask, in0);
+  }
+}
+
 template <typename T>
 static inline void move_ker(T* out, const T* in, int64_t len) {
     cpu_memcpy(out, in, sizeof(T) * len);
