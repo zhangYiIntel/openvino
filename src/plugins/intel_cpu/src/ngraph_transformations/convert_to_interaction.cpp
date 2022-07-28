@@ -44,7 +44,6 @@ ov::intel_cpu::ConvertToInteraction::ConvertToInteraction() {
         };
 
         std::vector<std::shared_ptr<Node>> features_node;
-        std::cout << "before " << concat_node->input_values().size() << std::endl;
         auto dense_feature_consumers = get_consumers(dense_feature_node);
         std::shared_ptr<Node> final_concat = nullptr;
         // get subgraph output node
@@ -63,10 +62,7 @@ ov::intel_cpu::ConvertToInteraction::ConvertToInteraction() {
                 old_feature_node->output(0).remove_target_input(input);
             }
         }
-        std::cout << "after " << concat_node->input_values().size() << std::endl;
         auto interaction_node = std::make_shared<InteractionNode>(features_node);
-        static int count = 0;
-        std::cout << "hit" << count++ << std::endl;
         replace_node(final_concat, interaction_node);
 
         return true;
