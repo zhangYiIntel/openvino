@@ -199,7 +199,6 @@ void Interaction::prepareParams() {
     auto outDesc = MemoryDescUtils::convertToDnnlBlockedMemoryDesc(outputPtr->getTensorDesc());
     inputMemPtr->Create(inDesc, inputPtr->buffer());
     outputMemPtr->Create(outDesc, outputPtr->buffer());
-    std::cout << "internal output size " << outputMemPtr->GetSize() << std::endl;
     return;
 }
 
