@@ -103,6 +103,8 @@ struct NodeRuntime {
     NodeRuntime(Config & cfg, dnnl::engine eng) : paramsCache(cfg.rtCacheCapacity), scratchPad(eng) {}
 };
 
+class Graph;
+
 class Node {
 public:
     Node(const Node &) = delete;
@@ -579,6 +581,10 @@ public:
 
     void setRuntime(std::shared_ptr<NodeRuntime> rt) {
         nodeRT = rt;
+    }
+
+    virtual std::vector<Graph *> getSubGraphs() {
+        return {};
     }
 
 protected:
