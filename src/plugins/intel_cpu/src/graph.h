@@ -10,7 +10,6 @@
 #include "normalize_preprocess.h"
 #include "node.h"
 #include "edge.h"
-#include "cache/multi_cache.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -261,7 +260,7 @@ private:
     std::vector<NodePtr> constantGraphNodes;
     std::vector<NodePtr> executableGraphNodes;
 
-    MultiCachePtr rtParamsCache;
+    std::shared_ptr<NodeRuntime> nodeRT;
 
     void EnforceBF16();
 };

@@ -76,7 +76,7 @@ void Graph::CreateGraph(NET &net, const ExtensionManager::Ptr& extMgr,
     // disable weights caching if graph was created only once
     weightsCache = config.streamExecutorConfig._streams != 1 ? w_cache : nullptr;
 
-    rtParamsCache = std::make_shared<MultiCache>(config.rtCacheCapacity);
+    nodeRT = std::make_shared<NodeRuntime>(config, eng);
 
     Replicate(net, extMgr);
     InitGraph();
@@ -95,7 +95,7 @@ void Graph::CreateGraph(const std::vector<NodePtr> &graphNodes,
     // disable weights caching if graph was created only once
     weightsCache = config.streamExecutorConfig._streams != 1 ? w_cache : nullptr;
 
-    rtParamsCache = std::make_shared<MultiCache>(config.rtCacheCapacity);
+    nodeRT = std::make_shared<NodeRuntime>(config, eng);
 
     this->_name = std::move(name);
     this->reuse_io_tensors = false;
@@ -153,7 +153,7 @@ void Graph::Replicate(const std::shared_ptr<const ov::Model> &subgraph, const Ex
         if (isQuantized()) {
             node->setQuantizedGraphFlag(true);
         }
-        node->setRuntimeCache(rtParamsCache);
+        node->setRuntime(nodeRT);
 
         graphNodes.push_back(node);
 
@@ -265,7 +265,7 @@ void Graph::Replicate(const CNNNetwork &network, const ExtensionManager::Ptr& ex
         if (isQuantized()) {
             node->setQuantizedGraphFlag(true);
         }
-        node->setRuntimeCache(rtParamsCache);
+        node->setRuntime(nodeRT);
         graphNodes.push_back(node);
 
         if (op->get_type_info() == ngraph::op::v0::Parameter::get_type_info_static()) {
@@ -1349,7 +1349,7 @@ bool Graph::InsertNode(NodePtr parent, NodePtr child, NodePtr node, int parentPo
     if (isQuantized()) {
         node->setQuantizedGraphFlag(true);
     }
-    node->setRuntimeCache(rtParamsCache);
+    node->setRuntime(nodeRT);
 
     if (initNode) {
         node->getSupportedDescriptors();
