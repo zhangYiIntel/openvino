@@ -815,7 +815,8 @@ void RNN::prepareParams() {
 
     bool wFormatWasChanged = false;
     // WA To avoid different weights layer and iter formats in FP32 case.
-    if (SL != 1 || B < optimalBatchSize) {
+    //   remove this WA since it becomes slower on SPR
+    if (false && (SL != 1 || B < optimalBatchSize)) {
         if (wFormat != dnnl::memory::format_tag::ldigo) {
             wFormat = dnnl::memory::format_tag::ldigo;
             wFormatWasChanged = true;
