@@ -1170,13 +1170,8 @@ FakeQuantize::FakeQuantize(const std::shared_ptr<ngraph::Node>& op, const dnnl::
                 isFakeQuantization = isFakeQuantization && il == ol && ih == oh;
                 isFakeQuantizationWithScale = isFakeQuantizationWithScale && il != ih && ol != oh &&
                                               (abs(ol / (oh - ol) - il / (ih - il)) < (levels == 256 ? 0.001f : 0.01f));
-                if (abs(ol / (oh - ol) - il / (ih - il)) >= 0.01 && levels != 256)
-                    std::cout << getName() << " abs: " << abs(ol / (oh - ol) - il / (ih - il))
-                                << " threshold: 0.01 " << std::endl;
             }
 
-            if (levels != 256)
-                    std::cout << levels << "isfqscale"<< static_cast<int>(isFakeQuantizationWithScale) <<std::endl;
             if (isFakeQuantizationWithScale) {
                 for (int i = 0; i < std::max(inputLowAxisSize, std::max(outputLowAxisSize, std::max(inputHighAxisSize, outputHighAxisSize))); i++) {
                     float il = inputLowData[isInputLowBroadcasted ? 0 : i];
@@ -2015,11 +2010,7 @@ std::vector<float> FakeQuantize::simplifyToScale(dnnl::memory::data_type outData
     if (outDataType == memory::data_type::s8 &&
         std::all_of(ish.cbegin(),
                     ish.cend(),
-                    [this, zpErrorThreashold, s8InputZeroPoint](float val) {
-                        if (abs(val - s8InputZeroPoint) >= zpErrorThreashold && levels != 256) {
-                            std::cout << "ish check :" << getName() << " " << val + s8InputZeroPoint << " >= " << zpErrorThreashold
-                            << " levels: " << levels << " value: " << val << std::endl;
-                        }
+                    [zpErrorThreashold, s8InputZeroPoint](float val) {
                         return std::abs(val - s8InputZeroPoint) < zpErrorThreashold;
                     }) &&
         std::all_of(osc.cbegin(),
@@ -2027,11 +2018,7 @@ std::vector<float> FakeQuantize::simplifyToScale(dnnl::memory::data_type outData
                     [](float val) {
                         return val == 1.f;
                     }) &&
-        std::all_of(osh.cbegin(), osh.cend(), [this, zpErrorThreashold, s8OutputZeroPoint](float val) {
-            if (abs(val - s8OutputZeroPoint) >= zpErrorThreashold && levels != 256) {
-                std::cout << "osh check :" << getName() << " " << val - s8OutputZeroPoint << " >= " << zpErrorThreashold
-                          << " levels: " << levels << " value: " << val << std::endl;
-            }
+        std::all_of(osh.cbegin(), osh.cend(), [zpErrorThreashold, s8OutputZeroPoint](float val) {
             return std::abs(val - s8OutputZeroPoint) < zpErrorThreashold;
         })) {
         bool isCropAligned = true;
