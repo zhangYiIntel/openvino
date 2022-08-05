@@ -100,7 +100,7 @@ private:
 struct NodeRuntime {
     MultiCache paramsCache;
     ScratchPad scratchPad;
-    NodeRuntime(Config & cfg, dnnl::engine eng) : paramsCache(cfg.rtCacheCapacity), scratchPad(eng) {}
+    NodeRuntime(size_t rtCacheCapacity, dnnl::engine eng) : paramsCache(rtCacheCapacity), scratchPad(eng) {}
 };
 
 class Graph;

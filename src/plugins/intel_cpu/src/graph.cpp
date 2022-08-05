@@ -76,7 +76,7 @@ void Graph::CreateGraph(NET &net, const ExtensionManager::Ptr& extMgr,
     // disable weights caching if graph was created only once
     weightsCache = config.streamExecutorConfig._streams != 1 ? w_cache : nullptr;
 
-    nodeRT = std::make_shared<NodeRuntime>(config, eng);
+    nodeRT = std::make_shared<NodeRuntime>(config.rtCacheCapacity, eng);
 
     Replicate(net, extMgr);
     InitGraph();
@@ -95,7 +95,7 @@ void Graph::CreateGraph(const std::vector<NodePtr> &graphNodes,
     // disable weights caching if graph was created only once
     weightsCache = config.streamExecutorConfig._streams != 1 ? w_cache : nullptr;
 
-    nodeRT = std::make_shared<NodeRuntime>(config, eng);
+    nodeRT = std::make_shared<NodeRuntime>(config.rtCacheCapacity, eng);
 
     this->_name = std::move(name);
     this->reuse_io_tensors = false;
