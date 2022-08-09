@@ -422,6 +422,8 @@ void Convolution::getSupportedDescriptors() {
         char* p = getenv("USE_BRG");
         if (p)
             shouldTryBrgconv = p[0] == '1';
+        else
+            shouldTryBrgconv = false;
     }
 
     // We need to make sure that convolution output and second input of fused Eltwise operation
