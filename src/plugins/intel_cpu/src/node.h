@@ -98,9 +98,10 @@ private:
 };
 
 struct NodeRuntime {
+    dnnl::engine engine;
     MultiCache paramsCache;
     ScratchPad scratchPad;
-    NodeRuntime(size_t rtCacheCapacity, dnnl::engine eng) : paramsCache(rtCacheCapacity), scratchPad(eng) {}
+    NodeRuntime(size_t rtCacheCapacity, dnnl::engine eng) : engine(eng), paramsCache(rtCacheCapacity), scratchPad(eng) {}
 };
 
 class Graph;
@@ -759,6 +760,10 @@ protected:
 
     ScratchPad * getRuntimeScratchPad() {
         return &(nodeRT->scratchPad);
+    }
+
+    std::shared_ptr<NodeRuntime> getRuntime() {
+        return nodeRT;
     }
 
     std::vector<VectorDims> lastInputDims = {};
