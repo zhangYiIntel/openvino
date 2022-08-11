@@ -614,12 +614,19 @@ void TensorIterator::prepareDynamicBackEdges() {
     back_mappers.clear();
     for (auto map_rule : backEdges) {
         auto from_mem = output_mem[map_rule.from];
-        auto to_mems = input_mems[map_rule.to];
-
-        redefineToMemories(to_mems, from_mem->getDescPtr());
-
-        // first memory is enough to get common memory ptr
-        back_mappers.emplace_back(std::make_shared<BackEdgePortHelper>(*getRuntime(), from_mem, to_mems.front(), eng));
+        auto to_mems = input_mems[map_rule.to].front();
+        const auto &from_desc = from_mem->GetPrimitive().get_desc();
+        const auto &to_desc = to_mems->GetPrimitive().get_desc();
+        if (from_desc == to_desc) {
+            // reuse memory
+            if (from_mem->GetData() != to_mems->GetData()) {
+                to_mems->setDataHandle(from_mem->GetData());
+            }
+        } else {
+            redefineToMemories(input_mems[map_rule.to], from_mem->getDescPtr());
+            // first memory is enough to get common memory ptr
+            back_mappers.emplace_back(std::make_shared<BackEdgePortHelper>(*getRuntime(), from_mem, to_mems, eng));
+        }
     }
 }
 
