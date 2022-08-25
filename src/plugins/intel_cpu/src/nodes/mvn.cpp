@@ -945,8 +945,7 @@ void MVN::prepareParams() {
         mvnAttrs.normalizeVariance_ == true &&
         mvnAttrs.src_prc == Precision::FP32 &&
         mvnAttrs.dst_prc == Precision::FP32 &&
-        mvnAttrs.layout == MVNLayoutType::planar &&
-        mayiuse(cpu::x64::avx2) == true;
+        mvnAttrs.layout == MVNLayoutType::planar;
         fusedWith.empty();
     if (is_ln_applicable) {
         // memory desc
