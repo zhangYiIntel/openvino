@@ -759,8 +759,10 @@ void MHA::init_brgemm(brgemmCtx& ctx, std::unique_ptr<brgemm_kernel_t>& brgKerne
         THROW_ERROR << "cannot be executed due to invalid brgconv params";
     }
 
+    // brgemm_utils.cpp (4d7f651) adds isa field and f32 require avx512_core
     auto isa = use_amx ? isa_any
-                       : ctx.dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16 : avx512_core_vnni;
+                       : ctx.dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16
+                       : ctx.dt_in0 == dnnl_data_type_t::dnnl_f32 ? avx512_core : avx512_core_vnni;
     auto status = brgemm_desc_init(&brgDesc, isa, brgemm_strd, ctx.dt_in0, ctx.dt_in1,
             false, false, brgemm_row_major, 1.f, ctx.beta, ctx.LDA, ctx.LDB, ctx.LDC, ctx.M, ctx.N, ctx.K, &strides);
     if (status != dnnl_success) {
