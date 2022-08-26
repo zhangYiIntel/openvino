@@ -90,6 +90,7 @@
 #include "nodes/eye.h"
 #include "nodes/interaction.h"
 #include "nodes/mha.h"
+#include "nodes/rnnt_update.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -192,6 +193,7 @@ Node::NodesFactory::NodesFactory()
     INTEL_CPU_NODE(Eye, Type::Eye);
     INTEL_CPU_NODE(Interaction, Type::Interaction);
     INTEL_CPU_NODE(MHA, Type::MHA);
+    INTEL_CPU_NODE(RnntUpdate, Type::RnntUpdate);
 }
 
 #undef INTEL_CPU_NODE

@@ -199,6 +199,7 @@ const InferenceEngine::details::caseless_unordered_map<std::string, Type> type_t
         { "PriorBoxClustered", Type::PriorBoxClustered},
         {"Interaction", Type::Interaction},
         { "MHA", Type::MHA},
+        { "RnntUpdate", Type::RnntUpdate}
 };
 
 Type TypeFromName(const std::string& type) {
@@ -308,6 +309,8 @@ std::string NameFromType(const Type type) {
             return "Interpolate";
         case Type::Reduce:
             return "Reduce";
+        case Type::RnntUpdate:
+            return "RnntUpdate";
         case Type::Broadcast:
             return "Broadcast";
         case Type::EmbeddingSegmentsSum:
