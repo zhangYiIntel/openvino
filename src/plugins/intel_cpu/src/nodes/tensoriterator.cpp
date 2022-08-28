@@ -458,7 +458,62 @@ void TensorIterator::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
 
-    supportedPrimitiveDescriptors.emplace_back(make_plain_config(ngraphOp), impl_desc_type::unknown);
+    /* Consider subgraph may have BF16 as inference precision
+     * to minimize additional reorder, TI should report intrinsic
+     * inference precision for each input and output w/o reorder.
+     * Since sub_graph has been initialized when this callback happens,
+     * we can query them directly here
+     */
+    NodeConfig config;// = make_plain_config(ngraphOp);
+
+    auto getInputIntrinsicPrec = [this](int port) {
+        const auto * tiOp = reinterpret_cast<const ov::op::util::SubGraphOp *>(ngraphOp.get());
+        for (const auto& desc : tiOp->get_input_descriptions()) {
+            if (desc->m_input_index == port) {
+                auto parameter_index = desc->m_body_parameter_index;
+                return input_mems[parameter_index].front()->getDesc().getPrecision();
+            }
+        }
+        return InferenceEngine::details::convertPrecision(ngraphOp->get_input_element_type(port));
+    };
+
+    auto getOutputIntrinsicPrec = [this](int port) {
+        const auto * tiOp = reinterpret_cast<const ov::op::util::SubGraphOp *>(ngraphOp.get());
+        for (const auto& desc : tiOp->get_output_descriptions()) {
+            if (desc->m_output_index == port) {
+                auto result_index = desc->m_body_value_index;
+                return output_mem[result_index]->getDesc().getPrecision();
+            }
+        }
+        return InferenceEngine::details::convertPrecision(ngraphOp->get_output_element_type(port));
+    };
+
+    const auto &op = ngraphOp;
+    for (size_t i = 0; i < op->get_input_size(); i++) {
+        const auto &origShape = op->get_input_partial_shape(i);
+        const auto& shape = Shape(origShape.rank().get_length() == 0 ? ov::PartialShape{1} : origShape);
+        const auto prec = getInputIntrinsicPrec(i);
+
+        PortConfig data_conf {};
+        auto descCreator = BlockedDescCreator::getCommonCreators().at(LayoutType::ncsp);
+        data_conf.setMemDesc(descCreator->createSharedDesc(prec, shape));
+        config.inConfs.push_back(data_conf);
+    }
+
+    for (size_t i = 0; i < op->get_output_size(); i++) {
+        const auto &origShape = op->get_output_partial_shape(i);
+        const auto& shape = Shape(origShape.rank().get_length() == 0 ? ov::PartialShape{1} : origShape);
+        const auto prec = getOutputIntrinsicPrec(i);
+
+        PortConfig data_conf {};
+        auto descCreator = BlockedDescCreator::getCommonCreators().at(LayoutType::ncsp);
+        data_conf.setMemDesc(descCreator->createSharedDesc(prec, shape));
+        config.outConfs.push_back(data_conf);
+    }
+
+    config.dynBatchSupport = true;
+
+    supportedPrimitiveDescriptors.emplace_back(config, impl_desc_type::unknown);
 }
 
 void TensorIterator::createPrimitive() {

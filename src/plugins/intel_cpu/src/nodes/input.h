@@ -37,6 +37,8 @@ public:
     bool needShapeInfer() const override { return false; }
     bool needPrepareParams() const override { return false; }
 
+    void selectOptimalPrimitiveDescriptor() override;
+
 private:
     void cloneBlobIfRequired();
     void initSupportedPdDefault();

@@ -263,6 +263,8 @@ private:
     std::shared_ptr<NodeRuntime> nodeRT;
 
     void EnforceBF16();
+
+    bool isSubgraph = false;
 };
 
 }   // namespace intel_cpu

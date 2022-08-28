@@ -433,6 +433,7 @@ void Graph::InitDescriptors() {
         // propagate config into subgraph
         for (auto &sub_graph : node->getSubGraphs()) {
             sub_graph->setConfig(getConfig());
+            sub_graph->isSubgraph = true;
         }
 
         OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, node->profiling.getSupportedDescriptors);
@@ -479,6 +480,11 @@ void Graph::ExtractConstantAndExecutableNodes() {
              * With current way it is possible that with debug_caps enabled
              * we execute a node, which is not ready to be executed
              */
+
+            // skip input & output node
+            if (graphNode->getType() == Type::Input || graphNode->getType() == Type::Output) {
+                continue;
+            }
             executableGraphNodes.emplace_back(graphNode);
         }
     }
@@ -1395,7 +1401,8 @@ void Graph::EnforceBF16() {
                     Type::RNNSeq,         // recurent nets
                     Type::MatMul,         // bert nets
                     Type::ROIPooling,     // object detection nets
-                    Type::Interpolate))    // super resolution nets
+                    Type::Interpolate,    // super resolution nets
+                    Type::TensorIterator))  // contain subgraph that may have performance gains
                 continue;   // stop at significant nodes
 
             const auto res = skipNodes.insert(parent);
@@ -1408,35 +1415,53 @@ void Graph::EnforceBF16() {
      * Necessary to maintain accuracy.
      * Experiments show zero peformance impact on average */
     std::unordered_set<NodePtr> nodesToSkip;
-    // starting from output nodes
-    for (const auto& entry : outputNodesMap) {
-        const auto& node = entry.second;
-        searchForNodesToSkip(node, nodesToSkip);
+
+    // Main graph keeps FP32 precision for inputs & graph tails (which do not benefit from BF16 acceleration).
+    // Subgraph will convert all internal nodes since generally it's not connected to main outputs.
+    if (!isSubgraph) {
+        // starting from output nodes
+        for (const auto& entry : outputNodesMap) {
+            const auto& node = entry.second;
+            searchForNodesToSkip(node, nodesToSkip);
+        }
     }
 
     for (const auto& node : graphNodes) {
         if (nodesToSkip.count(node) && !node->enforceBF16evenForGraphTail)
             continue;
 
-        if (node->getType() != Type::Input && node->getType() != Type::Output) {
-            for (size_t i = 0; i < node->getOriginalInputsNumber(); i++) {
-                const auto &parent = node->getParentEdgesAtPort(i)[0]->getParent();
-                /* Skip BF16 enforcement for nodes after Constant Inputs for maintaining precision for fusing.
-                 * Precision conversion to BF16 does automatically, if convolution follows up after Constant Inputs
-                 * and if activation is BF16 */
-                if (!(parent->getType() == Type::Input && parent->isConstant() &&
-                    // Concatenation node is exception because it doesn't change an accuracy for BF16 activation
-                      node->getType() != Type::Concatenation) &&
-                    // exclude Eltwise after Input since it supports conversion to BF16
-                    !(parent->getType() == Type::Input && node->getType() == Type::Eltwise) &&
-                    node->getOriginalInputPrecisionAtPort(i) == Precision::FP32)
-                    node->setOriginalInputPrecisionAtPort(i, Precision::BF16);
-            }
+        // Const node need to be skipped
+        if (node->getType() == Type::Input && node->isConstant())
+            continue;
 
-            for (size_t i = 0; i < node->getOriginalOutputsNumber(); i++) {
-                if (node->getOriginalOutputPrecisionAtPort(i) == Precision::FP32)
-                    node->setOriginalOutputPrecisionAtPort(i, Precision::BF16);
-            }
+        // Skip Input & Output only for main graph
+        if (!isSubgraph && (node->getType() == Type::Input || node->getType() == Type::Output))
+            continue;
+
+        // allows node to expose BF16 as port config
+        node->allowBF16 = true;
+        if (node->getType() == Type::Input || node->getType() == Type::Output) {
+            continue;
+        }
+
+        for (size_t i = 0; i < node->getOriginalInputsNumber(); i++) {
+            const auto &parent = node->getParentEdgesAtPort(i)[0]->getParent();
+            /* Skip BF16 enforcement for nodes after Constant Inputs for maintaining precision for fusing.
+                * Precision conversion to BF16 does automatically, if convolution follows up after Constant Inputs
+                * and if activation is BF16 */
+            if (!(parent->getType() == Type::Input && parent->isConstant() &&
+                // Concatenation & Gather node is exception because it doesn't change an accuracy for BF16 activation
+                    node->getType() != Type::Concatenation && node->getType() != Type::Gather) &&
+                // exclude Eltwise after Input since it supports conversion to BF16
+                !(parent->getType() == Type::Input && node->getType() == Type::Eltwise) &&
+                node->getOriginalInputPrecisionAtPort(i) == Precision::FP32) {
+                    node->setOriginalInputPrecisionAtPort(i, Precision::BF16);
+                }
+        }
+
+        for (size_t i = 0; i < node->getOriginalOutputsNumber(); i++) {
+            if (node->getOriginalOutputPrecisionAtPort(i) == Precision::FP32)
+                node->setOriginalOutputPrecisionAtPort(i, Precision::BF16);
         }
     }
 }

@@ -588,6 +588,8 @@ public:
         return {};
     }
 
+    bool allowBF16 = false;
+
 protected:
     bool canFuseSimpleOperation(const NodePtr& node) const;
 

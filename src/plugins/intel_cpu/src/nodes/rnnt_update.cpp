@@ -34,23 +34,54 @@ void RnntUpdate::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
 
-    std::vector<PortConfigurator> inputConfigurators;
-    inputConfigurators.reserve(inputShapes.size());
-    for (size_t i = 0; i < inputShapes.size(); i++) {
-        inputConfigurators.emplace_back(LayoutType::ncsp,
-                                        convertPrecision(ngraphOp->get_input_element_type(i)),
-                                        inputShapes[i]);
-    }
+    /*
+        BTensor<int32_t> current_iter(NEXT_IN_MEMPTR(idx++));  // [1]
+        BTensor<float> all_f(NEXT_IN_MEMPTR(idx++));           // N,T,1024
+        BTensor<float> logits(NEXT_IN_MEMPTR(idx++));          // N
+        BTensor<M> o_hs1(NEXT_IN_MEMPTR(idx++));               // N,320
+        BTensor<float> o_cs1(NEXT_IN_MEMPTR(idx++));           // N,320
+        BTensor<M> o_hs2(NEXT_IN_MEMPTR(idx++));               // N,320
+        BTensor<float> o_cs2(NEXT_IN_MEMPTR(idx++));           // N,320
 
-    std::vector<PortConfigurator> outputConfigurators;
-    outputConfigurators.reserve(inputShapes.size());
-    for (size_t i = 0; i < outputShapes.size(); i++) {
-        outputConfigurators.emplace_back(LayoutType::ncsp,
-                                         convertPrecision(ngraphOp->get_output_element_type(i)),
-                                         outputShapes[i]);
-    }
+        BTensor<uint8_t> next_cond(NEXT_OUT_MEMPTR(idx++));    // [1]
+        BTensor<float> f(NEXT_OUT_MEMPTR(idx++));              // N,1024
+        BTensor<int32_t> last_symbol(NEXT_OUT_MEMPTR(idx++));  // N
+        BTensor<M> hs1(NEXT_OUT_MEMPTR(idx++));
+        BTensor<float> cs1(NEXT_OUT_MEMPTR(idx++));
+        BTensor<M> hs2(NEXT_OUT_MEMPTR(idx++));
+        BTensor<float> cs2(NEXT_OUT_MEMPTR(idx++));
+        BTensor<uint8_t> num_symbols_generated(NEXT_OUT_MEMPTR(idx++));
+        BTensor<int32_t> time_idxs(NEXT_OUT_MEMPTR(idx++));
+        BTensor<uint8_t> all_predictions(NEXT_OUT_MEMPTR(idx++));  // N,1024
+        BTensor<int32_t> all_length(NEXT_OUT_MEMPTR(idx++));       // N
 
-    addSupportedPrimDesc(inputConfigurators, outputConfigurators, impl_desc_type::ref);
+    */
+
+    auto addConfig = [&](bool EnableBF16) {
+        std::vector<PortConfigurator> inputConfigurators;
+        inputConfigurators.reserve(inputShapes.size());
+        for (size_t i = 0; i < inputShapes.size(); i++) {
+            Precision prec = convertPrecision(ngraphOp->get_input_element_type(i));
+            if (EnableBF16 && (i == 1 || i == 2 || i == 3 || i == 5)) {
+                prec = Precision::BF16;
+            }
+            inputConfigurators.emplace_back(LayoutType::ncsp, prec, inputShapes[i]);
+        }
+
+        std::vector<PortConfigurator> outputConfigurators;
+        outputConfigurators.reserve(outputShapes.size());
+        for (size_t i = 0; i < outputShapes.size(); i++) {
+            Precision prec = convertPrecision(ngraphOp->get_output_element_type(i));
+            if (EnableBF16 && (i == 1 || i == 3 || i == 5)) {
+                prec = Precision::BF16;
+            }
+            outputConfigurators.emplace_back(LayoutType::ncsp, prec, outputShapes[i]);
+        }
+
+        addSupportedPrimDesc(inputConfigurators, outputConfigurators, impl_desc_type::ref);
+    };
+
+    addConfig(allowBF16);
 }
 
 void RnntUpdate::createPrimitive() {}
@@ -85,6 +116,22 @@ struct BTensor {
     size_t strides[8];
 };
 
+using bf16_t = uint16_t;
+
+template <typename T>
+float as_float(const T& v);
+
+template <>
+float as_float<float>(const float& v) {
+    return v;
+}
+
+template <>
+float as_float<bf16_t>(const bf16_t& v) {
+    uint32_t v2 = static_cast<uint32_t>(v) << 16;
+    return *reinterpret_cast<float*>(&v2);
+}
+
 // M : type for which only data movement is performed
 // V:  type for which arithematic is performed
 template <typename M, typename V>
@@ -92,52 +139,37 @@ void RnntUpdate::evaluate_T() {
 #define NEXT_OUT_MEMPTR(idx) getChildEdgeAt(idx)->getMemoryPtr()
 #define NEXT_IN_MEMPTR(idx)  getParentEdgeAt(idx)->getMemoryPtr()
 
-    int idx = 0;
-    BTensor<int32_t> current_iter(NEXT_IN_MEMPTR(idx++));  // [1]
-    BTensor<float> all_f(NEXT_IN_MEMPTR(idx++));           // N,T,1024
-    BTensor<float> logits(NEXT_IN_MEMPTR(idx++));          // N
-    BTensor<M> o_hs1(NEXT_IN_MEMPTR(idx++));               // N,320
-    BTensor<float> o_cs1(NEXT_IN_MEMPTR(idx++));           // N,320
-    BTensor<M> o_hs2(NEXT_IN_MEMPTR(idx++));               // N,320
-    BTensor<float> o_cs2(NEXT_IN_MEMPTR(idx++));           // N,320
+    BTensor<int32_t> current_iter(NEXT_IN_MEMPTR(0));  // [1]
+    BTensor<M> all_f(NEXT_IN_MEMPTR(1));           // N,T,1024
+    BTensor<V> logits(NEXT_IN_MEMPTR(2));              // N,C=29
+    BTensor<M> o_hs1(NEXT_IN_MEMPTR(3));               // N,320
+    BTensor<float> o_cs1(NEXT_IN_MEMPTR(4));           // N,320
+    BTensor<M> o_hs2(NEXT_IN_MEMPTR(5));               // N,320
+    BTensor<float> o_cs2(NEXT_IN_MEMPTR(6));           // N,320
 
-    idx = 0;
-    BTensor<uint8_t> next_cond(NEXT_OUT_MEMPTR(idx++));    // [1]
-    BTensor<float> f(NEXT_OUT_MEMPTR(idx++));              // N,1024
-    BTensor<int32_t> last_symbol(NEXT_OUT_MEMPTR(idx++));  // N
-    BTensor<M> hs1(NEXT_OUT_MEMPTR(idx++));
-    BTensor<float> cs1(NEXT_OUT_MEMPTR(idx++));
-    BTensor<M> hs2(NEXT_OUT_MEMPTR(idx++));
-    BTensor<float> cs2(NEXT_OUT_MEMPTR(idx++));
-    BTensor<uint8_t> num_symbols_generated(NEXT_OUT_MEMPTR(idx++));
-    BTensor<int32_t> time_idxs(NEXT_OUT_MEMPTR(idx++));
-    BTensor<uint8_t> all_predictions(NEXT_OUT_MEMPTR(idx++));  // N,1024
-    BTensor<int32_t> all_length(NEXT_OUT_MEMPTR(idx++));       // N
+    BTensor<uint8_t> next_cond(NEXT_OUT_MEMPTR(0));    // [1]
+    BTensor<M> f(NEXT_OUT_MEMPTR(1));              // N,1024
+    BTensor<int32_t> last_symbol(NEXT_OUT_MEMPTR(2));  // N
+    BTensor<M> hs1(NEXT_OUT_MEMPTR(3));
+    BTensor<float> cs1(NEXT_OUT_MEMPTR(4));
+    BTensor<M> hs2(NEXT_OUT_MEMPTR(5));
+    BTensor<float> cs2(NEXT_OUT_MEMPTR(6));
+    BTensor<uint8_t> num_symbols_generated(NEXT_OUT_MEMPTR(7));
+    BTensor<int32_t> time_idxs(NEXT_OUT_MEMPTR(8));
+    BTensor<uint8_t> all_predictions(NEXT_OUT_MEMPTR(9));  // N,1024
+    BTensor<int32_t> all_length(NEXT_OUT_MEMPTR(10));      // N
 
     int N = logits.shape[0];
     int C = logits.shape[1];
     int T = all_f.shape[1];
+    const int BLANK = C - 1; // 28
+    std::atomic<int> total_finished{0};
 
     // std::cout << "RnntUpdate::evaluate_T current_iter=" << current_iter.at(0) << std::endl;
 
-    std::atomic<int> total_finished{0};
-
-#define BLANK 28
-
-    parallel_nt(0, [&](const int th_id, const int nthreads) {
-        // revert Thread didn't introduce perf drop
-        // th_id = nthreads - 1 - th_id;
-        int n = N / nthreads;
-        int n_left = N % nthreads;
+    parallel_nt(0, [&](const int ithr, const int nthr) {
         int i_start, i_end;
-        if (th_id < n_left) {
-            n += 1;
-            i_start = th_id * n;
-            i_end = i_start + n;
-        } else {
-            i_start = n_left * (n + 1) + (th_id - n_left) * n;
-            i_end = i_start + n;
-        }
+        splitter(N, nthr, ithr, i_start, i_end);
 
         // std::stringstream ss;
         // ss << "========= th_id " << th_id << "/" << nthreads << "        " << i_start << "+" << n;
@@ -164,19 +196,18 @@ void RnntUpdate::evaluate_T() {
 
         int local_finished = 0;
         for (int i = i_start; i < i_end; i++) {
-            // auto& k = kargmax.at(i);
             auto* p_logits = &logits.at(i);
             int k = C - 1;
-            auto max = p_logits[k];
+            auto max = as_float(p_logits[k]);
             for (int c = 0; c < C - 1; c++) {
-                if (max < p_logits[c]) {
-                    max = p_logits[c];
+                auto v = as_float(p_logits[c]);
+                if (max < v) {
+                    max = v;
                     k = c;
                 }
             }
 
             auto& num = num_symbols_generated.at(i);
-            // auto & f_end = flag_end.at(i);
             if (k != BLANK && num < 30) {
                 auto& cur_len = all_length.at(i);
                 auto& pred = all_predictions.at(i, cur_len);
@@ -210,7 +241,10 @@ void RnntUpdate::evaluate_T() {
 }
 
 void RnntUpdate::execute(dnnl::stream strm) {
-    evaluate_T<int32_t, float>();
+    if (getParentEdgeAt(2)->getMemoryPtr()->getDesc().getPrecision() == Precision::BF16)
+        evaluate_T<int16_t, bf16_t>();
+    else
+        evaluate_T<int32_t, float>();
 }
 
 std::vector<VectorDims> RnntUpdate::shapeInfer() const {
