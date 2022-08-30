@@ -831,6 +831,9 @@ void MHA::init_brgemm_copy_b(std::unique_ptr<jit_brgemm_matmul_copy_b_t>& brgCop
     brgCopyKernelConf.K = K;
     brgCopyKernelConf.K_blk = K;
     brgCopyKernelConf.N_chunk_elems = brgCopyKernelConf.N_blk;
+    brgCopyKernelConf.b_dt_sz = DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(brgCopyKernelConf.src_dt));
+    brgCopyKernelConf.tr_b_dt_sz = DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(brgCopyKernelConf.src_dt));
+    brgCopyKernelConf.req_wei_vnni_downconvert = false;
 
     if (is_with_amx) {
         brgCopyKernelConf.isa = dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16_amx_bf16 : avx512_core_bf16_amx_int8;
