@@ -429,8 +429,9 @@ void TensorIterator::getSupportedDescriptors() {
             backEdges.emplace_back(PortMap {
                     static_cast<int>(body_output_idx), static_cast<int>(body_input_index), -1, 1, 0, -1, 1});
         } else if (auto inv_desc = ov::as_type_ptr<const ov::op::util::SubGraphOp::InvariantInputDescription>(desc)) {
+            // axis=-2 means InvariantInputDescription
             inputPortMap.emplace_back(PortMap {
-                    static_cast<int>(inv_desc->m_input_index), static_cast<int>(body_input_index), -1, 1, 0, -1, 1});
+                    static_cast<int>(inv_desc->m_input_index), static_cast<int>(body_input_index), -2, 1, 0, -1, 1});
         } else {
             THROW_ERROR << "has incorrect type of the input description.";
         }
@@ -633,7 +634,19 @@ void TensorIterator::prepareInputPorts() {
         auto &from_mem = getParentEdgesAtPort(map_rule.from)[0]->getMemoryPtr();
         auto &to_mem = input_mems[map_rule.to].front();  // first memory is enough to access the shared underlying physical memory
 
-        if (map_rule.axis == -1)
+        if (map_rule.axis == -2) {
+            const auto &from_desc = from_mem->GetPrimitive().get_desc();
+            const auto &to_desc = to_mem->GetPrimitive().get_desc();
+            if (from_desc == to_desc) {
+                // reuse memory
+                if (from_mem->GetData() != to_mem->GetData()) {
+                    to_mem->setDataHandle(from_mem->GetData());
+                }
+                continue;
+            }
+        }
+
+        if (map_rule.axis < 0)
             first_mappers.emplace_back(std::make_shared<BackEdgePortHelper>(*getRuntime(), from_mem, to_mem, eng));
         else
             before_mappers.emplace_back(
@@ -735,7 +748,7 @@ void TensorIterator::reshapeSubgraphInput() {
         auto &from_mem = getParentEdgesAtPort(map_rule.from)[0]->getMemoryPtr();
         auto &to_mems = input_mems[map_rule.to];
         auto new_dims = from_mem->getStaticDims();
-        if (map_rule.axis != -1)
+        if (map_rule.axis >= 0)
             new_dims[map_rule.axis] = abs(map_rule.stride);
 
         const auto desc = std::make_shared<CpuBlockedMemoryDesc>(to_mems.front()->getDesc().getPrecision(), Shape(new_dims));
@@ -773,7 +786,7 @@ void TensorIterator::reshapeAndFillOutput(dnnl::stream strm) {
 
 int TensorIterator::getNumIteration(const std::vector<PortMap>& inputPortMap, const std::vector<PortMap>& outputPortMap) const {
     const auto isIterable = [](const PortMap& rule) {
-        return rule.axis != -1;
+        return rule.axis >= 0;
     };
 
     const auto getNumIterations = [this](const PortMap& rule, const std::vector<size_t>& dimensions) -> int {
