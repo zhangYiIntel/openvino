@@ -34,35 +34,13 @@ void RnntUpdate::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty())
         return;
 
-    /*
-        BTensor<int32_t> current_iter(NEXT_IN_MEMPTR(idx++));  // [1]
-        BTensor<float> all_f(NEXT_IN_MEMPTR(idx++));           // N,T,1024
-        BTensor<float> logits(NEXT_IN_MEMPTR(idx++));          // N
-        BTensor<M> o_hs1(NEXT_IN_MEMPTR(idx++));               // N,320
-        BTensor<float> o_cs1(NEXT_IN_MEMPTR(idx++));           // N,320
-        BTensor<M> o_hs2(NEXT_IN_MEMPTR(idx++));               // N,320
-        BTensor<float> o_cs2(NEXT_IN_MEMPTR(idx++));           // N,320
-
-        BTensor<uint8_t> next_cond(NEXT_OUT_MEMPTR(idx++));    // [1]
-        BTensor<float> f(NEXT_OUT_MEMPTR(idx++));              // N,1024
-        BTensor<int32_t> last_symbol(NEXT_OUT_MEMPTR(idx++));  // N
-        BTensor<M> hs1(NEXT_OUT_MEMPTR(idx++));
-        BTensor<float> cs1(NEXT_OUT_MEMPTR(idx++));
-        BTensor<M> hs2(NEXT_OUT_MEMPTR(idx++));
-        BTensor<float> cs2(NEXT_OUT_MEMPTR(idx++));
-        BTensor<uint8_t> num_symbols_generated(NEXT_OUT_MEMPTR(idx++));
-        BTensor<int32_t> time_idxs(NEXT_OUT_MEMPTR(idx++));
-        BTensor<uint8_t> all_predictions(NEXT_OUT_MEMPTR(idx++));  // N,1024
-        BTensor<int32_t> all_length(NEXT_OUT_MEMPTR(idx++));       // N
-
-    */
-
     auto addConfig = [&](bool EnableBF16) {
         std::vector<PortConfigurator> inputConfigurators;
         inputConfigurators.reserve(inputShapes.size());
         for (size_t i = 0; i < inputShapes.size(); i++) {
             Precision prec = convertPrecision(ngraphOp->get_input_element_type(i));
             if (EnableBF16 && (i == 1 || i == 2 || i == 3 || i == 5)) {
+                // all_f, logits, o_hs1, o_hs2
                 prec = Precision::BF16;
             }
             inputConfigurators.emplace_back(LayoutType::ncsp, prec, inputShapes[i]);
@@ -73,6 +51,7 @@ void RnntUpdate::initSupportedPrimitiveDescriptors() {
         for (size_t i = 0; i < outputShapes.size(); i++) {
             Precision prec = convertPrecision(ngraphOp->get_output_element_type(i));
             if (EnableBF16 && (i == 1 || i == 3 || i == 5)) {
+                // f, hs1, hs2
                 prec = Precision::BF16;
             }
             outputConfigurators.emplace_back(LayoutType::ncsp, prec, outputShapes[i]);
@@ -103,9 +82,12 @@ struct BTensor {
     }
 
     T& at(int i0) {
+        assert(i0 < shape[0]);
         return *(ptr + i0 * strides[0]);
     }
     T& at(int i0, int i1) {
+        assert(i0 < shape[0]);
+        assert(i1 < shape[1]);
         return *(ptr + i0 * strides[0] + i1 * strides[1]);
     }
 
@@ -164,16 +146,15 @@ void RnntUpdate::evaluate_T() {
     int T = all_f.shape[1];
     const int BLANK = C - 1; // 28
     std::atomic<int> total_finished{0};
+    std::atomic<bool> error{false};
 
     // std::cout << "RnntUpdate::evaluate_T current_iter=" << current_iter.at(0) << std::endl;
-
-    parallel_nt(0, [&](const int ithr, const int nthr) {
+    auto kernel = [&](const int ithr, const int nthr) {
         int i_start, i_end;
         splitter(N, nthr, ithr, i_start, i_end);
 
-        // std::stringstream ss;
-        // ss << "========= th_id " << th_id << "/" << nthreads << "        " << i_start << "+" << n;
-        // std::cout << ss.str() << std::endl;
+        if (i_end == i_start)
+            return;
 
         if (current_iter.at(0) == 0) {
             // initialize states
@@ -210,6 +191,10 @@ void RnntUpdate::evaluate_T() {
             auto& num = num_symbols_generated.at(i);
             if (k != BLANK && num < 30) {
                 auto& cur_len = all_length.at(i);
+                if (cur_len > all_predictions.shape[1]) {
+                    error.store(true);
+                    return;
+                }
                 auto& pred = all_predictions.at(i, cur_len);
                 pred = k;
                 cur_len++;
@@ -234,7 +219,16 @@ void RnntUpdate::evaluate_T() {
         }
         if (local_finished)
             total_finished += local_finished;
-    });
+    };
+
+    if (N == 1) {
+        kernel(0, 1);
+    } else {
+        parallel_nt(0, kernel);
+    }
+
+    if (error)
+        IE_THROW() << "Internal error happened in RnntUpdate: " << getName();
 
     next_cond.at(0) = (total_finished < N);
     return;
