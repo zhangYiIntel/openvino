@@ -477,6 +477,95 @@ pass::EliminateSqueeze::EliminateSqueeze() {
     this->register_matcher(m, callback);
 }
 
+namespace {
+template <class T>
+std::shared_ptr<T> check_all_inputs(const std::shared_ptr<opset8::Concat>& concat) {
+    shared_ptr<T> split;
+    for (const auto& in_to_concat : concat->input_values()) {
+        const auto& cast_to_split = std::dynamic_pointer_cast<T>(in_to_concat.get_node_shared_ptr());
+        if (!cast_to_split) {
+            return {};
+        }
+        if (!split) {
+            split = cast_to_split;
+        } else if (cast_to_split.get() != split.get()) {
+            // not all inputs to concat belong to the same Split op
+            return {};
+        }
+    }
+    return split;
+}
+}  // namespace
+
+pass::EliminateSplitConcat::EliminateSplitConcat() {
+    MATCHER_SCOPE(EliminateSplitConcat);
+
+    auto pattern_concat = pattern::wrap_type<opset8::Concat>();
+    matcher_pass_callback callback = [=](pattern::Matcher& m) {
+        const auto& pattern_map = m.get_pattern_map();
+        const auto concat = std::dynamic_pointer_cast<opset8::Concat>(pattern_map.at(pattern_concat));
+        if (!concat) {
+            return false;
+        }
+        shared_ptr<Node> split;
+        split = check_all_inputs<opset8::Split>(concat);
+        if (!split) {
+            split = check_all_inputs<opset8::VariadicSplit>(concat);
+        }
+
+        if (!split) {
+            return false;
+        }
+
+        // std::cout << "Concat+split detected XXXXX" << std::endl;
+        auto axis = std::dynamic_pointer_cast<opset8::Constant>(split->input_value(1).get_node_shared_ptr());
+        const auto& order_values = axis->cast_vector<int64_t>();
+        if (order_values.size() != 1) {
+            return false;
+        }
+        if (order_values[0] != concat->get_axis()) {
+            return false;
+        }
+        // std::cout << "Concat+split elimination XXXXX" << std::endl;
+        return replace_output_update_name(concat->output(0), split->input_value(0));
+    };
+
+    auto m = std::make_shared<pattern::Matcher>(pattern_concat, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+pass::EliminateSqueezeUnsqueeze::EliminateSqueezeUnsqueeze() {
+    MATCHER_SCOPE(EliminateSplitConcat);
+    auto pattern_squeeze = pattern::wrap_type<opset8::Squeeze>({pattern::any_input(), pattern::any_input()});
+    auto pattern_unsqueeze = pattern::wrap_type<opset8::Unsqueeze>({pattern_squeeze, pattern::any_input()});
+
+    matcher_pass_callback callback = [=](pattern::Matcher& m) {
+        const auto& pattern_map = m.get_pattern_map();
+        // std::cout << "Squeeze+Unsqueeze detected XXXXX" << std::endl;
+        const auto squeeze = std::dynamic_pointer_cast<opset8::Squeeze>(pattern_map.at(pattern_squeeze));
+        const auto unsqueeze = std::dynamic_pointer_cast<opset8::Unsqueeze>(pattern_map.at(pattern_unsqueeze));
+        auto sq_axis = std::dynamic_pointer_cast<opset8::Constant>(squeeze->input_value(1).get_node_shared_ptr());
+        auto unsq_axis = std::dynamic_pointer_cast<opset8::Constant>(unsqueeze->input_value(1).get_node_shared_ptr());
+        const auto& sq_axis_values = sq_axis->cast_vector<int64_t>();
+        const auto& unsq_axis_values = unsq_axis->cast_vector<int64_t>();
+        if (sq_axis_values.size() != 1) {
+            return false;
+        }
+        if (unsq_axis_values.size() != 1) {
+            return false;
+        }
+
+        if (sq_axis_values[0] != unsq_axis_values[0]) {
+            return false;
+        }
+        // std::cout << "Squeeze+Unsqueeze elimination XXXXX" << std::endl;
+        return replace_output_update_name(unsqueeze->output(0), squeeze->input_value(0));
+    };
+
+    auto m = std::make_shared<pattern::Matcher>(pattern_unsqueeze, matcher_name);
+    this->register_matcher(m, callback);
+}
+
 pass::EliminateTranspose::EliminateTranspose() {
     MATCHER_SCOPE(EliminateTranspose);
     auto order = pattern::wrap_type<opset8::Constant>();
@@ -520,7 +609,6 @@ pass::EliminateEltwise::EliminateEltwise() {
         if (!op::util::can_eliminate_eltwise_node(eltwise, constant, non_const_input)) {
             return false;
         }
-
         return replace_output_update_name(eltwise->output(0), non_const_input);
     };
 
@@ -546,4 +634,6 @@ ngraph::pass::NopElimination::NopElimination(bool use_shape_for_elimination) {
         add_matcher<EliminateBroadcast>();
         add_matcher<EliminateGather>();
     }
+    add_matcher<EliminateSqueezeUnsqueeze>();
+    add_matcher<EliminateSplitConcat>();
 }
