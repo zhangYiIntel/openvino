@@ -957,10 +957,12 @@ void RNN::prepareParams() {
             return std::make_pair(std::make_shared<lstm_forward>(pd), pd.scratchpad_desc());
         } else if (key.cellType == dnnl::algorithm::vanilla_augru) {
             std::shared_ptr<augru_forward::desc> desc = descs[0];
-            return std::make_shared<augru_forward>(augru_forward::primitive_desc(*desc, getEngine()));
+            augru_forward::primitive_desc pd(*desc, attr, getEngine());
+            return std::make_pair(std::make_shared<augru_forward>(pd), pd.scratchpad_desc());
         } else if (key.cellType == dnnl::algorithm::lbr_augru) {
             std::shared_ptr<lbr_augru_forward::desc> desc = descs[0];
-            return std::make_shared<lbr_augru_forward>(lbr_augru_forward::primitive_desc(*desc, getEngine()));
+            lbr_augru_forward::primitive_desc pd(*desc, attr, getEngine());
+            return std::make_pair(std::make_shared<lbr_augru_forward>(pd), pd.scratchpad_desc());
         } else {
             return std::make_pair(nullptr, dnnl::memory::desc());
         }
