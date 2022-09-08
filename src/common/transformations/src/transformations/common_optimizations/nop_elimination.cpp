@@ -7,6 +7,7 @@
 #include <ngraph/log.hpp>
 #include <ngraph/opsets/opset3.hpp>
 #include <ngraph/opsets/opset8.hpp>
+#include <ngraph/opsets/opset9.hpp>
 #include <ngraph/pattern/op/wrap_type.hpp>
 #include <ngraph/util.hpp>
 #include <numeric>
@@ -479,11 +480,35 @@ pass::EliminateSqueeze::EliminateSqueeze() {
 
 namespace {
 template <class T>
-std::shared_ptr<T> check_all_inputs(const std::shared_ptr<opset8::Concat>& concat) {
+std::shared_ptr<T> check_all_inputs(const std::shared_ptr<opset9::Concat>& concat) {
     shared_ptr<T> split;
+    int idx = -1;
     for (const auto& in_to_concat : concat->input_values()) {
         const auto& cast_to_split = std::dynamic_pointer_cast<T>(in_to_concat.get_node_shared_ptr());
         if (!cast_to_split) {
+            // There is a special case with (GRU/RNN)Sequence ops
+            // Sequence->output(1) can be connected directly to the last input to Concat
+            // and the last Split output is not used. This is also valid case;
+            if ((idx + 1) == (concat->input_values().size() - 1)) {
+                // check that Split is connected to Sequence->output(0)
+                // Sequence:0->Squeeze->Split
+                auto squeeze = std::dynamic_pointer_cast<opset9::Squeeze>(split->input_value(0).get_node_shared_ptr());
+                if (!squeeze) {
+                    return {};
+                }
+                auto seq_out = squeeze->input_value(0);
+                auto seq_node = seq_out.get_node_shared_ptr();
+                if (seq_out.get_index() != 0 || !(dynamic_pointer_cast<opset9::RNNSequence>(seq_node) ||
+                                                  dynamic_pointer_cast<opset9::GRUSequence>(seq_node) ||
+                                                  dynamic_pointer_cast<opset9::LSTMSequence>(seq_node))) {
+                    return {};
+                }
+                // check that Sequence->output(1) is connected to this input
+                if (in_to_concat != seq_node->output(1)) {
+                    return {};
+                }
+                return split;
+            }
             return {};
         }
         if (!split) {
@@ -492,7 +517,20 @@ std::shared_ptr<T> check_all_inputs(const std::shared_ptr<opset8::Concat>& conca
             // not all inputs to concat belong to the same Split op
             return {};
         }
+
+        // Split to Concat edges are not in orderl
+        // should be (0, 1, 2, ... , split->outputs().size()-1)
+        if (in_to_concat.get_index() != (idx + 1)) {
+            return {};
+        }
+        ++idx;
     }
+
+    // not all split outputs are used.
+    if ((idx + 1) != split->outputs().size()) {
+        return {};
+    }
+
     return split;
 }
 }  // namespace
@@ -517,16 +555,15 @@ pass::EliminateSplitConcat::EliminateSplitConcat() {
             return false;
         }
 
-        // std::cout << "Concat+split detected XXXXX" << std::endl;
         auto axis = std::dynamic_pointer_cast<opset8::Constant>(split->input_value(1).get_node_shared_ptr());
-        const auto& order_values = axis->cast_vector<int64_t>();
-        if (order_values.size() != 1) {
+        if (!axis) {
             return false;
         }
-        if (order_values[0] != concat->get_axis()) {
+        const auto& axis_val = axis->cast_vector<int64_t>();
+        if (axis_val.size() != 1 || axis_val[0] != concat->get_axis()) {
             return false;
         }
-        // std::cout << "Concat+split elimination XXXXX" << std::endl;
+
         return replace_output_update_name(concat->output(0), split->input_value(0));
     };
 
@@ -535,7 +572,7 @@ pass::EliminateSplitConcat::EliminateSplitConcat() {
 }
 
 pass::EliminateSqueezeUnsqueeze::EliminateSqueezeUnsqueeze() {
-    MATCHER_SCOPE(EliminateSplitConcat);
+    MATCHER_SCOPE(EliminateSqueezeUnsqueeze);
     auto pattern_squeeze = pattern::wrap_type<opset8::Squeeze>({pattern::any_input(), pattern::any_input()});
     auto pattern_unsqueeze = pattern::wrap_type<opset8::Unsqueeze>({pattern_squeeze, pattern::any_input()});
 
@@ -634,6 +671,4 @@ ngraph::pass::NopElimination::NopElimination(bool use_shape_for_elimination) {
         add_matcher<EliminateBroadcast>();
         add_matcher<EliminateGather>();
     }
-    add_matcher<EliminateSqueezeUnsqueeze>();
-    add_matcher<EliminateSplitConcat>();
 }

@@ -117,7 +117,7 @@ shared_ptr<RNNCellBase> find_cell_chain(ov::pass::NodeRegister& cp_from,
                 }
             }
 
-            if (auto augru = dynamic_pointer_cast<ov::op::internal::AUGRUCell>(prev_cell)) {
+            if (auto augru = dynamic_pointer_cast<ov::op::internal::AUGRUCell>(current)) {
                 attention_to_concat.push_back(cp_to.make<Unsqueeze>(augru->input_value(5), axis_1));
             }
 
@@ -242,16 +242,17 @@ bool create_sequence(ov::pass::NodeRegister& cp_to,
         return false;
     }
 
-    // outputs[0] = cp_to.make<Squeeze>(sequence->output(1), axis_1);
-    // replace_outputs_update_names(last_cell->outputs(), outputs);
-
     if (!h_inputs_to_redirect.empty()) {
         auto squeeze_Y = cp_to.make<Squeeze>(sequence->output(0), axis_1);
         auto split = cp_to.make<Split>(squeeze_Y, axis_1, cells_cnt);
 
         for (const auto& it : h_inputs_to_redirect) {
             for (const auto& in : it.second) {
-                auto squeeze = cp_to.make<Squeeze>(split->output(cells_cnt - it.first), axis_1);
+                auto Hi = split->output(cells_cnt - it.first);
+                if (it.first == 1) {
+                    Hi = sequence->output(1);
+                }
+                auto squeeze = cp_to.make<Squeeze>(Hi, axis_1);
                 in.replace_source_output(squeeze);
             }
         }
