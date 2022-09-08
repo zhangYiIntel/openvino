@@ -914,7 +914,8 @@ void RNN::prepareParams() {
     }
     bool wFormatWasChanged = false;
     // WA To avoid different weights layer and iter formats in FP32 case.
-    if ((dataPrecision == Precision::FP32) && (SL != 1 || B < optimalBatchSize)) {
+    if ((dataPrecision == Precision::FP32 && cell_type != dnnl::algorithm::vanilla_lstm) &&
+        (SL != 1 || B < optimalBatchSize)) {
         if (wFormat != dnnl::memory::format_tag::ldigo) {
             wFormat = dnnl::memory::format_tag::ldigo;
             wFormatWasChanged = true;
@@ -979,8 +980,20 @@ void RNN::prepareParams() {
     scratchpad_md = result.first.second;
 
     if (!wasMemoryPrepared || wFormatWasChanged) {
-        auto itpd = descs[0].createPrimitiveDescriptorIterator(getEngine(), dnnl::primitive_attr());
-        prepareMemory(itpd);
+        auto pd = (*prim).get_primitive_desc();
+        auto query_weights_md = [&](int idx = 0) -> dnnl::memory::desc {
+            auto what = dnnl::convert_to_c(dnnl::query::weights_md);
+            const dnnl_memory_desc_t *cdesc = dnnl_primitive_desc_query_md(pd, what, idx);
+            if (!cdesc)
+                IE_THROW() << "query_weights_md failed for node " << getName() << " idx " << idx << ".";
+            return dnnl::memory::desc(*cdesc);
+        };
+        std::vector<DnnlMemoryDescPtr> intDescs {
+            DnnlExtensionUtils::makeDescriptor(query_weights_md(0)),
+            DnnlExtensionUtils::makeDescriptor(query_weights_md(1)),
+            DnnlExtensionUtils::makeDescriptor(query_weights_md(2))
+        };
+        prepareMemory(intDescs);
         wasMemoryPrepared = true;
     }
 }
