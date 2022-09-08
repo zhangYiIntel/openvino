@@ -3,6 +3,8 @@
 //
 
 #include "ngraph/ops.hpp"
+#include "ngraph_ops/augru_cell.hpp"
+#include "ngraph_ops/augru_sequence.hpp"
 
 #include "shared_test_classes/base/layer_test_utils.hpp"
 #include "shared_test_classes/base/utils/compare_results.hpp"
@@ -78,6 +80,8 @@ CompareMap getCompareMap() {
 #include "ngraph/opsets/opset8_tbl.hpp"
 #include "ngraph/opsets/opset9_tbl.hpp"
 
+NGRAPH_OP(AUGRUCell, ov::op::internal)
+NGRAPH_OP(AUGRUSequence, ov::op::internal)
 #undef NGRAPH_OP
     };
     return compareMap;

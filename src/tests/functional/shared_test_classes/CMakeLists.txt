@@ -22,6 +22,7 @@ addIeTarget(
                 funcTestUtils
                 ngraphFunctions
                 inference_engine_legacy
+                inference_engine_transformations
 )
 
 ie_faster_build(${TARGET_NAME}

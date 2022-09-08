@@ -18,7 +18,9 @@ class TRANSFORMATIONS_API EliminateConvert;
 class TRANSFORMATIONS_API EliminateConvertNonZero;
 class TRANSFORMATIONS_API EliminateConcat;
 class TRANSFORMATIONS_API EliminateSplit;
+class TRANSFORMATIONS_API EliminateSplitConcat;
 class TRANSFORMATIONS_API EliminateSqueeze;
+class TRANSFORMATIONS_API EliminateSqueezeUnsqueeze;
 class TRANSFORMATIONS_API EliminateTranspose;
 class TRANSFORMATIONS_API EliminateEltwise;
 class TRANSFORMATIONS_API NopElimination;
@@ -74,6 +76,26 @@ class ngraph::pass::EliminateSplit : public ngraph::pass::MatcherPass {
 public:
     OPENVINO_RTTI("EliminateSplit", "0");
     EliminateSplit();
+};
+
+/**
+ * @ingroup ie_transformation_common_api
+ * @brief EliminateSplit eliminates split+concat pairs which do nothing
+ */
+class ngraph::pass::EliminateSplitConcat : public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("EliminateSplitConcat", "0");
+    EliminateSplitConcat();
+};
+
+/**
+ * @ingroup ie_transformation_common_api
+ * @brief EliminateSqueezeUnsqueeze eliminates SqueezeUnsqueeze pairs which do nothing
+ */
+class ngraph::pass::EliminateSqueezeUnsqueeze : public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("EliminateSqueezeUnsqueeze", "0");
+    EliminateSqueezeUnsqueeze();
 };
 
 /**

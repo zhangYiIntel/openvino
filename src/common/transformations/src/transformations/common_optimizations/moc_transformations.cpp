@@ -25,6 +25,7 @@
 #include <transformations/common_optimizations/fq_mul_fusion.hpp>
 #include <transformations/common_optimizations/fq_reshape_fusion.hpp>
 #include <transformations/common_optimizations/gelu_fusion.hpp>
+#include <transformations/common_optimizations/gru_cell_fusion.hpp>
 #include <transformations/common_optimizations/hsigmoid_fusion.hpp>
 #include <transformations/common_optimizations/hswish_fusion.hpp>
 #include <transformations/common_optimizations/leaky_relu_fusion.hpp>
@@ -49,6 +50,7 @@
 #include <transformations/common_optimizations/remove_multi_subgraph_op_dangling_params.hpp>
 #include <transformations/common_optimizations/reshape_sequence_fusion.hpp>
 #include <transformations/common_optimizations/ric_fusion.hpp>
+#include <transformations/common_optimizations/sequence_fusion.hpp>
 #include <transformations/common_optimizations/shuffle_channels_fusion.hpp>
 #include <transformations/common_optimizations/simplify_shape_of_sub_graph.hpp>
 #include <transformations/common_optimizations/softmax_fusion.hpp>
@@ -67,6 +69,10 @@
 #include <transformations/op_conversions/convert_divide.hpp>
 #include <transformations/op_conversions/convert_negative.hpp>
 #include <transformations/op_conversions/convert_scatter_elements_to_scatter.hpp>
+#include "itt.hpp"
+#include "transformations/common_optimizations/augru_cell_fusion.hpp"
+#include "transformations/common_optimizations/eliminate_dublicated_subgraph_inputs.hpp"
+#include "transformations/common_optimizations/sequence_fusion.hpp"
 
 bool ngraph::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph::Function>& f) {
     // To avoid issues with dynamism we make nGraph Function dynamic and after we apply all
@@ -82,7 +88,6 @@ bool ngraph::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph
 
     ngraph::pass::Manager manager(get_pass_config());
     manager.set_per_pass_validation(false);
-
     manager.register_pass<ngraph::pass::InitNodeInfo>();
     if (m_low_precision_enabled) {
         manager.register_pass<ngraph::pass::DisableConvertConstantFoldingOnConstPath>(
@@ -91,6 +96,7 @@ bool ngraph::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph
     if (!m_use_shapes) {
         manager.register_pass<ngraph::pass::DisableShapeOfConstantFolding>();
     }
+
     // RemoveConcatZeroDimInput and RemoveMultiSubGraphOpDanglingParams
     // should be performed before first ConstantFolding call.
     // The passes can deteach graph branches where zero dimesion is calculated.
@@ -99,12 +105,13 @@ bool ngraph::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph
     // RemoveConcatZeroDimInput and RemoveMultiSubGraphOpDanglingParams should be called together.
     manager.register_pass<ov::pass::RemoveConcatZeroDimInput>();
     manager.register_pass<ov::pass::Validate>();
+    manager.register_pass<ov::pass::EliminateDublicatedSubgraphOpInputs>();
     manager.register_pass<ov::pass::RemoveMultiSubGraphOpDanglingParams>();
+
     manager.register_pass<ov::pass::FoldSubgraphEmptyInputs>();
     manager.register_pass<ngraph::pass::DisableRandomUniformConstantFolding>();
     manager.register_pass<ngraph::pass::ConstantFolding>();
     manager.register_pass<ngraph::pass::Validate>();
-
     // FusedFilteringBoxesBySize transformation has the complex pattern
     // which can be affected by further transformations. So we have to
     // execute it at the beginning of the pipeline. Also, this pass resolves
@@ -123,6 +130,10 @@ bool ngraph::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph
     manager.register_pass<ngraph::pass::StridedSliceOptimization>(m_use_shapes);
 
     manager.register_pass<ngraph::pass::BroadcastElementwiseFusion>();
+    manager.register_pass<ov::pass::GRUCellFusion>();
+    manager.register_pass<ov::pass::AUGRUCellFusion>();
+    manager.register_pass<ngraph::pass::ConstantFolding>();
+    manager.register_pass<ov::pass::SequenceFusion>();
 
     auto transpose_sinking = manager.register_pass<ngraph::pass::GraphRewrite>();
     transpose_sinking->add_matcher<ngraph::pass::TransposeSinking>();
@@ -130,7 +141,6 @@ bool ngraph::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph
     // because it replaces pattern that may contain Transposes which must be optimized before
     // the transformation and it also inserts Transpose that can be optimized by TransposeSinking
     transpose_sinking->add_matcher<ngraph::pass::SplitSqueezeConcatFusion>();
-
     auto eliminations = manager.register_pass<ngraph::pass::GraphRewrite>();
     eliminations->add_matcher<ngraph::pass::EliminateUnsqueezeGather>();
     eliminations->add_matcher<ngraph::pass::NopElimination>(m_use_shapes /* do not use shape for elimination */);

@@ -87,6 +87,7 @@
 #include <transformations/op_conversions/convert_roi_align_v3_to_v9.hpp>
 #include <transformations/op_conversions/softsign_decomposition.hpp>
 #include "ngraph_transformations/mha_fusion.hpp"
+#include "transformations/op_conversions/eye_decomposition.hpp"
 
 #include <ngraph/opsets/opset1.hpp>
 #include <ngraph/opsets/opset2.hpp>
@@ -96,6 +97,9 @@
 #include <ngraph/op/util/op_types.hpp>
 #include <ngraph/pass/manager.hpp>
 #include <ngraph/graph_util.hpp>
+
+#include "ngraph_ops/augru_cell.hpp"
+#include "ngraph_ops/augru_sequence.hpp"
 
 #include <transformations/common_optimizations/lin_op_sequence_fusion.hpp>
 
@@ -351,6 +355,10 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
                 node)) {
             return gru_cell->get_clip() == 0.0f
                    && gru_cell->get_activations() == std::vector<std::string>{"sigmoid", "tanh"};
+        } else if (const auto &augru_cell = std::dynamic_pointer_cast<const ov::op::internal::AUGRUCell>(
+                node)) {
+            return augru_cell->get_clip() == 0.0f
+                   && augru_cell->get_activations() == std::vector<std::string>{"sigmoid", "tanh"};
         } else if (const auto &lstm_cell = std::dynamic_pointer_cast<const ngraph::opset4::LSTMCell>(
                 node)) {
             return lstm_cell->get_clip() == 0.0f &&
@@ -386,6 +394,12 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
             return gru_seq->get_clip() == 0.0f &&
                    gru_seq->get_activations() == std::vector<std::string>{"sigmoid", "tanh"} &&
                    !ngraph::op::util::is_seq_len_provided(gru_seq->get_input_node_shared_ptr(2),
+                                                          max_seq_len);
+        } else if (const auto &augru_seq = std::dynamic_pointer_cast<const ov::op::internal::AUGRUSequence>(
+                node)) {
+            return augru_seq->get_clip() == 0.0f &&
+                   augru_seq->get_activations() == std::vector<std::string>{"sigmoid", "tanh"} &&
+                   !ngraph::op::util::is_seq_len_provided(augru_seq->get_input_node_shared_ptr(2),
                                                           max_seq_len);
         } else if (const auto &lstm_seq = std::dynamic_pointer_cast<const ngraph::opset6::LSTMSequence>(
                 node)) {
@@ -464,6 +478,7 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
     // Allow FP16 Converts to be folded and FP16 constants to be upgraded to FP32 data type
     pass_config->disable<ov::pass::DisableDecompressionConvertConstantFolding>();
     pass_config->disable<ov::pass::ConvertCompressedOnlyToLegacy>();
+    pass_config->disable<ov::pass::EyeDecomposition>();
 
     pass_config->disable<ngraph::pass::ConvertGELU>();
     pass_config->disable<ngraph::pass::ConvertShuffleChannels3>();

@@ -102,7 +102,9 @@ void op::v0::TensorIterator::validate_and_infer_types() {
                 out_shape[axis] = part_size;
                 body_parameter->set_partial_shape(out_shape);
             } else {
-                body_parameter->set_partial_shape(ov::PartialShape::dynamic(input_partial_shape.rank()));
+                auto inner_ps = input_partial_shape;
+                inner_ps[axis] = Dimension::dynamic();
+                body_parameter->set_partial_shape(inner_ps);
             }
         } else if (auto merged_input_description = ov::as_type_ptr<MergedInputDescription>(input_description)) {
             auto body_value = m_bodies[0]->get_results().at(merged_input_description->m_body_value_index)->input(0);
