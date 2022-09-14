@@ -35,9 +35,7 @@ Interaction::Interaction(const std::shared_ptr<ngraph::Node>& op, const dnnl::en
     }
 }
 
-void Interaction::initSupportedPrimitiveDescriptors() {
-    if (!supportedPrimitiveDescriptors.empty())
-        return;
+void Interaction::getSupportedDescriptors() {
     dataPrecision = getOriginalInputPrecisionAtPort(0);
     // Current impl only support FP32 BF16, BF16 is preferred
     if (dataPrecision != InferenceEngine::Precision::FP32 && dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core_bf16)) {
@@ -45,6 +43,16 @@ void Interaction::initSupportedPrimitiveDescriptors() {
     } else {
         dataPrecision = InferenceEngine::Precision::FP32;
     }
+    outputDataType = dataPrecision;
+    if (!fusedWith.empty()) {
+        outputDataType = fusedWith[fusedWith.size() - 1]->getOriginalOutputPrecisionAtPort(0);
+    }
+}
+
+void Interaction::initSupportedPrimitiveDescriptors() {
+    if (!supportedPrimitiveDescriptors.empty())
+        return;
+    std::cout << "What is my ouput " << outputDataType << std::endl;
     // initialize input ports
     std::vector<PortConfigurator> inPortConfigs;
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
@@ -58,7 +66,7 @@ void Interaction::initSupportedPrimitiveDescriptors() {
     std::vector<PortConfigurator> outPortConfigs = {
         PortConfigurator {
             LayoutType::ncsp,
-            dataPrecision,
+            outputDataType,
             getOutputShapeAtPort(0),
             false,
             -1
@@ -220,6 +228,19 @@ bool Interaction::isSupportedOperation(const std::shared_ptr<const ngraph::Node>
         return false;
     }
     return true;
+}
+
+bool Interaction::canFuse(const NodePtr& node) const {
+    //experiment on FQ only
+    if (node->getType() == Type::FakeQuantize) {
+        bool ret = node->getAlgorithm() != Algorithm::FQBinarization;
+        for (size_t i = 1; i < node->getParentEdges().size(); i++) {
+            ret &= node->getParentEdgesAtPort(i)[0]->getParent()->getChildEdges().size() == 1;
+        }
+        return ret;
+    } else {
+        return false;
+    }
 }
 
 

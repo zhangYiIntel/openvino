@@ -129,6 +129,10 @@ void GraphOptimizer::ApplyCommonGraphOptimizations(Graph &graph) {
     FuseFullyConnectedAndSimpleOperation(graph);
     graph.RemoveDroppedNodes();
 
+    OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseInteractionAndSimpleOperation");
+    FuseInteractionAndSimpleOperation(graph);
+    graph.RemoveDroppedNodes();
+
     OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseMatMulAndSimpleOperation");
     FuseMatMulAndSimpleOperation(graph);
     graph.RemoveDroppedNodes();
@@ -728,6 +732,50 @@ static bool BF16QuantizeNodeFusing(const NodePtr& parentNode, const NodePtr& chi
         one_of(Precision::BF16,
             parentNode->getOriginalOutputPrecisionAtPort(0),
             childNode->getOriginalOutputPrecisionAtPort(0));
+}
+
+void GraphOptimizer::FuseInteractionAndSimpleOperation(Graph &graph) {
+    auto& graphNodes = graph.GetNodes();
+
+    auto isSuitableParentNode = [](NodePtr node) {
+        return node->getType() == Type::Interaction && node->getChildEdges().size() == 1;
+    };
+
+    auto parent = graphNodes.begin();
+    while (parent != graphNodes.end()) {
+        auto parentNode = *parent;
+        if (!isSuitableParentNode(parentNode)) {
+            parent++;
+            continue;
+        }
+
+        auto childNode = parentNode->getChildEdgeAt(0)->getChild();
+        if (!parentNode->canFuse(childNode)) {
+            parent++;
+            continue;
+        }
+
+        //  BF16 Quantize Layer Fusing Disabling
+        if (BF16QuantizeNodeFusing(parentNode, childNode)) {
+            parent++;
+            continue;
+        }
+
+        childNode->fuseInto(parentNode);
+
+        if (childNode->getType() == Type::FakeQuantize) {
+            auto parentEdges = childNode->parentEdges;
+            for (auto &parentEdge : parentEdges) {
+                auto p_edge = parentEdge.lock();
+                if (p_edge->getParent()->getType() == Type::Interaction)
+                    continue;
+
+                graph.RemoveEdge(p_edge);
+            }
+        }
+
+        graph.DropNode(childNode);
+    }
 }
 
 void GraphOptimizer::FuseFullyConnectedAndSimpleOperation(Graph &graph) {

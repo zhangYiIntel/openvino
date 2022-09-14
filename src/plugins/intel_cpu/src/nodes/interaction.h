@@ -17,7 +17,7 @@ namespace node {
 class Interaction : public Node {
 public:
     Interaction(const std::shared_ptr<ngraph::Node>& op, const dnnl::engine& eng, WeightsSharing::Ptr &cache);
-    void getSupportedDescriptors() override {};
+    void getSupportedDescriptors() override;
     void initSupportedPrimitiveDescriptors() override;
     void execute(dnnl::stream strm) override;
     bool created() const override;
@@ -27,6 +27,7 @@ public:
     bool isExecutable() const override;
     void executeDynamicImpl(dnnl::stream strm) override;
     void prepareParams() override;
+    bool canFuse(const NodePtr& node) const override;
 
 private:
     template <typename Prec>
@@ -46,7 +47,7 @@ private:
     size_t outputFeaturesLen = 0;
     size_t interactFeatureSize = 0;
     std::string errorPrefix;
-    dnnl::memory::data_type outputDataType;
+    InferenceEngine::Precision outputDataType;
     InferenceEngine::Blob::Ptr inputPtr;
     InferenceEngine::Blob::Ptr outputPtr;
     InferenceEngine::Blob::Ptr flatPtr;
