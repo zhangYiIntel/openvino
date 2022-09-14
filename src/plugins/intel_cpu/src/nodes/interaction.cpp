@@ -20,6 +20,7 @@
 #include "common/bfloat16.hpp"
 #include "common/cpu_memcpy.h"
 #include <cpu/x64/cpu_isa_traits.hpp>
+#include "fake_quantize.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -77,14 +78,30 @@ void Interaction::initSupportedPrimitiveDescriptors() {
 }
 
 template <typename T>
-static inline void move_ker(T* out, const T* in, int64_t len) {
+inline void move_ker(T* out, const T* in, int64_t len) {
     cpu_memcpy(out, in, sizeof(T) * len);
 }
 
-template <typename T>
-static inline void cat(const T* in1, const T* in2, T* out, size_t in1_size, size_t in2_size) {
+template <typename InPrec, typename OutPrec>
+inline void cat(const InPrec* in1, const InPrec* in2, OutPrec* out, size_t in1_size, size_t in2_size, float scale = 0.0) {
     move_ker(out, in1, in1_size);
     move_ker(&out[in1_size], in2, in2_size);
+}
+
+template <>
+inline void cat<float, int8_t>(const float* in1, const float* in2, int8_t* out, size_t in1_size, size_t in2_size, float scale) {
+    size_t index = 0;
+    for (size_t i = 0; i < in1_size; i++) {
+        float dst_val = dnnl::impl::nstl::min(static_cast<float>(-5.12978),
+            dnnl::impl::nstl::max(static_cast<float>(5.0896), in1[i]));
+        out[index++] = int8_t(roundf(dst_val * scale));
+    }
+
+    for (size_t i = 0; i < in2_size; i++) {
+         float dst_val = dnnl::impl::nstl::min(static_cast<float>(-5.12978),
+            dnnl::impl::nstl::max(static_cast<float>(5.0896), in2[i]));
+        out[index++] = int8_t(roundf(dst_val * scale));
+    }
 }
 
 template <typename T>
@@ -108,13 +125,13 @@ static inline void flat_triangle(const T* in, T* out, size_t size) {
     }
 }
 
-template <typename Prec>
+template <typename Prec, typename OutPrec>
 void Interaction::run(dnnl::stream strm) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
     using namespace dnnl;
 
-    auto outFeaturesPtr = reinterpret_cast<Prec*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
+    auto outFeaturesPtr = reinterpret_cast<OutPrec*>(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetPtr());
     std::vector<const Prec*> inputPtrs(inputSizes);
     for (uint32_t n = 0; n < inputSizes; n++) {
         auto inPtr = reinterpret_cast<const Prec*>(getParentEdgeAt(n)->getMemoryPtr()->GetPtr());
@@ -131,27 +148,45 @@ void Interaction::run(dnnl::stream strm) {
             flatPtr->buffer().as<Prec*>(), inputSizes);
         //in1 dense feature
         //in2 flatted interaction features
-        cat<Prec>(
+        cat<Prec, OutPrec>(
           &inputPtrs[0][start * featureSize],
           flatPtr->buffer().as<Prec*>(),
           &outFeaturesPtr[start * outputFeaturesLen],
           featureSize,
-          interactFeatureSize);
+          interactFeatureSize,
+          outputScale);
     }
 }
 
 
 
 void Interaction::execute(dnnl::stream strm) {
-    if (dataPrecision == InferenceEngine::Precision::FP32) {
-        run<float>(strm);
-    } else if (dataPrecision == InferenceEngine::Precision::BF16) {
-        run<int16_t>(strm);
+    if (outputDataType == InferenceEngine::Precision::FP32) {
+        run<float, float>(strm);
+    } else if (outputDataType == InferenceEngine::Precision::BF16) {
+        run<int16_t, int16_t>(strm);
+    } else if (outputDataType == InferenceEngine::Precision::I8) {
+        run<float, int8_t>(strm);
     }
 }
 
 bool Interaction::created() const {
     return getType() == Type::Interaction;
+}
+
+void Interaction::setPostOps() {
+    for (int i = 0; i < fusedWith.size(); i++) {
+        auto& node = fusedWith[i];
+
+        if (auto* fakeQuantizeNode = dynamic_cast<FakeQuantize *>(node.get())) {
+            auto scale = fakeQuantizeNode->getInputScale();
+            outputScale = scale[0];
+            std::cout << "Interaction output scale|" << outputScale << "|" << scale.size() << std::endl;
+            continue;
+        }
+
+        IE_THROW() << "Fusing of " << NameFromType(node->getType()) << " operation to " << NameFromType(this->getType()) << " node is not implemented";
+    }
 }
 
 void Interaction::prepareParams() {
@@ -199,7 +234,7 @@ void Interaction::prepareParams() {
     } else {
         initializeInternalMemory<int16_t>(internalMemDesc);
     }
-
+    setPostOps();
     inputMemPtr = std::make_shared<Memory>(getEngine());
     outputMemPtr = std::make_shared<Memory>(getEngine());
     auto inDesc = MemoryDescUtils::convertToDnnlBlockedMemoryDesc(inputPtr->getTensorDesc());

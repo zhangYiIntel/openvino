@@ -30,7 +30,7 @@ public:
     bool canFuse(const NodePtr& node) const override;
 
 private:
-    template <typename Prec>
+    template <typename Prec, typename OutPrec>
     void run(dnnl::stream strm);
     template<typename Prec>
     void inline initializeInternalMemory(const std::vector<InferenceEngine::TensorDesc>& descs) {
@@ -41,6 +41,7 @@ private:
         outputPtr->allocate();
         flatPtr->allocate();
     }
+    void setPostOps();
     size_t batchSize = 0;
     size_t featureSize = 0;
     size_t inputSizes = 0;
@@ -55,6 +56,7 @@ private:
     MemoryPtr outputMemPtr;
     std::vector<uint32_t> featureSizes;
     InferenceEngine::Precision dataPrecision;
+    float outputScale;
 };
 
 }   // namespace node
