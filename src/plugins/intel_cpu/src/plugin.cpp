@@ -108,6 +108,8 @@
 #include <low_precision/low_precision.hpp>
 #include <low_precision/multiply_to_group_convolution.hpp>
 #include <low_precision/network_helper.hpp>
+#include <low_precision/concat.hpp>
+#include <low_precision/move_fake_quantize.hpp>
 #include "openvino/runtime/core.hpp"
 #include "openvino/util/common_util.hpp"
 
@@ -321,7 +323,8 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
     manager.register_pass<ngraph::pass::ConvertPrecision>(precisions);
     manager.register_pass<ngraph::pass::EliminateConvert>();
     manager.register_pass<SwapConvertTranspose>();
-    manager.register_pass<ConvertToInteraction>();
+    if (getenv("ENABLE_INTERACTION"))
+        manager.register_pass<ConvertToInteraction>();
 
     auto pass_config = manager.get_pass_config();
 
@@ -573,6 +576,15 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
         lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::MultiplyToGroupConvolutionTransformation>([](const_node_ptr& node) -> bool {
             return true;//MultiplyToGroupConvolutionTransformation::isDynamicOrScalar(node);
         });
+        //Disable concat FQ
+        if (getenv("DISABLE_CONCAT")) {
+            lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::ConcatTransformation>([](const_node_ptr& node) -> bool {
+                return true;
+            });
+            lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::MoveFakeQuantize>([](const_node_ptr& node) -> bool {
+                return true;
+            });
+        }
         lptManager.run_passes(nGraphFunc);
     }
 

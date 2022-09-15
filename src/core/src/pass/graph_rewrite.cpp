@@ -17,6 +17,8 @@
 #include "ngraph/log.hpp"
 #include "ngraph/op/util/sub_graph_base.hpp"
 #include "perf_counters.hpp"
+#include "ngraph/pass/visualize_tree.hpp"
+#include "ngraph/pass/manager.hpp"
 
 /* GraphRewrite algorithm:
  * GraphRewrite processes an input graph in an topological order(i.e. args before users)
@@ -147,7 +149,12 @@ bool ov::pass::GraphRewrite::apply_matcher_passes(std::shared_ptr<Model> f,
         // Apply MatcherPass. In case if it returns true no other MatcherPasses will apply
         // to this node
         bool status = m_pass->apply(node);
-
+        if (m_print && status) {
+            static int count = 0;
+            ngraph::pass::Manager pass_manager;
+            pass_manager.register_pass<ngraph::pass::VisualizeTree>(std::to_string(count++) + "_after_" + m_pass->get_name() + ".svg");
+            pass_manager.run_passes(f);
+        }
         // In case if MatcherPass registered nodes they will be added to the beginning of execution
         // queue
         const auto& new_nodes = m_pass->get_new_nodes();

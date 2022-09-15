@@ -224,11 +224,15 @@ public:
 
     void set_pass_config(const std::shared_ptr<PassConfig>& pass_config) override;
 
+    void set_print(bool print){
+        m_print = print;
+    }
+
 protected:
     bool apply_matcher_passes(std::shared_ptr<Model> f, std::deque<std::weak_ptr<Node>> nodes_to_run);
 
     bool m_enable_shape_inference = false;
-
+    bool m_print = false;
     std::vector<std::shared_ptr<ov::pass::MatcherPass>> m_matchers;
 };
 
