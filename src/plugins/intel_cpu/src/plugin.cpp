@@ -576,15 +576,6 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
         lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::MultiplyToGroupConvolutionTransformation>([](const_node_ptr& node) -> bool {
             return true;//MultiplyToGroupConvolutionTransformation::isDynamicOrScalar(node);
         });
-        //Disable concat FQ
-        if (getenv("DISABLE_CONCAT")) {
-            lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::ConcatTransformation>([](const_node_ptr& node) -> bool {
-                return true;
-            });
-            lptManager.get_pass_config()->set_callback<ngraph::pass::low_precision::MoveFakeQuantize>([](const_node_ptr& node) -> bool {
-                return true;
-            });
-        }
         lptManager.run_passes(nGraphFunc);
     }
 

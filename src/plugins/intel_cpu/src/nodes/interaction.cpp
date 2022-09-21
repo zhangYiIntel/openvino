@@ -117,17 +117,6 @@ template <>
 inline void cat<float, int8_t>(const float* in1, const float* in2, int8_t* out, size_t in1_size, size_t in2_size, float scale) {
     postFQ(out, in1, in1_size, scale);
     postFQ(out + in1_size, in2, in2_size, scale);
-    // for (size_t i = 0; i < in1_size; i++) {
-    //     float dst_val = dnnl::impl::nstl::min(static_cast<float>(5.0896),
-    //         dnnl::impl::nstl::max(static_cast<float>(-5.12978), in1[i]));
-    //     out[index++] = int8_t(roundf(dst_val * scale));
-    // }
-
-    // for (size_t i = 0; i < in2_size; i++) {
-    //      float dst_val = dnnl::impl::nstl::min(static_cast<float>(5.0896),
-    //         dnnl::impl::nstl::max(static_cast<float>(-5.12978), in2[i]));
-    //     out[index++] = int8_t(roundf(dst_val * scale));
-    // }
 }
 
 template <typename T>
