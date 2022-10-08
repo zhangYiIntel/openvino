@@ -10,6 +10,7 @@
 #include <openvino/pass/pattern/op/wrap_type.hpp>
 #include <openvino/pass/pattern/op/or.hpp>
 #include <transformations/utils/utils.hpp>
+#include "ngraph_ops/type_relaxed.hpp"
 
 #include "itt.hpp"
 
@@ -164,10 +165,17 @@ ov::intel_cpu::FuseFQtoInteraction::FuseFQtoInteraction() {
             if (fq_scale.empty())
                 return false;
         }
+        bool success = ov::replace_output_update_name(fq_node->output(0), fq_node->input_value(0));
+        if (!success) {
+            return false;
+        }
         auto inter_node = ov::as_type_ptr<InteractionNode>(pattern_to_output.at(inter_m).get_node_shared_ptr());
         inter_node->set_fq_scales(fq_scale);
         inter_node->set_fq_output_type(fq_node->get_output_element_type(0));
-        bool success = ov::replace_output_update_name(fq_node->output(0), fq_node->input_value(0));
+
+        auto replacement = std::make_shared<ngraph::op::TypeRelaxed<InteractionNode>>(*inter_node, fq_node->get_output_element_type(0));
+        copy_runtime_info(inter_node, replacement);
+        replace_node(inter_node, replacement);
         return success;
     };
 

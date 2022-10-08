@@ -62,7 +62,7 @@ void Interaction::initSupportedPrimitiveDescriptors() {
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
         inPortConfigs.emplace_back(
             LayoutType::ncsp,
-            outputDataType,
+            dataPrecision,
             getInputShapeAtPort(i),
             false, -1);
     }
