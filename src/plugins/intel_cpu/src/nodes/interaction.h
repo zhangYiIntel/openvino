@@ -17,7 +17,7 @@ namespace node {
 class Interaction : public Node {
 public:
     Interaction(const std::shared_ptr<ngraph::Node>& op, const dnnl::engine& eng, WeightsSharing::Ptr &cache);
-    void getSupportedDescriptors() override {};
+    void getSupportedDescriptors() override;
     void initSupportedPrimitiveDescriptors() override;
     void execute(dnnl::stream strm) override;
     bool created() const override;
@@ -41,6 +41,8 @@ private:
     MemoryPtr outputMemPtr;
     std::vector<uint32_t> featureSizes;
     InferenceEngine::Precision dataPrecision;
+    InferenceEngine::Precision outputDataType;
+    std::vector<float> fqScales;
 };
 
 }   // namespace node

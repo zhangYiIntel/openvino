@@ -10,6 +10,7 @@ set(TARGET_NAME "openvino_intel_cpu_plugin")
 
 if(CMAKE_COMPILER_IS_GNUCC)
     ie_add_compiler_flags(-Wno-all)
+    ie_add_compiler_flags(-mavx512f -mavx512bw -mavx512dq -mfma)
 endif()
 
 if (WIN32)

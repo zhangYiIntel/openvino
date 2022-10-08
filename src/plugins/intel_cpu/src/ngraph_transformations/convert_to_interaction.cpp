@@ -166,6 +166,7 @@ ov::intel_cpu::FuseFQtoInteraction::FuseFQtoInteraction() {
         }
         auto inter_node = ov::as_type_ptr<InteractionNode>(pattern_to_output.at(inter_m).get_node_shared_ptr());
         inter_node->set_fq_scales(fq_scale);
+        inter_node->set_fq_output_type(fq_node->get_output_element_type(0));
         bool success = ov::replace_output_update_name(fq_node->output(0), fq_node->input_value(0));
         return success;
     };

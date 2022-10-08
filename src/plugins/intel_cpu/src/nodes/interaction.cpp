@@ -18,7 +18,9 @@
 #include "memory_desc/dnnl_blocked_memory_desc.h"
 #include "common/bfloat16.hpp"
 #include "common/cpu_memcpy.h"
+#include <ie_ngraph_utils.hpp>
 #include <cpu/x64/cpu_isa_traits.hpp>
+#include <immintrin.h>
 
 namespace ov {
 namespace intel_cpu {
@@ -31,24 +33,36 @@ Interaction::Interaction(const std::shared_ptr<ngraph::Node>& op, const dnnl::en
         IE_THROW(NotImplemented) << errorMessage;
     }
     errorPrefix = "Interaction node with name '" + getName() + "'";
+    const auto interaction = std::dynamic_pointer_cast<const InteractionNode>(op);
+    const std::vector<float>& scales = interaction->get_output_scales();
+    if (!scales.empty()) {
+        fqScales = scales;
+        outputDataType  = InferenceEngine::details::convertPrecision(interaction->get_fq_output_type());
+    }
 }
 
-void Interaction::initSupportedPrimitiveDescriptors() {
-    if (!supportedPrimitiveDescriptors.empty())
-        return;
+void Interaction::getSupportedDescriptors() {
     dataPrecision = getOriginalInputPrecisionAtPort(0);
-    // Current impl only support FP32 BF16, BF16 is preferred
     if (dataPrecision != InferenceEngine::Precision::FP32 && dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core_bf16)) {
         dataPrecision = InferenceEngine::Precision::BF16;
     } else {
         dataPrecision = InferenceEngine::Precision::FP32;
     }
+
+    if (fqScales.empty()) {
+        outputDataType = dataPrecision;;
+    }
+}
+
+void Interaction::initSupportedPrimitiveDescriptors() {
+    if (!supportedPrimitiveDescriptors.empty())
+        return;
     // initialize input ports
     std::vector<PortConfigurator> inPortConfigs;
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
         inPortConfigs.emplace_back(
             LayoutType::ncsp,
-            dataPrecision,
+            outputDataType,
             getInputShapeAtPort(i),
             false, -1);
     }
@@ -56,7 +70,7 @@ void Interaction::initSupportedPrimitiveDescriptors() {
     std::vector<PortConfigurator> outPortConfigs = {
         PortConfigurator {
             LayoutType::ncsp,
-            dataPrecision,
+            outputDataType,
             getOutputShapeAtPort(0),
             false,
             -1
@@ -94,6 +108,35 @@ static inline void flat_triangle(const uint8_t* in, uint8_t* out, size_t size, s
     }
 }
 
+inline void outputScale(int8_t* out, const float* in, size_t len, float scale) {
+    size_t i = 0;
+    __m512 scale_vec512 = _mm512_set1_ps(scale);
+    for (i = 0; i < len - 16; i += 16) {
+        auto in0_32f = _mm512_loadu_ps((const void*)(in + i));
+        in0_32f = _mm512_mul_round_ps(
+        in0_32f, scale_vec512, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        auto in0_32i = _mm512_cvt_roundps_epi32(in0_32f, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), _mm512_cvtsepi32_epi8(in0_32i));
+    }
+
+    for (; i < len; i++) {
+        float ps_val = scale * in[i];
+        int32_t i32_val = int32_t(std::round(ps_val));
+        if (i32_val < INT8_MIN) {
+            *(out + i) = INT8_MIN;
+        } else if (i32_val > INT8_MAX) {
+            *(out + i) = INT8_MAX;
+        } else {
+            *(out + i) = (int8_t)i32_val;
+        }
+    }
+}
+
+inline void postFQ(const float* in1, const float* in2, int8_t* out, size_t in1_size, size_t in2_size, float scale) {
+    outputScale(out, in1, in1_size, scale);
+    outputScale(out + in1_size, in2, in2_size, scale);
+}
+
 void Interaction::execRef(dnnl::stream strm) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
@@ -117,13 +160,21 @@ void Interaction::execRef(dnnl::stream strm) {
             reinterpret_cast<uint8_t*>(flatMemPtr->GetPtr()), inputSizes, dataPrecision.size());
         //in1 dense feature
         //in2 flatted interaction features
-        cat(
-          inputPtrs[0] + start * featureSize * dataPrecision.size(),
-          reinterpret_cast<const uint8_t*>(flatMemPtr->GetPtr()),
-          outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size(),
-          featureSize,
-          interactFeatureSize,
-          dataPrecision.size());
+        if (!fqScales.empty()) {
+            postFQ(reinterpret_cast<const float*>(inputPtrs[0] + start * featureSize * dataPrecision.size()),
+                reinterpret_cast<const float*>(flatMemPtr->GetPtr()),
+                reinterpret_cast<int8_t*>(outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size()),
+                featureSize,
+                interactFeatureSize,
+                fqScales[0]);
+        } else {
+            cat(inputPtrs[0] + start * featureSize * dataPrecision.size(),
+                reinterpret_cast<const uint8_t*>(flatMemPtr->GetPtr()),
+                outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size(),
+                featureSize,
+                interactFeatureSize,
+                dataPrecision.size());
+        }
     }
 }
 
