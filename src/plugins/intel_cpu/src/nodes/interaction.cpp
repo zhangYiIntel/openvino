@@ -302,14 +302,6 @@ void Interaction::execRef(dnnl::stream strm) {
         //in1 dense feature
         //in2 flatted interaction features
         if (!fqScales.empty()) {
-            postFQ(reinterpret_cast<const float*>(inputPtrs[0] + start * featureSize * dataPrecision.size()),
-                reinterpret_cast<const float*>(flatMemPtr->GetPtr()),
-                reinterpret_cast<int8_t*>(outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size()),
-                featureSize,
-                interactFeatureSize,
-                fqScales[0]);
-            // std::vector<int8_t> tmp_result(featureSize, 0);
-            std::vector<int8_t> tmp_result2(interactFeatureSize, 0);
             if (moveFeatureKernel) {
                 jit_move_scale_call_args call_args;
                 call_args.p_in = inputPtrs[0] + start * featureSize * dataPrecision.size();
@@ -320,7 +312,7 @@ void Interaction::execRef(dnnl::stream strm) {
             if (moveInteractKernel) {
                 jit_move_scale_call_args call_args;
                 call_args.p_in = flatMemPtr->GetPtr();
-                call_args.p_out = tmp_result2.data();
+                call_args.p_out = outFeaturesPtr + (start * outputFeaturesLen + featureSize) * dataPrecision.size();
                 call_args.p_scales = fqScales.data();
                 (*moveFeatureKernel)(&call_args);
             }
@@ -395,13 +387,13 @@ void Interaction::prepareParams() {
 
     if (mayiuse(cpu_isa_t::avx512_core)) {
         moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx512_core>(jcp));
-        // moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx512_core>(interJcp));
+        moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx512_core>(interJcp));
     } else if (mayiuse(cpu_isa_t::avx2)) {
         moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx2>(jcp));
-        // moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx2>(interJcp));
+        moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx2>(interJcp));
     } else if (mayiuse(cpu_isa_t::sse41)) {
         moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::sse41>(jcp));
-        // moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::sse41>(interJcp));
+        moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::sse41>(interJcp));
     } else {
         THROW_ERROR << "cannot create jit eltwise kernel";
     }
