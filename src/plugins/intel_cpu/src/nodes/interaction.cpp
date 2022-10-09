@@ -23,8 +23,7 @@
 #include <cpu/x64/jit_generator.hpp>
 #include "emitters/jit_dnnl_emitters.hpp"
 #include "emitters/jit_load_store_emitters.hpp"
-#include<fstream>
-#include <immintrin.h>
+#include <fstream>
 
 namespace ov {
 namespace intel_cpu {
@@ -249,35 +248,6 @@ static inline void flat_triangle(const uint8_t* in, uint8_t* out, size_t size, s
     }
 }
 
-inline void outputScale(int8_t* out, const float* in, size_t len, float scale) {
-    size_t i = 0;
-    __m512 scale_vec512 = _mm512_set1_ps(scale);
-    for (i = 0; i < len - 16; i += 16) {
-        auto in0_32f = _mm512_loadu_ps((const void*)(in + i));
-        in0_32f = _mm512_mul_round_ps(
-        in0_32f, scale_vec512, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-        auto in0_32i = _mm512_cvt_roundps_epi32(in0_32f, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), _mm512_cvtsepi32_epi8(in0_32i));
-    }
-
-    for (; i < len; i++) {
-        float ps_val = scale * in[i];
-        int32_t i32_val = int32_t(std::round(ps_val));
-        if (i32_val < INT8_MIN) {
-            *(out + i) = INT8_MIN;
-        } else if (i32_val > INT8_MAX) {
-            *(out + i) = INT8_MAX;
-        } else {
-            *(out + i) = (int8_t)i32_val;
-        }
-    }
-}
-
-inline void postFQ(const float* in1, const float* in2, int8_t* out, size_t in1_size, size_t in2_size, float scale) {
-    outputScale(out, in1, in1_size, scale);
-    outputScale(out + in1_size, in2, in2_size, scale);
-}
-
 void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
@@ -387,22 +357,25 @@ void Interaction::prepareParams() {
     interJcp.with_scales = !fqScales.empty();
     interJcp.broadcast_scales = fqScales.size() == 1;
     interJcp.work_amount = interactFeatureSize;
+    if (!fqScales.empty()) {
+        if (mayiuse(cpu_isa_t::avx512_core)) {
+            moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx512_core>(jcp));
+            moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx512_core>(interJcp));
+        } else if (mayiuse(cpu_isa_t::avx2)) {
+            moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx2>(jcp));
+            moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx2>(interJcp));
+        } else if (mayiuse(cpu_isa_t::sse41)) {
+            moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::sse41>(jcp));
+            moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::sse41>(interJcp));
+        } else {
+            THROW_ERROR << "cannot create jit eltwise kernel";
+        }
 
-    if (mayiuse(cpu_isa_t::avx512_core)) {
-        moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx512_core>(jcp));
-        moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx512_core>(interJcp));
-    } else if (mayiuse(cpu_isa_t::avx2)) {
-        moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx2>(jcp));
-        moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::avx2>(interJcp));
-    } else if (mayiuse(cpu_isa_t::sse41)) {
-        moveFeatureKernel.reset(new jit_move_scale_kernel<cpu_isa_t::sse41>(jcp));
-        moveInteractKernel.reset(new jit_move_scale_kernel<cpu_isa_t::sse41>(interJcp));
-    } else {
-        THROW_ERROR << "cannot create jit eltwise kernel";
+        if (moveFeatureKernel && moveInteractKernel) {
+            moveFeatureKernel->create_ker();
+            moveInteractKernel->create_ker();
+        }
     }
-
-    if (moveFeatureKernel)
-        moveFeatureKernel->create_ker();
 }
 
 void Interaction::executeDynamicImpl(dnnl::stream strm) {
