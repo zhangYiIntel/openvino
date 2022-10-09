@@ -59,7 +59,7 @@ public:
     void prepareParams() override;
 
 private:
-    void execRef(dnnl::stream strm);
+    void execRef(dnnl::stream strm, bool fuseFQ = false);
     size_t batchSize = 0;
     size_t featureSize = 0;
     size_t inputSizes = 0;

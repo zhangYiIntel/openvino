@@ -278,7 +278,7 @@ inline void postFQ(const float* in1, const float* in2, int8_t* out, size_t in1_s
     outputScale(out + in1_size, in2, in2_size, scale);
 }
 
-void Interaction::execRef(dnnl::stream strm) {
+void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
     using namespace dnnl;
@@ -293,7 +293,7 @@ void Interaction::execRef(dnnl::stream strm) {
     {DNNL_ARG_SRC, inputMemPtr->GetPrimitive()},
     {DNNL_ARG_WEIGHTS, inputMemPtr->GetPrimitive()},
     {DNNL_ARG_DST, outputMemPtr->GetPrimitive()}};
-
+    float* scales = fuseFQ ? fqScales.data() : nullptr;
     for (int64_t start = 0; start < batchSize; start++) {
         cat(reinterpret_cast<uint8_t*>(inputMemPtr->GetPtr()), inputPtrs, featureSizes, start, dataPrecision.size());
         (*prim).execute(strm, mem_ags);
@@ -301,20 +301,20 @@ void Interaction::execRef(dnnl::stream strm) {
             reinterpret_cast<uint8_t*>(flatMemPtr->GetPtr()), inputSizes, dataPrecision.size());
         //in1 dense feature
         //in2 flatted interaction features
-        if (!fqScales.empty()) {
+        if (fuseFQ) {
             if (moveFeatureKernel) {
-                jit_move_scale_call_args call_args;
-                call_args.p_in = inputPtrs[0] + start * featureSize * dataPrecision.size();
-                call_args.p_out = outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size();
-                call_args.p_scales = fqScales.data();
-                (*moveFeatureKernel)(&call_args);
+                jit_move_scale_call_args featArgs;
+                featArgs.p_in = inputPtrs[0] + start * featureSize * dataPrecision.size();
+                featArgs.p_out = outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size();
+                featArgs.p_scales = scales;
+                (*moveFeatureKernel)(&featArgs);
             }
             if (moveInteractKernel) {
-                jit_move_scale_call_args call_args;
-                call_args.p_in = flatMemPtr->GetPtr();
-                call_args.p_out = outFeaturesPtr + (start * outputFeaturesLen + featureSize) * dataPrecision.size();
-                call_args.p_scales = fqScales.data();
-                (*moveFeatureKernel)(&call_args);
+                jit_move_scale_call_args interArgs;
+                interArgs.p_in = flatMemPtr->GetPtr();
+                interArgs.p_out = outFeaturesPtr + (start * outputFeaturesLen + featureSize) * dataPrecision.size();
+                interArgs.p_scales = scales;
+                (*moveFeatureKernel)(&interArgs);
             }
         } else {
             cat(inputPtrs[0] + start * featureSize * dataPrecision.size(),
@@ -330,7 +330,10 @@ void Interaction::execRef(dnnl::stream strm) {
 
 
 void Interaction::execute(dnnl::stream strm) {
-    execRef(strm);
+    if (fqScales.empty())
+        execRef(strm);
+    else
+        execRef(strm, true);
 }
 
 bool Interaction::created() const {
