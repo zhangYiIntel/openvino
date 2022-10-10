@@ -601,12 +601,7 @@ static void TransformationUpToCPUSpecificOpSet(std::shared_ptr<ngraph::Function>
 
     // Snippets may brake MHA patterns so the fusion has to performed before
     postLPTPassManager.register_pass<MHAFusion>();
-    if (getenv("FUSE_FQ"))
-        postLPTPassManager.register_pass<FuseFQtoInteraction>();
-    if (getenv("YI_PLOT")) {
-            static int count = 0;
-            postLPTPassManager.register_pass<ngraph::pass::VisualizeTree>(std::to_string(count++) + "_after.svg");
-    }
+    postLPTPassManager.register_pass<FuseFQtoInteraction>();
     postLPTPassManager.get_pass_config()->set_callback<MHAFloatFusion, MHAFloatFusion2,
                                                        MHAQuantFusion, MHAQuantFusion2>([_enableBF16](const std::shared_ptr<const ov::Node>& n) -> bool {
         std::string errorMessage;
