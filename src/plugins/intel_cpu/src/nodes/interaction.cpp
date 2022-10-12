@@ -35,6 +35,8 @@ struct jit_move_scale_kernel : public jit_uni_move_scale_kernel, public jit_gene
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_move_scale_kernel)
 
     explicit jit_move_scale_kernel(const jit_move_scale_compile_params& jcp) : jit_uni_move_scale_kernel(jcp), jit_generator() {
+        load_emitter.reset(new jit_load_emitter(this, isa));
+        store_emitter.reset(new jit_store_emitter(this, isa));
         vec_size = dnnl::impl::cpu::x64::cpu_isa_traits<isa>::vlen / sizeof(float);
     }
     virtual ~jit_move_scale_kernel() {}
@@ -99,10 +101,8 @@ private:
 
         this->postamble();
 
-        for (const auto& emitter : emitters) {
-            if (emitter.second)
-                emitter.second->emit_data();
-        }
+        load_emitter->emit_data();
+        store_emitter->emit_data();
     }
 
     void convert_reorder(size_t step) {
@@ -128,22 +128,14 @@ private:
 #undef GET_OFF
 
     inline void load(const Vmm& vmm_dst, const Xbyak::Reg64& reg_src, Precision src_prc, const int& elt_num, bool fill) {
-        const auto seed = load_emitter_params(src_prc, Precision::FP32, elt_num, fill, "float_min").hash();
-        if (!emitters[seed]) {
-            emitters[seed].reset(new jit_load_emitter(this, isa, src_prc, Precision::FP32, elt_num, Precision::FP32, fill, "float_min"));
-        }
-
-        emitters[seed]->emit_code({static_cast<size_t>(reg_src.getIdx()), 0}, {static_cast<size_t>(vmm_dst.getIdx())},
-                                  pool_aux_vmm_idxs, pool_aux_gpr_idxs);
+        load_emitter->emit_code({static_cast<size_t>(reg_src.getIdx())}, {static_cast<size_t>(vmm_dst.getIdx())},
+                                std::make_shared<load_emitter_context>(src_prc, Precision::FP32, elt_num, 0, fill, "float_min"),
+                                pool_aux_vmm_idxs, pool_aux_gpr_idxs);
     }
     inline void store(const Xbyak::Reg64& reg_dst, const Vmm& vmm_src, Precision dst_prc, const int& elt_num) {
-        const auto seed = store_emitter_params(Precision::FP32, dst_prc, elt_num).hash();
-        if (!emitters[seed]) {
-            emitters[seed].reset(new jit_store_emitter(this, isa, Precision::FP32, dst_prc, elt_num));
-        }
-
-        emitters[seed]->emit_code({static_cast<size_t>(vmm_src.getIdx()), 0}, {static_cast<size_t>(reg_dst.getIdx())},
-                                  pool_aux_vmm_idxs, pool_aux_gpr_idxs);
+        store_emitter->emit_code({static_cast<size_t>(vmm_src.getIdx())}, {static_cast<size_t>(reg_dst.getIdx())},
+                                 std::make_shared<store_emitter_context>(Precision::FP32, dst_prc, elt_num, 0),
+                                 pool_aux_vmm_idxs, pool_aux_gpr_idxs);
     }
 
     size_t vec_size;
@@ -163,7 +155,8 @@ private:
     const std::vector<size_t> pool_aux_gpr_idxs = { static_cast<size_t>(rsi.getIdx()), static_cast<size_t>(rbp.getIdx()) };
     const std::vector<size_t> pool_aux_vmm_idxs = { static_cast<size_t>(xmm_tmp.getIdx()) };
 
-    std::unordered_map<size_t, std::unique_ptr<jit_emitter>> emitters;
+    std::unique_ptr<jit_load_emitter> load_emitter = nullptr;
+    std::unique_ptr<jit_store_emitter> store_emitter = nullptr;
 };
 
 Interaction::Interaction(const std::shared_ptr<ngraph::Node>& op, const dnnl::engine& eng, WeightsSharing::Ptr &cache)
