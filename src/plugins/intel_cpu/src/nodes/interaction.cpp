@@ -34,7 +34,7 @@ template <cpu_isa_t isa>
 struct jit_move_scale_kernel : public jit_uni_move_scale_kernel, public jit_generator {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_move_scale_kernel)
 
-    explicit jit_move_scale_kernel(const jit_move_scale_compile_params& jcp) : jit_uni_move_scale_kernel(jcp), jit_generator() {
+    explicit jit_move_scale_kernel(const jit_move_scale_compile_params& jcp) : jit_uni_move_scale_kernel(jcp), jit_generator(jit_name())  {
         load_emitter.reset(new jit_load_emitter(this, isa));
         store_emitter.reset(new jit_store_emitter(this, isa));
         vec_size = dnnl::impl::cpu::x64::cpu_isa_traits<isa>::vlen / sizeof(float);
