@@ -43,14 +43,6 @@ struct jit_move_scale_kernel : public jit_uni_move_scale_kernel, public jit_gene
 
     void create_ker() override {
         jit_generator::create_kernel();
-        auto ker = jit_ker();
-        auto size = getSize();
-        FILE* fp = ::fopen("move_scale_kernel", "wb");
-        if (fp) {
-            size_t unused = ::fwrite(ker, size, 1, fp);
-            UNUSED(unused);
-            ::fclose(fp);
-        }
         ker_ = (decltype(ker_))jit_ker();
     }
 
