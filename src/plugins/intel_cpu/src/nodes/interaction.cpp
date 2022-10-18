@@ -237,8 +237,12 @@ static inline void flat_triangle(const uint8_t* in, uint8_t* out, size_t size, s
 inline void postFQ(int8_t* out, const float* in, size_t len, float scale) {
     size_t i = 0;
     __m512 scale_vec512 = _mm512_set1_ps(scale);
+    __m512 max_vec512 = _mm512_set1_ps(5.08965);
+    __m512 min_vec512 = _mm512_set1_ps(-5.12978);
     for (i = 0; i < len - 16; i += 16) {
         auto in0_32f = _mm512_loadu_ps((const void*)(in + i));
+        in0_32f = _mm512_min_ps(in0_32f, max_vec512);
+        in0_32f = _mm512_max_ps(in0_32f, min_vec512);
         in0_32f = _mm512_mul_round_ps(
         in0_32f, scale_vec512, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
         auto in0_32i = _mm512_cvt_roundps_epi32(in0_32f, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
