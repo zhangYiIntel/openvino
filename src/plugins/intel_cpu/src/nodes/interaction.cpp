@@ -7,6 +7,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <immintrin.h>
 
 #include "ngraph_transformations/op/interaction.hpp"
 #include "interaction.h"
@@ -233,6 +234,34 @@ static inline void flat_triangle(const uint8_t* in, uint8_t* out, size_t size, s
     }
 }
 
+inline void postFQ(int8_t* out, const float* in, size_t len, float scale) {
+    size_t i = 0;
+    __m512 scale_vec512 = _mm512_set1_ps(scale);
+    for (i = 0; i < len - 16; i += 16) {
+        auto in0_32f = _mm512_loadu_ps((const void*)(in + i));
+        in0_32f = _mm512_mul_round_ps(
+        in0_32f, scale_vec512, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        auto in0_32i = _mm512_cvt_roundps_epi32(in0_32f, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), _mm512_cvtsepi32_epi8(in0_32i));
+    }
+
+    for (; i < len; i++) {
+        float ps_val = scale * in[i];
+        int32_t i32_val = int32_t(std::round(ps_val));
+        if (i32_val < INT8_MIN) {
+            *(out + i) = INT8_MIN;
+        } else if (i32_val > INT8_MAX) {
+            *(out + i) = INT8_MAX;
+        } else {
+            *(out + i) = (int8_t)i32_val;
+        }
+    }
+}
+
+inline void computFQ(const float* in1, const float* in2, int8_t* out, size_t in1_size, size_t in2_size, float scale) {
+    postFQ(out, in1, in1_size, scale);
+    postFQ(out + in1_size, in2, in2_size, scale);
+}
 void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
@@ -257,20 +286,12 @@ void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
         //in1 dense feature
         //in2 flatted interaction features
         if (fuseFQ) {
-            if (moveFeatureKernel) {
-                jit_move_scale_call_args featArgs;
-                featArgs.p_in = inputPtrs[0] + start * featureSize * dataPrecision.size();
-                featArgs.p_out = outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size();
-                featArgs.p_scales = scales;
-                (*moveFeatureKernel)(&featArgs);
-            }
-            if (moveInteractKernel) {
-                jit_move_scale_call_args interArgs;
-                interArgs.p_in = flatMemPtr->GetPtr();
-                interArgs.p_out = outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size() + featureSize;
-                interArgs.p_scales = scales;
-                (*moveInteractKernel)(&interArgs);
-            }
+            computFQ(inputPtrs[0] + start * featureSize * dataPrecision.size(),
+                reinterpret_cast<const uint8_t*>(flatMemPtr->GetPtr()),
+                outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size(),
+                featureSize,
+                interactFeatureSize,
+                *scales);
         } else {
             cat(inputPtrs[0] + start * featureSize * dataPrecision.size(),
                 reinterpret_cast<const uint8_t*>(flatMemPtr->GetPtr()),
