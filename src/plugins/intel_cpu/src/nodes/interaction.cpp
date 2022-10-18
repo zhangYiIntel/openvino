@@ -164,6 +164,8 @@ Interaction::Interaction(const std::shared_ptr<ngraph::Node>& op, const dnnl::en
     if (!scales.empty()) {
         fqScales = scales;
         outputDataType  = InferenceEngine::details::convertPrecision(interaction->get_fq_output_type());
+        inputHigh = interaction->inputHigh;
+        inputLow = interaction->inputLow;
     }
 }
 
@@ -234,11 +236,11 @@ static inline void flat_triangle(const uint8_t* in, uint8_t* out, size_t size, s
     }
 }
 
-inline void postFQ(int8_t* out, const float* in, size_t len, float scale) {
+inline void postFQ(int8_t* out, const float* in, size_t len, float scale, float lower, float high) {
     size_t i = 0;
     __m512 scale_vec512 = _mm512_set1_ps(scale);
-    __m512 max_vec512 = _mm512_set1_ps(5.08965);
-    __m512 min_vec512 = _mm512_set1_ps(-5.12978);
+    __m512 max_vec512 = _mm512_set1_ps(high);
+    __m512 min_vec512 = _mm512_set1_ps(lower);
     for (i = 0; i < len - 16; i += 16) {
         auto in0_32f = _mm512_loadu_ps((const void*)(in + i));
         in0_32f = _mm512_min_ps(in0_32f, max_vec512);
@@ -246,7 +248,8 @@ inline void postFQ(int8_t* out, const float* in, size_t len, float scale) {
         in0_32f = _mm512_mul_round_ps(
         in0_32f, scale_vec512, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
         auto in0_32i = _mm512_cvt_roundps_epi32(in0_32f, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), _mm512_cvtsepi32_epi8(in0_32i));
+        auto out_i8 = _mm512_cvtsepi32_epi8(in0_32i);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), out_i8);
     }
 
     for (; i < len; i++) {
@@ -262,9 +265,9 @@ inline void postFQ(int8_t* out, const float* in, size_t len, float scale) {
     }
 }
 
-inline void computFQ(const float* in1, const float* in2, int8_t* out, size_t in1_size, size_t in2_size, float scale) {
-    postFQ(out, in1, in1_size, scale);
-    postFQ(out + in1_size, in2, in2_size, scale);
+inline void computFQ(const float* in1, const float* in2, int8_t* out, size_t in1_size, size_t in2_size, float scale, float low, float high) {
+    postFQ(out, in1, in1_size, scale, low, high);
+    postFQ(out + in1_size, in2, in2_size, scale, low, high);
 }
 void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
     using tag = dnnl::memory::format_tag;
@@ -295,7 +298,9 @@ void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
                 reinterpret_cast<int8_t*>(outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size()),
                 featureSize,
                 interactFeatureSize,
-                *scales);
+                *scales,
+                inputLow,
+                inputHigh);
         } else {
             cat(inputPtrs[0] + start * featureSize * dataPrecision.size(),
                 reinterpret_cast<const uint8_t*>(flatMemPtr->GetPtr()),

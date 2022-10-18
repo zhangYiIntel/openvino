@@ -57,6 +57,8 @@ public:
     bool isExecutable() const override;
     void executeDynamicImpl(dnnl::stream strm) override;
     void prepareParams() override;
+    float inputLow;
+    float inputHigh;
 
 private:
     void execRef(dnnl::stream strm, bool fuseFQ = false);

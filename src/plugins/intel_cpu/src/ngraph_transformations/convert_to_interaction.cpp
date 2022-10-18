@@ -77,7 +77,7 @@ ov::intel_cpu::ConvertToInteraction::ConvertToInteraction() {
     this->register_matcher(m, callback);
 }
 
-static std::vector<float> simplifyToScale(const std::shared_ptr<ov::opset8::FakeQuantize>& fq_node) {
+static std::vector<float> simplifyToScale(const std::shared_ptr<ov::opset8::FakeQuantize>& fq_node, float& inputLow, float& inputHigh) {
     auto levels = fq_node->get_levels();
     auto input_low = ov::as_type_ptr<ov::opset8::Constant>(fq_node->get_input_node_shared_ptr(1))->cast_vector<float>();
     auto input_high = ov::as_type_ptr<ov::opset8::Constant>(fq_node->get_input_node_shared_ptr(2))->cast_vector<float>();
@@ -139,7 +139,8 @@ static std::vector<float> simplifyToScale(const std::shared_ptr<ov::opset8::Fake
             outScale = isc;
         }
     }
-
+    inputLow = input_low[0];
+    inputHigh = input_high[0];
     return outScale;
 }
 
@@ -161,8 +162,9 @@ ov::intel_cpu::FuseFQtoInteraction::FuseFQtoInteraction() {
         auto& pattern_to_output = m.get_pattern_value_map();
         auto fq_node = ov::as_type_ptr<ov::opset8::FakeQuantize>(pattern_to_output.at(fq_m).get_node_shared_ptr());
         std::vector<float> fq_scale;
+        float low, high;
         if (fq_node) {
-            fq_scale = simplifyToScale(fq_node);
+            fq_scale = simplifyToScale(fq_node, low, high);
             if (fq_scale.empty())
                 return false;
         }
@@ -173,7 +175,8 @@ ov::intel_cpu::FuseFQtoInteraction::FuseFQtoInteraction() {
         auto inter_node = ov::as_type_ptr<InteractionNode>(pattern_to_output.at(inter_m).get_node_shared_ptr());
         inter_node->set_fq_scales(fq_scale);
         inter_node->set_fq_output_type(fq_node->get_output_element_type(0));
-
+        inter_node->inputLow = low;
+        inter_node->inputHigh = high;
         auto replacement = std::make_shared<ngraph::op::TypeRelaxed<InteractionNode>>(*inter_node, fq_node->get_output_element_type(0));
         copy_runtime_info(inter_node, replacement);
         replace_node(inter_node, replacement);

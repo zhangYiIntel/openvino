@@ -43,6 +43,8 @@ public:
     ngraph::element::Type get_fq_output_type() const {
         return fq_output_type;
     }
+    float inputLow;
+    float inputHigh;
 
 private:
     ngraph::element::Type m_output_type;
