@@ -109,7 +109,7 @@ private:
         bool is_tail = step < vec_size;
 
         load(vmm_in, reg_in_aux, jcp_.src_prc, step, is_tail);
-
+        int3()
         if (jcp_.with_scales) {
             if (!jcp_.broadcast_scales) {
                 load(vmm_scales, reg_scales, Precision::FP32, step, is_tail);
@@ -282,9 +282,9 @@ void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
             if (moveInteractKernel) {
                 jit_move_scale_call_args interArgs;
                 interArgs.p_in = flatMemPtr->GetPtr();
-                interArgs.p_out = outFeaturesPtr + (start * outputFeaturesLen + featureSize) * dataPrecision.size();
+                interArgs.p_out = outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size() + featureSize;
                 interArgs.p_scales = scales;
-                (*moveFeatureKernel)(&interArgs);
+                (*moveInteractKernel)(&interArgs);
             }
         } else {
             cat(inputPtrs[0] + start * featureSize * dataPrecision.size(),
