@@ -286,9 +286,9 @@ void Interaction::execRef(dnnl::stream strm, bool fuseFQ) {
         //in1 dense feature
         //in2 flatted interaction features
         if (fuseFQ) {
-            computFQ(inputPtrs[0] + start * featureSize * dataPrecision.size(),
-                reinterpret_cast<const uint8_t*>(flatMemPtr->GetPtr()),
-                outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size(),
+            computFQ(reinterpret_cast<const float*>(inputPtrs[0] + start * featureSize * dataPrecision.size()),
+                reinterpret_cast<const float*>(flatMemPtr->GetPtr()),
+                reinterpret_cast<int8_t*>(outFeaturesPtr + start * outputFeaturesLen * dataPrecision.size()),
                 featureSize,
                 interactFeatureSize,
                 *scales);
