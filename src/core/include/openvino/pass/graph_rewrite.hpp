@@ -266,12 +266,14 @@ public:
     void add_matcher(const std::shared_ptr<pattern::Matcher>& m, const ov::graph_rewrite_callback& callback);
 
     bool run_on_model(const std::shared_ptr<ov::Model>& m) override;
-
+    void set_print(bool print){
+        m_print = print;
+    }
     void set_pass_config(const std::shared_ptr<PassConfig>& pass_config) override;
 
 protected:
     bool apply_matcher_passes(std::shared_ptr<Model> f, std::deque<std::weak_ptr<Node>> nodes_to_run);
-
+    bool m_print = false;
     bool m_enable_shape_inference = false;
 
     std::vector<std::shared_ptr<ov::pass::MatcherPass>> m_matchers;

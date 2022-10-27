@@ -823,9 +823,12 @@ Engine::LoadExeNetworkImpl(const InferenceEngine::CNNNetwork &network, const std
     }
 
     ApplyPerformanceHints(config, nGraphFunc);
-
+    ngraph::pass::Manager pass_manager;
+    pass_manager.register_pass<ngraph::pass::VisualizeTree>("after_lpt.svg");
+    pass_manager.run_passes(nGraphFunc);
     ConvertToCPUSpecificOpset(nGraphFunc);
-
+    pass_manager.register_pass<ngraph::pass::VisualizeTree>("after_cpu_transform.svg");
+    pass_manager.run_passes(nGraphFunc);
     // update the props after the perf mode translated to configs
     // TODO: Clarify the behavior of SetConfig method. Skip eng_config or not?
     Config conf = engConfig;

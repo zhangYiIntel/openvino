@@ -81,9 +81,13 @@ public:
         NGRAPH_SUPPRESS_DEPRECATED_END
     }
 
+    void set_print(bool print){
+        m_print = print;
+    }
+
 private:
     size_t m_num_iters;
-
+    bool m_print = false;
     std::vector<std::shared_ptr<ov::pass::MatcherPass>> m_matchers;
 };
 }  // namespace pass
