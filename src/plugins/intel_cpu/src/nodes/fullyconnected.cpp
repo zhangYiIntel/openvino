@@ -25,6 +25,32 @@ namespace intel_cpu {
 namespace node {
 namespace {
 
+struct FCDynMKey {
+    int64_t N;
+    int64_t K;
+    size_t hash() const;
+    bool operator==(const FCDynMKey& rhs) const;
+};
+
+size_t FCDynMKey::hash() const {
+    using namespace dnnl::impl;
+    using namespace dnnl::impl::primitive_hashing;
+
+    size_t seed = 0;
+
+    seed = hash_combine(seed, N);
+    seed = hash_combine(seed, K);
+    return seed;
+}
+
+bool FCDynMKey::operator==(const FCDynMKey &rhs) const {
+    bool retVal = true;
+    if (N != rhs.N || K != rhs.K) {
+        retVal = false;
+    }
+    return retVal;
+}
+
 struct FCKey {
     DnnlMemoryDescCPtr inp0;
     DnnlMemoryDescCPtr inp1;
@@ -219,88 +245,124 @@ void FullyConnected::prepareParams() {
         if (!biasMemPtr || !biasMemPtr->isAllocated())
             IE_THROW() << "Input memory hasn't been allocated.";
     }
-
-    const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
-    if (selected_pd == nullptr)
-        IE_THROW() << "Preferable primitive descriptor is not set for node " << getName() << ".";
-
     AttrPtr attr = std::make_shared<dnnl::primitive_attr>();
-    setPostOps(*attr, dstMemPtr->getStaticDims());
+    if (isDynamicNode()) {
+        const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
+        if (selected_pd == nullptr)
+            IE_THROW() << "Preferable primitive descriptor is not set for node " << getName() << ".";
 
-    DnnlMemoryDescCPtr weightDesc = wghMemPtr->GetDescWithType<DnnlMemoryDesc>();
-    DnnlMemoryDescCPtr biasDesc = nullptr;
-    if (biasMemPtr) {
-        biasDesc = biasMemPtr->GetDescWithType<DnnlMemoryDesc>();
-    }
+        setPostOps(*attr, dstMemPtr->getStaticDims());
 
-    DnnlMemoryDescCPtr inDesc = srcMemPtr->GetDescWithType<DnnlMemoryDesc>();
-    DnnlMemoryDescCPtr outDesc = dstMemPtr->GetDescWithType<DnnlMemoryDesc>();
-
-    FCKey key = {inDesc,
-                 weightDesc,
-                 biasDesc,
-                 outDesc,
-                 *attr,
-                 selected_pd->getImplementationType()};
-
-    auto engine = getEngine();
-
-    auto builder = [&engine](const FCKey& key) -> std::shared_ptr<dnnl::primitive> {
-        auto inDesc = key.inp0->getDnnlDesc();
-        if (inDesc.dims().size() == 3) {
-            auto inDims = inDesc.dims();
-            auto normalizedInDims = {inDims[0] * inDims[1], inDims[2]};
-            inDesc = inDesc.reshape(normalizedInDims);
+        DnnlMemoryDescCPtr weightDesc = wghMemPtr->GetDescWithType<DnnlMemoryDesc>();
+        DnnlMemoryDescCPtr biasDesc = nullptr;
+        if (biasMemPtr) {
+            biasDesc = biasMemPtr->GetDescWithType<DnnlMemoryDesc>();
         }
 
-        auto outDesc = key.out->getDnnlDesc();
-        if (outDesc.dims().size() == 3) {
-            auto outDims = outDesc.dims();
-            auto normalizedOutDims = { outDims[0] * outDims[1], outDims[2] };
-            outDesc = outDesc.reshape(normalizedOutDims);
-        }
+        DnnlMemoryDescCPtr inDesc = srcMemPtr->GetDescWithType<DnnlMemoryDesc>();
+        DnnlMemoryDescCPtr outDesc = dstMemPtr->GetDescWithType<DnnlMemoryDesc>();
 
-        std::shared_ptr<dnnl::inner_product_forward::desc> fcDsc;
-        if (key.bias) {
-            fcDsc = std::make_shared<dnnl::inner_product_forward::desc>(dnnl::prop_kind::forward_scoring,
-                                                                          inDesc,
-                                                                          key.inp1->getDnnlDesc(),
-                                                                          key.bias->getDnnlDesc(),
-                                                                          outDesc);
-        } else {
-            fcDsc = std::make_shared<dnnl::inner_product_forward::desc>(dnnl::prop_kind::forward_scoring,
-                                                                          inDesc,
-                                                                          key.inp1->getDnnlDesc(),
-                                                                          outDesc);
-        }
-        DnnlDesriptor desc(fcDsc);
-        primitive_desc_iterator itpd = desc.createPrimitiveDescriptorIterator(engine, key.attr);
-        inner_product_forward::primitive_desc prim_desc;
+        FCKey key = {inDesc,
+                    weightDesc,
+                    biasDesc,
+                    outDesc,
+                    *attr,
+                    selected_pd->getImplementationType()};
 
-        while (static_cast<bool>(itpd))  {
-            impl_desc_type impl_type = parse_impl_name(itpd.impl_info_str());
+        auto engine = getEngine();
 
-            if (impl_type == key.implType) {
-                prim_desc = itpd.get();
-                break;
+        auto builder = [&engine](const FCKey& key) -> std::shared_ptr<dnnl::primitive> {
+            auto inDesc = key.inp0->getDnnlDesc();
+            if (inDesc.dims().size() == 3) {
+                auto inDims = inDesc.dims();
+                auto normalizedInDims = {inDims[0] * inDims[1], inDims[2]};
+                inDesc = inDesc.reshape(normalizedInDims);
             }
-            if (!itpd.next_impl()) {
-                return nullptr;
+
+            auto outDesc = key.out->getDnnlDesc();
+            if (outDesc.dims().size() == 3) {
+                auto outDims = outDesc.dims();
+                auto normalizedOutDims = { outDims[0] * outDims[1], outDims[2] };
+                outDesc = outDesc.reshape(normalizedOutDims);
             }
+
+            std::shared_ptr<dnnl::inner_product_forward::desc> fcDsc;
+            if (key.bias) {
+                fcDsc = std::make_shared<dnnl::inner_product_forward::desc>(dnnl::prop_kind::forward_scoring,
+                                                                            inDesc,
+                                                                            key.inp1->getDnnlDesc(),
+                                                                            key.bias->getDnnlDesc(),
+                                                                            outDesc);
+            } else {
+                fcDsc = std::make_shared<dnnl::inner_product_forward::desc>(dnnl::prop_kind::forward_scoring,
+                                                                            inDesc,
+                                                                            key.inp1->getDnnlDesc(),
+                                                                            outDesc);
+            }
+            DnnlDesriptor desc(fcDsc);
+            primitive_desc_iterator itpd = desc.createPrimitiveDescriptorIterator(engine, key.attr);
+            inner_product_forward::primitive_desc prim_desc;
+
+            while (static_cast<bool>(itpd))  {
+                impl_desc_type impl_type = parse_impl_name(itpd.impl_info_str());
+
+                if (impl_type == key.implType) {
+                    prim_desc = itpd.get();
+                    break;
+                }
+                if (!itpd.next_impl()) {
+                    return nullptr;
+                }
+            }
+
+            return std::make_shared<inner_product_forward>(prim_desc);
+        };
+
+        auto cache = getRuntimeCache();
+        auto result = cache->getOrCreate(key, builder);
+
+        if (!result.first) {
+            IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
         }
+        prim = result.first;
+    } else {
+        auto K = srcMemPtr->GetShape().getDims()[2];
+        auto N = wghMemPtr->GetShape().getDims()[1];
+        FCDynMKey fcKay = {
+            K,
+            N
+        };
 
-        return std::make_shared<inner_product_forward>(prim_desc);
-    };
+        auto engine = getEngine();
+        auto builder = [&engine](const FCDynMKey& key) -> std::shared_ptr<dnnl::primitive> {
+            using tag = memory::format_tag;
+            using dt = memory::data_type;
+            memory::dims src_dims = {DNNL_RUNTIME_DIM_VAL, key.K};
+            memory::dims weights_dims = {key.N, key.K};
+            memory::dims bias_dims = {key.N};
+            memory::dims dst_dims = {DNNL_RUNTIME_DIM_VAL, key.N};
+            memory::dims a_strides = {key.K, 1};
+            memory::dims c_strides = {key.N, 1};
+            memory::desc blocked_weights_mem(weights_dims, dt::f32, tag::AB16b64a);
+            memory::desc src_md(src_dims, dt::f32, a_strides);
+            memory::desc bias_md(bias_dims, dt::f32, tag::a);
+            memory::desc dst_md(dst_dims, dt::f32, c_strides);
 
-    auto cache = getRuntimeCache();
-    auto result = cache->getOrCreate(key, builder);
+            auto fcDsc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_scoring,
+                                                                    src_md,
+                                                                    blocked_weights_mem,
+                                                                    bias_md,
+                                                                    dst_md);
+            inner_product_forward::primitive_desc prim_desc = inner_product_forward::primitive_desc(fcDsc, engine);
 
-    if (!result.first) {
-        IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
+            return std::make_shared<inner_product_forward>(prim_desc);
+        };
+        auto cache = getRuntimeCache();
+        auto result = cache->getOrCreate(fcKay, builder);
+        if (!result.first)
+            IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
+        prim = result.first;
     }
-
-    prim = result.first;
-
     primArgs[DNNL_ARG_SRC] = srcMemPtr->GetPrimitive();
     primArgs[DNNL_ARG_WEIGHTS] = wghMemPtr->GetPrimitive();
     primArgs[DNNL_ARG_DST] = dstMemPtr->GetPrimitive();
