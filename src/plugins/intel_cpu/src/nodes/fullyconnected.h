@@ -59,7 +59,18 @@ public:
 private:
     void createDescriptorInternal(const dnnl::memory::desc &inputDesc,
                                   const dnnl::memory::desc &outputDesc);
-
+    class DynMExecutor {
+        public:
+            DynMExecutor(int K, int N, int bias, const dnnl::engine& engine);
+            std::vector<Primitive> kernels;
+            std::vector<MemoryPtr> inMemory;
+            std::vector<MemoryPtr> outMemory;
+            void exec(const std::unordered_map<int, dnnl::memory>& primArgs, dnnl::stream strm);
+            int K;
+            int N;
+    };
+    using executorPtr = std::shared_ptr<DynMExecutor>;
+    executorPtr execPtr = nullptr;
     VectorDims makeDummyInputDims() const;
     VectorDims makeDummyOutputDims(const VectorDims& inDims) const;
 

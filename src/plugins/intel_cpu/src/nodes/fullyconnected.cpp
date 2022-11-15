@@ -26,8 +26,9 @@ namespace node {
 namespace {
 
 struct FCDynMKey {
-    int64_t N;
     int64_t K;
+    int64_t N;
+    bool bias;
     size_t hash() const;
     bool operator==(const FCDynMKey& rhs) const;
 };
@@ -38,14 +39,18 @@ size_t FCDynMKey::hash() const {
 
     size_t seed = 0;
 
-    seed = hash_combine(seed, N);
     seed = hash_combine(seed, K);
+    seed = hash_combine(seed, N);
+    seed = hash_combine(seed, bias);
     return seed;
 }
 
 bool FCDynMKey::operator==(const FCDynMKey &rhs) const {
     bool retVal = true;
     if (N != rhs.N || K != rhs.K) {
+        retVal = false;
+    }
+    if (bias != rhs.bias) {
         retVal = false;
     }
     return retVal;
@@ -246,7 +251,7 @@ void FullyConnected::prepareParams() {
             IE_THROW() << "Input memory hasn't been allocated.";
     }
     AttrPtr attr = std::make_shared<dnnl::primitive_attr>();
-    if (isDynamicNode()) {
+    if (!isDynamicNode()) {
         const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
         if (selected_pd == nullptr)
             IE_THROW() << "Preferable primitive descriptor is not set for node " << getName() << ".";
@@ -327,41 +332,22 @@ void FullyConnected::prepareParams() {
         prim = result.first;
     } else {
         auto K = srcMemPtr->GetShape().getDims()[2];
-        auto N = wghMemPtr->GetShape().getDims()[1];
+        auto N = wghMemPtr->GetShape().getDims()[0];
         FCDynMKey fcKay = {
             K,
-            N
+            N,
+            withBiases
         };
 
         auto engine = getEngine();
-        auto builder = [&engine](const FCDynMKey& key) -> std::shared_ptr<dnnl::primitive> {
-            using tag = memory::format_tag;
-            using dt = memory::data_type;
-            memory::dims src_dims = {DNNL_RUNTIME_DIM_VAL, key.K};
-            memory::dims weights_dims = {key.N, key.K};
-            memory::dims bias_dims = {key.N};
-            memory::dims dst_dims = {DNNL_RUNTIME_DIM_VAL, key.N};
-            memory::dims a_strides = {key.K, 1};
-            memory::dims c_strides = {key.N, 1};
-            memory::desc blocked_weights_mem(weights_dims, dt::f32, tag::AB16b64a);
-            memory::desc src_md(src_dims, dt::f32, a_strides);
-            memory::desc bias_md(bias_dims, dt::f32, tag::a);
-            memory::desc dst_md(dst_dims, dt::f32, c_strides);
-
-            auto fcDsc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_scoring,
-                                                                    src_md,
-                                                                    blocked_weights_mem,
-                                                                    bias_md,
-                                                                    dst_md);
-            inner_product_forward::primitive_desc prim_desc = inner_product_forward::primitive_desc(fcDsc, engine);
-
-            return std::make_shared<inner_product_forward>(prim_desc);
+        auto builder = [&engine](const FCDynMKey& key) -> std::shared_ptr<DynMExecutor> {
+            return std::make_shared<DynMExecutor>(key.K, key.N, key.bias, engine);
         };
         auto cache = getRuntimeCache();
         auto result = cache->getOrCreate(fcKay, builder);
         if (!result.first)
             IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
-        prim = result.first;
+        execPtr = result.first;
     }
     primArgs[DNNL_ARG_SRC] = srcMemPtr->GetPrimitive();
     primArgs[DNNL_ARG_WEIGHTS] = wghMemPtr->GetPrimitive();
@@ -431,6 +417,26 @@ void FullyConnected::execute(dnnl::stream strm) {
         updateMemoryPtr(DNNL_ARG_DST);
 
         (*prim).execute(strm, primArgs);
+    }
+
+    if (execPtr) {
+        // in cases parameter -> FullyConnected or dynamic shapes
+        // we keep old pointer to data in primArgs on second iteration with same input shapes
+        auto updateMemoryPtr = [this](int argType) {
+            auto param = primArgs.find(argType);
+            if (param != primArgs.end()) {
+                if (argType == DNNL_ARG_SRC && getInputShapeAtPort(DATA_ID).getRank() == 3) {
+                    primArgs.at(argType).set_data_handle(getParentEdgesAtPort(0)[0]->getMemoryPtr()->GetData());
+                }
+                if (argType == DNNL_ARG_DST && getOutputShapeAtPort(0).getRank() == 3) {
+                    primArgs.at(argType).set_data_handle(getChildEdgesAtPort(0)[0]->getMemoryPtr()->GetData());
+                }
+            }
+        };
+
+        updateMemoryPtr(DNNL_ARG_SRC);
+        updateMemoryPtr(DNNL_ARG_DST);
+        execPtr->exec(primArgs, strm);
     }
 }
 
@@ -723,6 +729,94 @@ InferenceEngine::Precision FullyConnected::getRuntimePrecision() const {
     }
 
     return getMaxPrecision(inputPrecisions);
+}
+
+FullyConnected::DynMExecutor::DynMExecutor(int K, int N, int bias, const dnnl::engine& engine) : K(K), N(N) {
+    using tag = memory::format_tag;
+    using dt = memory::data_type;
+    memory::dim m_candidate[9] = {1, 2, 3, 4, 5, 6, 7, 8, 16};
+    std::cout << "Construct DYN FC|" << "|K|" << K << "|N|" << N << "|bias|" << bias << std::endl;
+    kernels.resize(9);
+    inMemory.resize(9);
+    outMemory.resize(9);
+    for (size_t i = 0; i < 9; i++) {
+        memory::dims src_dims = {m_candidate[i], K};
+        memory::dims weights_dims = {N, K};
+        memory::dims dst_dims = {m_candidate[i], N};
+        memory::dims a_strides = {K, 1};
+        memory::dims c_strides = {N, 1};
+        memory::desc blocked_weights_mem(weights_dims, dt::f32, tag::AB16b64a);
+        memory::desc src_md(src_dims, dt::f32, a_strides);
+        memory::desc dst_md(dst_dims, dt::f32, c_strides);
+        inner_product_forward::primitive_desc prim_desc;
+        if (bias > 0) {
+            memory::dims bias_dims = {N};
+            memory::desc bias_md(bias_dims, dt::f32, tag::a);
+            auto fcDsc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_scoring,
+                                                           src_md,
+                                                           blocked_weights_mem,
+                                                           bias_md,
+                                                           dst_md);
+            prim_desc = inner_product_forward::primitive_desc(fcDsc, engine);
+        } else {
+            auto fcDsc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_scoring,
+                                                           src_md,
+                                                           blocked_weights_mem,
+                                                           dst_md);
+            prim_desc = inner_product_forward::primitive_desc(fcDsc, engine);
+        }
+        kernels[i].reset(new dnnl::inner_product_forward(prim_desc));
+        auto inPtr = std::make_shared<Memory>(engine);
+        inPtr->Create(
+            DnnlBlockedMemoryDesc(InferenceEngine::Precision::FP32,
+                                  intel_cpu::Shape{static_cast<size_t>(m_candidate[i]), static_cast<size_t>(K)}),
+            nullptr,
+            false);
+        auto outPtr = std::make_shared<Memory>(engine);
+        outPtr->Create(
+            DnnlBlockedMemoryDesc(InferenceEngine::Precision::FP32,
+                                  intel_cpu::Shape{static_cast<size_t>(m_candidate[i]), static_cast<size_t>(N)}),
+            nullptr,
+            false);
+        inMemory[i] = inPtr;
+        outMemory[i] = outPtr;
+    }
+}
+
+void FullyConnected::DynMExecutor::exec(const std::unordered_map<int, dnnl::memory>& primArgs, dnnl::stream strm) {
+    auto srcMem = primArgs.at(DNNL_ARG_SRC);
+    auto M = srcMem.get_desc().dims()[0];
+    auto srcPtr = reinterpret_cast<uint8_t*>(srcMem.get_data_handle());
+    auto dstPtr = reinterpret_cast<uint8_t*>(primArgs.at(DNNL_ARG_DST).get_data_handle());
+    int rowOffset = 0;
+    int work = 0;
+    std::unordered_map<int, dnnl::memory> interArgs{primArgs};
+    for (size_t i = M; i > 0;) {
+        size_t idx = 0;
+        if (i >= 16) {
+            idx = 8;
+            work = 16;
+        } else if (i > 8) {
+            idx =  7;
+            work = 8;
+        } else {
+            idx = i - 1;
+            work = i;
+        }
+
+        auto interSrc = inMemory[idx];
+        auto interDst = outMemory[idx];
+
+        interSrc->setDataHandle(srcPtr + rowOffset * K * 4);
+        interDst->setDataHandle(dstPtr + rowOffset * N * 4);
+        auto& ker = kernels[idx];
+        interArgs[DNNL_ARG_SRC] = interSrc->GetPrimitive();
+        interArgs[DNNL_ARG_DST] = interDst->GetPrimitive();
+        (*ker).execute(strm, interArgs);
+        rowOffset += work;
+        i -= work;
+    }
+    return;
 }
 
 }   // namespace node
