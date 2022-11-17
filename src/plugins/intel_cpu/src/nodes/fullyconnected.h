@@ -61,7 +61,7 @@ private:
                                   const dnnl::memory::desc &outputDesc);
     class DynMExecutor {
         public:
-            DynMExecutor(int K, int N, int bias, const dnnl::engine& engine);
+            DynMExecutor(int K, int N, int bias, const dnnl::primitive_attr& attr, const dnnl::engine& engine);
             std::vector<Primitive> kernels;
             std::vector<MemoryPtr> inMemory;
             std::vector<MemoryPtr> outMemory;
@@ -86,6 +86,7 @@ private:
     static const size_t WEIGHTS_ID = 1;
     static const size_t BIAS_ID = 2;
     dnnl::memory::data_type outputDataType;
+    AttrPtr attr;
 };
 
 }   // namespace node

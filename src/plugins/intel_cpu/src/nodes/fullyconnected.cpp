@@ -29,6 +29,7 @@ struct FCDynMKey {
     int64_t K;
     int64_t N;
     bool bias;
+    dnnl::primitive_attr attr;
     size_t hash() const;
     bool operator==(const FCDynMKey& rhs) const;
 };
@@ -42,6 +43,7 @@ size_t FCDynMKey::hash() const {
     seed = hash_combine(seed, K);
     seed = hash_combine(seed, N);
     seed = hash_combine(seed, bias);
+    seed = hash_combine(seed, get_attr_hash(*attr.get()));
     return seed;
 }
 
@@ -53,6 +55,7 @@ bool FCDynMKey::operator==(const FCDynMKey &rhs) const {
     if (bias != rhs.bias) {
         retVal = false;
     }
+    retVal = retVal && *attr.get() == *rhs.attr.get();
     return retVal;
 }
 
@@ -144,6 +147,7 @@ FullyConnected::FullyConnected(const std::shared_ptr<ngraph::Node>& op, const dn
     } else {
         IE_THROW(NotImplemented) << errorMessage;
     }
+    attr = std::make_shared<dnnl::primitive_attr>();
 }
 
 std::vector<memory::format_tag> FullyConnected::getAvailableFormatsForDims(const Shape &dims) const {
@@ -250,7 +254,7 @@ void FullyConnected::prepareParams() {
         if (!biasMemPtr || !biasMemPtr->isAllocated())
             IE_THROW() << "Input memory hasn't been allocated.";
     }
-    AttrPtr attr = std::make_shared<dnnl::primitive_attr>();
+
     if (!isDynamicNode()) {
         const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
         if (selected_pd == nullptr)
@@ -331,17 +335,22 @@ void FullyConnected::prepareParams() {
         }
         prim = result.first;
     } else {
+        static int count = 0;
         auto K = srcMemPtr->GetShape().getDims()[2];
         auto N = wghMemPtr->GetShape().getDims()[0];
+        auto M = srcMemPtr->GetShape().getDims()[1];
+        std::cout << "Going to infer|" << count++ << "|K|" << K  << "|N|" << N << "|M|" << M << std::endl;
+        setPostOps(*attr, dstMemPtr->getStaticDims());
         FCDynMKey fcKay = {
             K,
             N,
-            withBiases
+            withBiases,
+            *attr
         };
 
         auto engine = getEngine();
         auto builder = [&engine](const FCDynMKey& key) -> std::shared_ptr<DynMExecutor> {
-            return std::make_shared<DynMExecutor>(key.K, key.N, key.bias, engine);
+            return std::make_shared<DynMExecutor>(key.K, key.N, key.bias, key.attr, engine);
         };
         auto cache = getRuntimeCache();
         auto result = cache->getOrCreate(fcKay, builder);
@@ -731,7 +740,7 @@ InferenceEngine::Precision FullyConnected::getRuntimePrecision() const {
     return getMaxPrecision(inputPrecisions);
 }
 
-FullyConnected::DynMExecutor::DynMExecutor(int K, int N, int bias, const dnnl::engine& engine) : K(K), N(N) {
+FullyConnected::DynMExecutor::DynMExecutor(int K, int N, int bias, const dnnl::primitive_attr& attr, const dnnl::engine& engine) : K(K), N(N) {
     using tag = memory::format_tag;
     using dt = memory::data_type;
     memory::dim m_candidate[9] = {1, 2, 3, 4, 5, 6, 7, 8, 16};
@@ -757,13 +766,13 @@ FullyConnected::DynMExecutor::DynMExecutor(int K, int N, int bias, const dnnl::e
                                                            blocked_weights_mem,
                                                            bias_md,
                                                            dst_md);
-            prim_desc = inner_product_forward::primitive_desc(fcDsc, engine);
+            prim_desc = inner_product_forward::primitive_desc(fcDsc, attr, engine);
         } else {
             auto fcDsc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_scoring,
                                                            src_md,
                                                            blocked_weights_mem,
                                                            dst_md);
-            prim_desc = inner_product_forward::primitive_desc(fcDsc, engine);
+            prim_desc = inner_product_forward::primitive_desc(fcDsc, attr, engine);
         }
         kernels[i].reset(new dnnl::inner_product_forward(prim_desc));
         auto inPtr = std::make_shared<Memory>(engine);
