@@ -25,6 +25,8 @@ namespace intel_cpu {
 class InferRequestBase;
 class InferRequest;
 
+class ProfilerGraph;
+
 class Graph {
 public:
     typedef std::shared_ptr<Graph> Ptr;
@@ -201,6 +203,10 @@ public:
         dynBatch = newDynBatch;
     }
 
+    void SetGraphID(int id) {
+        graph_id = id;
+    }
+
 protected:
     void VisitNode(NodePtr node, std::vector<NodePtr>& sortedNodes);
 
@@ -216,9 +222,8 @@ protected:
     }
     Status status { Status::NotReady };
 
-    // For dumping purposes. -1 - no counting, all other positive
-    // values mean increment it within each Infer() call
-    int infer_count = -1;
+    int infer_count = 0;
+    int graph_id = -1;
 
     bool reuse_io_tensors = true;
 
@@ -271,6 +276,9 @@ private:
     int dynBatch = -1;
 
     void EnforceBF16();
+
+    bool isSubgraph = false;
+    friend class ProfilerGraph;
 };
 
 }   // namespace intel_cpu
