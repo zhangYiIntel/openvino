@@ -194,12 +194,24 @@ void Gather::initSupportedPrimitiveDescriptors() {
         }
     }
 
+    if (!isDynamic) {
+        if ((getInputShapeAtPort(GATHER_DATA).getRank() == getOutputShapeAtPort(0).getRank() + 1) &&
+                getInputShapeAtPort(GATHER_DATA).getElementsCount() == getOutputShapeAtPort(0).getElementsCount() &&
+                getInputShapeAtPort(GATHER_DATA).getDims()[0] == 1 &&
+                getOriginalInputPrecisionAtPort(GATHER_DATA) == getOriginalOutputPrecisionAtPort(0)) {
+            if (getParentEdgesAtPort(GATHER_DATA)[0]->getParent()->getType() != Type::Input &&
+                    getParentEdgeAt(0)->getParent()->getChildEdges().size() == 1) {
+                isInplace = true;
+            }
+        }
+    }
+
     // Implementation desc type will be redefined in the fn prepareParams if a kernel will be created.
     Precision dataPrecision = getOriginalInputPrecisionAtPort(GATHER_DATA);
-    addSupportedPrimDesc({{LayoutType::ncsp, dataPrecision},
+    addSupportedPrimDesc({{LayoutType::ncsp, dataPrecision, false, isInplace ? 0 : -1},
                           {LayoutType::ncsp, Precision::I32},
                           {LayoutType::ncsp, Precision::I32, isAxisInputConst}},
-                         {{LayoutType::ncsp, dataPrecision}},
+                         {{LayoutType::ncsp, dataPrecision, false, isInplace ? 0 : -1}},
                          ref_any,
                          isDynamicNode());
 }
@@ -336,6 +348,9 @@ void Gather::prepareParams() {
 }
 
 void Gather::execute(dnnl::stream strm) {
+    if (isInplace)
+        return;
+
     if (jitKernel && jitKernel->isSupportedConfiguration(afterAxisSize)) {
         const void* srcIndices = getParentEdgeAt(GATHER_INDICES)->getMemoryPtr()->GetPtr();
         const void* srcData = getParentEdgeAt(GATHER_DATA)->getMemoryPtr()->GetPtr();

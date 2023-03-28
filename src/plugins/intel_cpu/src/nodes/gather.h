@@ -85,6 +85,8 @@ private:
     static constexpr size_t GATHER_AXIS = 2;
 
     std::shared_ptr<jitGatherKernelBase> jitKernel;
+
+    bool isInplace = false;
 };
 
 }   // namespace node
