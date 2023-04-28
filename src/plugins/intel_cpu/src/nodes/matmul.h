@@ -11,6 +11,7 @@
 #include <array>
 #include "memory_desc/dnnl_blocked_memory_desc.h"
 #include "common/dnnl_executor.h"
+#include "ngraph/runtime/aligned_buffer.hpp"
 
 namespace ov {
 namespace intel_cpu {
@@ -65,6 +66,7 @@ private:
 
     std::array<DnnlBlockedMemoryDescPtr, 2> inDataDesc;
     DnnlBlockedMemoryDescPtr outDataDesc;
+    std::shared_ptr<ngraph::runtime::AlignedBuffer> packedBPtr = nullptr;
 };
 
 }   // namespace node
