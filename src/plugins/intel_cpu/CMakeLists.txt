@@ -99,10 +99,11 @@ ie_mark_target_as_cc(${TARGET_NAME})
 target_link_libraries(${TARGET_NAME} PRIVATE dnnl
                                              ov_shape_inference
                                              openvino::pugixml
-                                             inference_engine_snippets)
+                                             inference_engine_snippets
+                                             ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/mlas/libonnxruntime_mlas.a)
 
 target_compile_definitions(${TARGET_NAME} PRIVATE IMPLEMENT_INFERENCE_EXTENSION_API)
-target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/mlas/include)
 
 target_include_directories(${TARGET_NAME} SYSTEM PRIVATE
     $<TARGET_PROPERTY:dnnl,INCLUDE_DIRECTORIES>)

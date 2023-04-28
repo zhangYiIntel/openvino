@@ -22,9 +22,28 @@
 #include <dnnl_extension_utils.h>
 #include <common/primitive_hashing_utils.hpp>
 #include <cpu/x64/cpu_isa_traits.hpp>
+#include "ie_parallel.hpp"
+#include <mlas.h>
 
 using namespace dnnl;
 using namespace InferenceEngine;
+
+namespace ov {
+namespace cpu {
+class ThreadPool {
+public:
+    ThreadPool() {
+        std::cout << "Fake ThreadTool" << std::endl;
+    }
+};
+size_t getTotalThreads() {
+    return parallel_get_max_threads();
+}
+void TrySimpleParallelFor(const std::ptrdiff_t total, const std::function<void(std::ptrdiff_t)>& fn) {
+    parallel_for(total, fn);
+}
+};  // namespace cpu
+};  // namespace ov
 
 namespace ov {
 namespace intel_cpu {
@@ -202,6 +221,16 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
 
     transposeIn[0] = matMul->get_transpose_a();
     transposeIn[1] = matMul->get_transpose_b();
+    const auto& nodeB = op->get_input_node_ptr(1);
+    if (ov::is_type<ov::op::v0::Constant>(nodeB)) {
+        const auto& wgtShape = nodeB->get_output_shape(0);
+        size_t B = wgtShape[0];
+        size_t K = transposeIn[1] ? wgtShape[2] : wgtShape[1];
+        size_t N = transposeIn[1] ? wgtShape[1] : wgtShape[2];
+        int packed_b_size = MlasGemmPackBSize(N, K);
+        std::cout << "B|" << B << "|K|"<< K << "|N|" << N <<
+            "|MLAS packed B size " << packed_b_size << std::endl;
+        }
 }
 
 bool MatMul::canFuse(const NodePtr& node) const {
@@ -586,6 +615,8 @@ void MatMul::prepareParams() {
 
         auto src1Shape = src1Desc.getShape();
         auto src1Strides = getStridesAndModifyShape(src1Shape, transposeIn[1]);
+        std::cout << "original shape " << src1Strides[0] << "|" <<
+            src1Strides[1] << "|" << src1Strides[2] << std::endl;
         src1TransposedDesc = std::make_shared<DnnlBlockedMemoryDesc>(src1Desc.getPrecision(), src1Shape, src1Strides);
     } else {
         attr = initPrimitiveAttr();

@@ -199,7 +199,7 @@ bool ov::pass::MOCTransformations::run_on_model(const std::shared_ptr<ngraph::Fu
     ADD_MATCHER(common_fusions, SubtractFusion)
     ADD_MATCHER(common_fusions, TransposeToReshape)
     ADD_MATCHER(common_fusions, ReshapeSequenceFusion, m_use_shapes)
-    ADD_MATCHER(common_fusions, MatMulConstTransposesExtraction)
+    // ADD_MATCHER(common_fusions, MatMulConstTransposesExtraction)
     ADD_MATCHER(common_fusions, PReluFusion)
     ADD_MATCHER(common_fusions, DepthToSpaceFusion)
     ADD_MATCHER(common_fusions, ShuffleChannelsFusion, !m_use_shapes)
