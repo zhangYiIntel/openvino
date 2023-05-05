@@ -224,11 +224,19 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
     const auto& nodeB = op->get_input_node_ptr(1);
     if (ov::is_type<ov::op::v0::Constant>(nodeB)) {
         const auto& wgtShape = nodeB->get_output_shape(0);
+        auto wgtNode = ov::as_type<ov::op::v0::Constant>(nodeB);
         size_t B = wgtShape[0];
-        size_t K = transposeIn[1] ? wgtShape[2] : wgtShape[1];
-        size_t N = transposeIn[1] ? wgtShape[1] : wgtShape[2];
+        K = transposeIn[1] ? wgtShape[2] : wgtShape[1];
+        N = transposeIn[1] ? wgtShape[1] : wgtShape[2];
         int packed_b_size = MlasGemmPackBSize(N, K);
-        std::cout << "B|" << B << "|K|"<< K << "|N|" << N <<
+        packedBPtr = std::make_shared<ngraph::runtime::AlignedBuffer>(packed_b_size);
+        MlasGemmPackB(CblasNoTrans,
+            N,
+            K,
+            wgtNode->get_data_ptr<float>(),
+            transposeIn[1] ? K : N,
+            packedBPtr->get_ptr());
+        std::cout << "YI_MLAS|B|" << B << "|K|"<< K << "|N|" << N <<
             "|MLAS packed B size " << packed_b_size << std::endl;
         }
 }
@@ -593,122 +601,145 @@ void MatMul::prepareParams() {
         IE_THROW()  << errorPrefix << " did not allocate destination memory";
     if (!src0MemPtr || !src0MemPtr->isAllocated() || !src1MemPtr || !src1MemPtr->isAllocated())
         IE_THROW()  << errorPrefix << " did not allocate input memory";
-
-    const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
-    if (selected_pd == nullptr)
-        IE_THROW()  << errorPrefix << " did not set preferable primitive descriptor";
-
-    DnnlMemoryDescPtr src0TransposedDesc;
-    DnnlMemoryDescPtr src1TransposedDesc;
-
-    AttrPtr attr;
-
-    if (isDynamicNode()) {
-        attr = initPrimitiveAttr(dstMemPtr->getStaticDims());
-
-        const auto& src0Desc = src0MemPtr->getDesc();
-        const auto& src1Desc = src1MemPtr->getDesc();
-
-        auto src0Shape = src0Desc.getShape();
-        auto src0Strides = getStridesAndModifyShape(src0Shape, transposeIn[0]);
-        src0TransposedDesc = std::make_shared<DnnlBlockedMemoryDesc>(src0Desc.getPrecision(), src0Shape, src0Strides);
-
-        auto src1Shape = src1Desc.getShape();
-        auto src1Strides = getStridesAndModifyShape(src1Shape, transposeIn[1]);
-        std::cout << "original shape " << src1Strides[0] << "|" <<
-            src1Strides[1] << "|" << src1Strides[2] << std::endl;
-        src1TransposedDesc = std::make_shared<DnnlBlockedMemoryDesc>(src1Desc.getPrecision(), src1Shape, src1Strides);
+    if (packedBPtr) {
+        std::cout << "YI_MLAS|MLAS no need to prepare" << std::endl;
     } else {
-        attr = initPrimitiveAttr();
-        src0TransposedDesc = inDataDesc[0];
-        src1TransposedDesc = inDataDesc[1];
-    }
+        const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
+        if (selected_pd == nullptr)
+            IE_THROW()  << errorPrefix << " did not set preferable primitive descriptor";
 
-    auto dstDnnlDesc = dstMemPtr->GetDescWithType<DnnlMemoryDesc>();
+        DnnlMemoryDescPtr src0TransposedDesc;
+        DnnlMemoryDescPtr src1TransposedDesc;
 
-    DnnlMemoryDescPtr dnnlBiasMemDesc = nullptr;
-    if (withBiases) {
-        auto& biasMemory = getParentEdgeAt(2)->getMemoryPtr();
-        if (!biasMemory || !biasMemory->isAllocated())
-            IE_THROW()  << errorPrefix << " did not allocate bias memory";
-        dnnlBiasMemDesc = biasMemory->GetDescWithType<DnnlMemoryDesc>();
-    }
+        AttrPtr attr;
 
-    MatMulKey key = {src0TransposedDesc, src1TransposedDesc, dnnlBiasMemDesc,
-                     dstDnnlDesc, *attr, selected_pd->getImplementationType()};
+        if (isDynamicNode()) {
+            attr = initPrimitiveAttr(dstMemPtr->getStaticDims());
 
-    auto engine = getEngine();
+            const auto& src0Desc = src0MemPtr->getDesc();
+            const auto& src1Desc = src1MemPtr->getDesc();
 
-    auto builder = [&engine](const MatMulKey& key) -> executorPtr {
-        dnnl::matmul::primitive_desc matmul_desc;
+            auto src0Shape = src0Desc.getShape();
+            auto src0Strides = getStridesAndModifyShape(src0Shape, transposeIn[0]);
+            src0TransposedDesc = std::make_shared<DnnlBlockedMemoryDesc>(src0Desc.getPrecision(), src0Shape, src0Strides);
 
-        if (key.bias) {
-            matmul_desc = matmul::primitive_desc(
-                engine,
-                key.inp0->getDnnlDesc(),
-                key.inp1->getDnnlDesc(),
-                key.bias->getDnnlDesc(),
-                key.out->getDnnlDesc(),
-                key.attr);
+            auto src1Shape = src1Desc.getShape();
+            auto src1Strides = getStridesAndModifyShape(src1Shape, transposeIn[1]);
+            std::cout << "original shape " << src1Strides[0] << "|" <<
+                src1Strides[1] << "|" << src1Strides[2] << std::endl;
+            src1TransposedDesc = std::make_shared<DnnlBlockedMemoryDesc>(src1Desc.getPrecision(), src1Shape, src1Strides);
         } else {
-            matmul_desc = matmul::primitive_desc(
-                engine,
-                key.inp0->getDnnlDesc(),
-                key.inp1->getDnnlDesc(),
-                key.out->getDnnlDesc(),
-                key.attr);
+            attr = initPrimitiveAttr();
+            src0TransposedDesc = inDataDesc[0];
+            src1TransposedDesc = inDataDesc[1];
         }
 
-        primitive_desc_iterator itpd = matmul_desc;
-        matmul::primitive_desc prim_desc;
+        auto dstDnnlDesc = dstMemPtr->GetDescWithType<DnnlMemoryDesc>();
 
-        auto itpd_first = itpd;
-        while (static_cast<bool>(itpd))  {
-            impl_desc_type impl_type = parse_impl_name(itpd.impl_info_str());
-
-            if (impl_type == key.implType) {
-                prim_desc = itpd.get();
-                break;
-            }
-            if (!itpd.next_impl()) {
-                // In case of dynamic shapes an implementation type chosen as optimal for a primitive_desc with
-                // undefined input shapes, is not necessarily available for the primitive_desc with defined shape.
-                // Example: brgemm_avx512_amx (Intel Sapphire Rapids Platform) is available for a primitive with
-                // undefined input shapes but not available for primitive_desc with input batch 1.
-                prim_desc = itpd_first.get();
-                break;
-            }
+        DnnlMemoryDescPtr dnnlBiasMemDesc = nullptr;
+        if (withBiases) {
+            auto& biasMemory = getParentEdgeAt(2)->getMemoryPtr();
+            if (!biasMemory || !biasMemory->isAllocated())
+                IE_THROW()  << errorPrefix << " did not allocate bias memory";
+            dnnlBiasMemDesc = biasMemory->GetDescWithType<DnnlMemoryDesc>();
         }
-        return std::make_shared<DnnlExecutor>(prim_desc);
-    };
 
-    auto cache = context->getParamsCache();
-    auto result = cache->getOrCreate(key, builder);
+        MatMulKey key = {src0TransposedDesc, src1TransposedDesc, dnnlBiasMemDesc,
+                        dstDnnlDesc, *attr, selected_pd->getImplementationType()};
 
-    execPtr = result.first;
-    if (!execPtr) {
-        IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
+        auto engine = getEngine();
+
+        auto builder = [&engine](const MatMulKey& key) -> executorPtr {
+            dnnl::matmul::primitive_desc matmul_desc;
+
+            if (key.bias) {
+                matmul_desc = matmul::primitive_desc(
+                    engine,
+                    key.inp0->getDnnlDesc(),
+                    key.inp1->getDnnlDesc(),
+                    key.bias->getDnnlDesc(),
+                    key.out->getDnnlDesc(),
+                    key.attr);
+            } else {
+                matmul_desc = matmul::primitive_desc(
+                    engine,
+                    key.inp0->getDnnlDesc(),
+                    key.inp1->getDnnlDesc(),
+                    key.out->getDnnlDesc(),
+                    key.attr);
+            }
+
+            primitive_desc_iterator itpd = matmul_desc;
+            matmul::primitive_desc prim_desc;
+
+            auto itpd_first = itpd;
+            while (static_cast<bool>(itpd))  {
+                impl_desc_type impl_type = parse_impl_name(itpd.impl_info_str());
+
+                if (impl_type == key.implType) {
+                    prim_desc = itpd.get();
+                    break;
+                }
+                if (!itpd.next_impl()) {
+                    // In case of dynamic shapes an implementation type chosen as optimal for a primitive_desc with
+                    // undefined input shapes, is not necessarily available for the primitive_desc with defined shape.
+                    // Example: brgemm_avx512_amx (Intel Sapphire Rapids Platform) is available for a primitive with
+                    // undefined input shapes but not available for primitive_desc with input batch 1.
+                    prim_desc = itpd_first.get();
+                    break;
+                }
+            }
+            return std::make_shared<DnnlExecutor>(prim_desc);
+        };
+
+        auto cache = context->getParamsCache();
+        auto result = cache->getOrCreate(key, builder);
+
+        execPtr = result.first;
+        if (!execPtr) {
+            IE_THROW() << "Primitive descriptor was not found for node " << getName() << ".";
+        }
+
+        auto schratchpadMem = getScratchPadMem(execPtr->getScratchPadDesc());
+
+        primArgs[DNNL_ARG_SCRATCHPAD] = schratchpadMem->GetPrimitive();
+        primArgs[DNNL_ARG_SRC_0] = src0MemPtr->GetPrimitive();
+        primArgs[DNNL_ARG_WEIGHTS_0] = src1MemPtr->GetPrimitive();
+        primArgs[DNNL_ARG_DST] = dstMemPtr->GetPrimitive();
+        if (withBiases)
+            primArgs[DNNL_ARG_BIAS] = getParentEdgeAt(2)->getMemoryPtr()->GetPrimitive();
+
+        appendPostOpArgs(*attr, primArgs, postOpsArgs);
+    #ifdef CPU_DEBUG_CAPS
+        if (result.second == CacheEntryBase::LookUpStatus::Miss) {
+            auto pd = execPtr->getPrimitiveDesc();
+            DEBUG_LOG("verbose##", getName(), "##", DnnlExtensionUtils::query_pd_info(pd), "\n");
+        }
+    #endif
     }
-
-    auto schratchpadMem = getScratchPadMem(execPtr->getScratchPadDesc());
-
-    primArgs[DNNL_ARG_SCRATCHPAD] = schratchpadMem->GetPrimitive();
-    primArgs[DNNL_ARG_SRC_0] = src0MemPtr->GetPrimitive();
-    primArgs[DNNL_ARG_WEIGHTS_0] = src1MemPtr->GetPrimitive();
-    primArgs[DNNL_ARG_DST] = dstMemPtr->GetPrimitive();
-    if (withBiases)
-        primArgs[DNNL_ARG_BIAS] = getParentEdgeAt(2)->getMemoryPtr()->GetPrimitive();
-
-    appendPostOpArgs(*attr, primArgs, postOpsArgs);
-#ifdef CPU_DEBUG_CAPS
-    if (result.second == CacheEntryBase::LookUpStatus::Miss) {
-        auto pd = execPtr->getPrimitiveDesc();
-        DEBUG_LOG("verbose##", getName(), "##", DnnlExtensionUtils::query_pd_info(pd), "\n");
-    }
-#endif
 }
 
 void MatMul::execute(dnnl::stream strm) {
+    static ov::cpu::ThreadPool fakePool;
+    if (packedBPtr) {
+        std::vector<MLAS_SGEMM_DATA_PARAMS> gemmMlas(1);
+        auto& dstMemPtr = getChildEdgeAt(0)->getMemoryPtr();
+        auto& src0MemPtr = getParentEdgeAt(0)->getMemoryPtr();
+        const auto& inputShape = src0MemPtr->GetShape().getStaticDims();
+        size_t M = inputShape[inputShape.size()-2];
+        // std::cout << "run " << M << "|" << K << "|" << N << std::endl;
+        gemmMlas[0].BIsPacked = true;
+        gemmMlas[0].A = reinterpret_cast<float*>(src0MemPtr->GetData());
+        gemmMlas[0].lda = K;
+        gemmMlas[0].B = packedBPtr->get_ptr<float>();
+        gemmMlas[0].ldb = N;
+        gemmMlas[0].C = reinterpret_cast<float*>(dstMemPtr->GetData());
+        gemmMlas[0].ldc = N;
+        gemmMlas[0].alpha = 1;
+        gemmMlas[0].beta = 0.0f;
+        MlasGemmBatch(CblasNoTrans, CblasNoTrans, M, N, K, gemmMlas.data(), 1, &fakePool);
+        return;
+    }
     if (execPtr) {
         execPtr->exec(primArgs, strm);
     } else {
