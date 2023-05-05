@@ -23,7 +23,7 @@
 #include <common/primitive_hashing_utils.hpp>
 #include <cpu/x64/cpu_isa_traits.hpp>
 #include "ie_parallel.hpp"
-#include <mlas.h>
+#include "mlas.h"
 
 using namespace dnnl;
 using namespace InferenceEngine;
