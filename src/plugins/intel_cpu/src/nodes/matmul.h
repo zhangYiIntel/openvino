@@ -67,6 +67,7 @@ private:
     std::array<DnnlBlockedMemoryDescPtr, 2> inDataDesc;
     DnnlBlockedMemoryDescPtr outDataDesc;
     std::shared_ptr<ngraph::runtime::AlignedBuffer> packedBPtr = nullptr;
+    size_t K, N = 0;
 };
 
 }   // namespace node
