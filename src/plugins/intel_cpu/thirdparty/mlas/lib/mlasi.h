@@ -1037,7 +1037,7 @@ MlasGetMaximumThreadCount(
 {
 #if defined(BUILD_MLAS_NO_ONNXRUNTIME)
     MLAS_UNREFERENCED_PARAMETER(ThreadPool);
-    return 1;
+    return ov::cpu::getTotalThreads();
 #else
     return onnxruntime::concurrency::ThreadPool::DegreeOfParallelism(ThreadPool);
 #endif
