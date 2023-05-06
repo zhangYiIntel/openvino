@@ -85,9 +85,7 @@ MlasTrySimpleParallel(
     //
     // Execute the routine for the specified number of iterations.
     //
-    for (ptrdiff_t tid = 0; tid < Iterations; tid++) {
-        Work(tid);
-    }
+    ov::cpu::TrySimpleParallelFor(Iterations, Work);
 #else
     //
     // Schedule the threaded iterations using the thread pool object.
