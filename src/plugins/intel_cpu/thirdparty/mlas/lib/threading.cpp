@@ -43,9 +43,12 @@ MlasExecuteThreaded(
     //
     // Execute the routine for the specified number of iterations.
     //
-    for (ptrdiff_t tid = 0; tid < Iterations; tid++) {
+    // for (ptrdiff_t tid = 0; tid < Iterations; tid++) {
+    //     ThreadedRoutine(Context, tid);
+    // }
+    ov::cpu::TrySimpleParallelFor(Iterations, [&](ptrdiff_t tid) {
         ThreadedRoutine(Context, tid);
-    }
+    });
 #else
     //
     // Schedule the threaded iterations using the thread pool object.
