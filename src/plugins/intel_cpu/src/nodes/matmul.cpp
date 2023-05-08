@@ -222,7 +222,7 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
     transposeIn[0] = matMul->get_transpose_a();
     transposeIn[1] = matMul->get_transpose_b();
     const auto& nodeB = op->get_input_node_ptr(1);
-    if (ov::is_type<ov::op::v0::Constant>(nodeB) && getName() == "logits") {
+    if (ov::is_type<ov::op::v0::Constant>(nodeB)) {
         const auto& wgtShape = nodeB->get_output_shape(0);
         auto wgtNode = ov::as_type<ov::op::v0::Constant>(nodeB);
         size_t B = wgtShape[0];
@@ -230,13 +230,13 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
         N = transposeIn[1] ? wgtShape[1] : wgtShape[2];
         int packed_b_size = MlasGemmPackBSize(N, K);
         packedBPtr = std::make_shared<ngraph::runtime::AlignedBuffer>(packed_b_size);
-        MlasGemmPackB(CblasNoTrans,
+        MlasGemmPackB(transposeIn[1] ? CblasTrans : CblasNoTrans,
             N,
             K,
             wgtNode->get_data_ptr<float>(),
             transposeIn[1] ? K : N,
             packedBPtr->get_ptr());
-        std::cout << "YI_MLAS|WithBias" << withBiases << "|B|" << B << "|K|"<< K << "|N|" << N <<
+        std::cout << "YI_MLAS|transposeIn[1]|" << transposeIn[1] << "|B|" << B << "|K|"<< K << "|N|" << N <<
             "|MLAS packed B size " << packed_b_size << std::endl;
         }
 }
@@ -602,7 +602,7 @@ void MatMul::prepareParams() {
     if (!src0MemPtr || !src0MemPtr->isAllocated() || !src1MemPtr || !src1MemPtr->isAllocated())
         IE_THROW()  << errorPrefix << " did not allocate input memory";
     if (packedBPtr) {
-        std::cout << "YI_MLAS|MLAS no need to prepare" << std::endl;
+        std::cout << "YI_MLAS|" << getName() << "|MLAS no need to prepare" << std::endl;
     } else {
         const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
         if (selected_pd == nullptr)
