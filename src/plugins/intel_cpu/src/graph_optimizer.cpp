@@ -66,9 +66,9 @@ void GraphOptimizer::ApplyCommonGraphOptimizations(Graph &graph) {
     FuseConvMatmulFCDeconvAndDQScales(graph);
     graph.RemoveDroppedNodes();
 
-    OV_ITT_SCOPE_CHAIN(FIRST_INFERENCE, taskChain, itt::domains::intel_cpu_LT, "ApplyCommonGraphOptimizations", "FuseConvolutionAndBias");
-    FuseConvolutionMatMulDeconvAndBias(graph);
-    graph.RemoveDroppedNodes();
+    // OV_ITT_SCOPE_CHAIN(FIRST_INFERENCE, taskChain, itt::domains::intel_cpu_LT, "ApplyCommonGraphOptimizations", "FuseConvolutionAndBias");
+    // FuseConvolutionMatMulDeconvAndBias(graph);
+    // graph.RemoveDroppedNodes();
 
     OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseMultiplyAndAdd");
     FuseMultiplyAndAdd(graph);
@@ -134,9 +134,9 @@ void GraphOptimizer::ApplyCommonGraphOptimizations(Graph &graph) {
     FuseFullyConnectedAndSimpleOperation(graph);
     graph.RemoveDroppedNodes();
 
-    OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseMatMulAndSimpleOperation");
-    FuseMatMulAndSimpleOperation(graph);
-    graph.RemoveDroppedNodes();
+    // OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseMatMulAndSimpleOperation");
+    // FuseMatMulAndSimpleOperation(graph);
+    // graph.RemoveDroppedNodes();
 
     OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseMVNAndSimpleOperation");
     FuseMVNAndSimpleOperation(graph);
