@@ -222,7 +222,7 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
     transposeIn[0] = matMul->get_transpose_a();
     transposeIn[1] = matMul->get_transpose_b();
     const auto& nodeB = op->get_input_node_ptr(1);
-    if (ov::is_type<ov::op::v0::Constant>(nodeB)) {
+    if (ov::is_type<ov::op::v0::Constant>(nodeB) && getName() == "logits") {
         const auto& wgtShape = nodeB->get_output_shape(0);
         auto wgtNode = ov::as_type<ov::op::v0::Constant>(nodeB);
         size_t B = wgtShape[0];
@@ -236,7 +236,7 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
             wgtNode->get_data_ptr<float>(),
             transposeIn[1] ? K : N,
             packedBPtr->get_ptr());
-        std::cout << "YI_MLAS|B|" << B << "|K|"<< K << "|N|" << N <<
+        std::cout << "YI_MLAS|WithBias" << withBiases << "|B|" << B << "|K|"<< K << "|N|" << N <<
             "|MLAS packed B size " << packed_b_size << std::endl;
         }
 }
@@ -740,11 +740,12 @@ void MatMul::execute(dnnl::stream strm) {
         gemmMlas[0].beta = 0.0f;
         MlasGemmBatch(CblasNoTrans, CblasNoTrans, M, N, K, gemmMlas.data(), 1, &fakePool);
         return;
-    }
-    if (execPtr) {
-        execPtr->exec(primArgs, strm);
     } else {
-        IE_THROW() << errorPrefix << " doesn't have an initialized executor";
+        if (execPtr) {
+            execPtr->exec(primArgs, strm);
+        } else {
+            IE_THROW() << errorPrefix << " doesn't have an initialized executor";
+        }
     }
 }
 
