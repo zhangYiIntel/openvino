@@ -8,7 +8,9 @@
 #include <ngraph/opsets/opset3.hpp>
 #include <ngraph/rt_info.hpp>
 #include <ngraph/pattern/op/wrap_type.hpp>
+#include <ngraph/pattern/op/or.hpp>
 #include "transformations/cpu_opset/x64/op/mha.hpp"
+#include "transformations/cpu_opset/x64/op/mha2.hpp"
 #include "simplify_fakequantize.hpp"
 
 #include "itt.hpp"
@@ -247,6 +249,193 @@ ov::intel_cpu::MHAFloatFusion2::MHAFloatFusion2() {
     };
 
     auto m = std::make_shared<ngraph::pattern::Matcher>(transpose3, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+/*
+B: batch size
+M: tokens in query
+N: tokens in key & value
+H: head count (6/8/...)
+K: number of state(64)
+
+    Q: [B, M, H*K] => reshape => [B, M, H, K] => Transpose<0,2,1,3> => reshape => [B*H, M, K] => Matmul_qk_in0
+with_kv_cache = False
+    K: [B, N, H*K] => reshape => [B, N, H, K] => Transpose<0,2,1,3> => reshape => [B*H, N, K] => Matmul_qk_in1
+    V: [B, N, H*K] => reshape => [B, N, H, K] => Transpose<0,2,1,3> => reshape => [B*H, N, K] => Matmul_wv_in1
+with_kv_cache = True
+    kt: [B, 1, H*K] => Reshape => [B, 1, H, K] => Transpose<0,2,1,3> => [B, H, 1, K] => Concat to pastK
+    vt: [B, 1, H*K] => Reshape => [B, 1, H, K] => Transpose<0,2,1,3> => [B, H, 1, K] => Concat to pastV
+    
+    pastK: [B, H,N-1,K] => Concat<axis=2> => [B,H,N,64] => Reshape => [B*H,N,64] => Matmul_qk_in1
+    pastV: [B, H,N-1,K] => Concat<axis=2> => [B,H,N,64] => Reshape => [B*H,N,64] => Matmul_wv_in1
+
+    Concat result of K & V is also output
+
+    Matmul_qk<transpose_a=0 transpose_b=1> => Softmax<axis=2> => Matmul_wv<transpose_a=0 transpose_b=0>
+                                           => [B*H, M, K] => reshape => [B, H, M, K] => Transpose<0,2,1,3>
+                                           => [B, M, H, K] => reshape => [B, M, H*K]
+*/
+
+ov::intel_cpu::MHAFloatFusionWhisper::MHAFloatFusionWhisper() {
+    MATCHER_SCOPE(MHAFloatFusionWhisper);
+    bool b_special_zero = true;
+    auto q = ngraph::pattern::any_input();  // [B, M, H*K]
+    auto k = ngraph::pattern::any_input();  // [B, N, H*K]
+    auto v = ngraph::pattern::any_input();  // [B, N, H*K]
+    auto shape_q = ngraph::pattern::any_input();
+    auto shape_k = ngraph::pattern::any_input();
+    auto shape_v = ngraph::pattern::any_input();
+    auto order_0213_q = ngraph::pattern::wrap_type<ngraph::opset4::Constant>();
+    auto order_0213_k = ngraph::pattern::wrap_type<ngraph::opset4::Constant>();
+    auto order_0213_v = ngraph::pattern::wrap_type<ngraph::opset4::Constant>();
+    auto order_0213_wv = ngraph::pattern::wrap_type<ngraph::opset4::Constant>();
+    auto shape_q2 = ngraph::pattern::any_input();
+    auto shape_k2 = ngraph::pattern::any_input();
+    auto shape_v2 = ngraph::pattern::any_input();
+    auto shape_wv1 = ngraph::pattern::any_input();
+    auto shape_wv2 = ngraph::pattern::any_input();
+
+    auto q1 = std::make_shared<ngraph::opset3::Reshape>(q, shape_q, b_special_zero);          // [B, M, H, K]
+    auto q2 = std::make_shared<ngraph::opset3::Transpose>(q1, order_0213_q);  // [B, H, M, K]
+    auto q3 = std::make_shared<ngraph::opset3::Reshape>(q2, shape_q2, b_special_zero);        // [B*H, M, K]
+
+    auto k1 = std::make_shared<ngraph::opset3::Reshape>(k, shape_k, b_special_zero);  // [B, N, H, K]
+    auto k2 = std::make_shared<ngraph::opset3::Transpose>(k1, order_0213_k); // [B, H, N, K]
+
+    // from model input (encoder attention)
+    auto k_encoder = std::make_shared<ngraph::opset3::Parameter>();
+
+    auto k3 = std::make_shared<ngraph::opset3::Reshape>(
+        std::make_shared<ngraph::pattern::op::Or>(OutputVector{k2, k_encoder}),
+        shape_k2,
+        b_special_zero);  // [B*H, N, K]
+
+    auto v1 = std::make_shared<ngraph::opset3::Reshape>(v, shape_v, b_special_zero);    // [B, N, H, K]
+    auto v2 = std::make_shared<ngraph::opset3::Transpose>(v1, order_0213_v);            // [B, H, N, K]
+    // from model input (encoder attention)
+    auto v_encoder = std::make_shared<ngraph::opset3::Parameter>();
+
+    auto v3 = std::make_shared<ngraph::opset3::Reshape>(
+        std::make_shared<ngraph::pattern::op::Or>(OutputVector{v2, v_encoder}),
+        shape_v2,
+        b_special_zero);  // [B*H, N, K]
+
+    // with_kv_cache
+    auto k_cache = ngraph::pattern::any_input();        // [B, H, N-1, 64]
+    auto v_cache = ngraph::pattern::any_input();        // [B, H, N-1, 64]
+    auto kt = ngraph::pattern::any_input();                 // [B, 1, H*K]
+    auto vt = ngraph::pattern::any_input();                 // [B, 1, H*K]
+    auto kt1 = std::make_shared<ngraph::opset3::Reshape>(kt, ngraph::pattern::any_input(), b_special_zero); // [B, 1, H, K]
+    auto vt1 = std::make_shared<ngraph::opset3::Reshape>(vt, ngraph::pattern::any_input(), b_special_zero); // [B, 1, H, K]
+    auto order_0213_kt1 = ngraph::pattern::wrap_type<ngraph::opset4::Constant>();
+    auto order_0213_vt1 = ngraph::pattern::wrap_type<ngraph::opset4::Constant>();
+    auto kt2 = std::make_shared<ngraph::opset3::Transpose>(kt1, order_0213_kt1); // [B, H, 1, K]
+    auto vt2 = std::make_shared<ngraph::opset3::Transpose>(vt1, order_0213_vt1); // [B, H, 1, K]
+
+    auto newk = std::make_shared<ngraph::opset3::Concat>(ngraph::NodeVector{k_cache, kt2}, 2); // [B,H, N,64]
+    auto k5 = std::make_shared<ngraph::opset3::Reshape>(newk, ngraph::pattern::any_input(), b_special_zero);            // [B*H, N, K]
+
+    auto newv = std::make_shared<ngraph::opset3::Concat>(ngraph::NodeVector{v_cache, vt2}, 2); // [B,H, N,64]
+    auto v5 = std::make_shared<ngraph::opset3::Reshape>(newv, ngraph::pattern::any_input(), b_special_zero);            // [B*H, N, K]
+
+    auto qe = q3->output(0);
+    // kv may from decoder's past_key_values input
+    auto ke = std::make_shared<ngraph::pattern::op::Or>(OutputVector{k3->output(0), k5->output(0)});
+    auto ve = std::make_shared<ngraph::pattern::op::Or>(OutputVector{v3->output(0), v5->output(0)});
+
+    auto qk = std::make_shared<ngraph::opset3::MatMul>(qe, ke);               // [B*H, M, N]
+
+    // alternative path, with causal mask
+    auto qk1 = std::make_shared<ngraph::opset3::Reshape>(qk, ngraph::pattern::any_input(), b_special_zero);
+    auto add_causal_mask = std::make_shared<ngraph::opset3::Add>(qk1, ngraph::pattern::any_input());
+    auto qk3 = std::make_shared<ngraph::opset3::Reshape>(add_causal_mask, ngraph::pattern::any_input(), b_special_zero);
+
+    auto w = std::make_shared<ngraph::opset1::Softmax>(
+        std::make_shared<ngraph::pattern::op::Or>(OutputVector{qk, qk3})
+    ); // [B*H, M, N]
+
+    auto wv1 = std::make_shared<ngraph::opset3::MatMul>(w, ve);                             // [B*H, M, K]
+    auto wv2 = std::make_shared<ngraph::opset3::Reshape>(wv1, shape_wv1, b_special_zero);   // [B, H, M, K]
+    auto wv3 = std::make_shared<ngraph::opset3::Transpose>(wv2, order_0213_wv);             // [B, M, H, K]
+    auto wv4 = std::make_shared<ngraph::opset3::Reshape>(wv3, shape_wv2, b_special_zero);   // [B, M, H*K]
+
+    ngraph::matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+        auto& pvmap = m.get_pattern_value_map();
+        auto check_order_0213 = [&](Output<Node> & out) {
+            auto order = ngraph::as_type_ptr<ngraph::opset4::Constant>(out.get_node_shared_ptr())->cast_vector<int>();
+            return (order == std::vector<int>({0, 2, 1, 3}));
+        };
+
+        if (!check_order_0213(pvmap[order_0213_q]))
+            return false;
+        if (pvmap.count(order_0213_k) && !check_order_0213(pvmap[order_0213_k]))
+            return false;
+        if (pvmap.count(order_0213_v) && !check_order_0213(pvmap[order_0213_v]))
+            return false;
+        if (!check_order_0213(pvmap[order_0213_wv]))
+            return false;
+        // replace
+        //std::cout << pvmap[w].get_node_shared_ptr()->get_friendly_name() << " is found!" << std::endl;
+
+        std::shared_ptr<ov::intel_cpu::MHA2Node> mha;
+        bool with_causal_mask = (pvmap.find(add_causal_mask) != pvmap.end());
+        bool with_kv_cache = (pvmap.find(k_cache) != pvmap.end());
+
+        if (!with_kv_cache) {
+            // no kv_cache concat path
+            Output<Node> k_input;
+            Output<Node> v_input;
+            bool kv_head_transposed;
+            if (pvmap.count(k_encoder) && pvmap.count(v_encoder)) {
+                // k & v from encoder [B, H, N, 64]
+                k_input = pvmap[k_encoder];
+                v_input = pvmap[v_encoder];
+                kv_head_transposed = true;
+            } else if (pvmap.count(k) && pvmap.count(v)) {
+                // k & v from FC: [B, N, H*K]
+                k_input = pvmap[k];
+                v_input = pvmap[v];
+                kv_head_transposed = false;
+            }
+
+            mha = std::make_shared<ov::intel_cpu::MHA2Node>(pvmap[q],
+                                                            k_input,
+                                                            v_input,
+                                                            with_causal_mask,
+                                                            kv_head_transposed,
+                                                            m.get_match_root()->get_friendly_name());
+
+            ngraph::copy_runtime_info({pvmap.at(qk).get_node_shared_ptr(),
+                                       pvmap.at(w).get_node_shared_ptr(),
+                                       pvmap.at(wv1).get_node_shared_ptr()},
+                                       mha);
+        } else {
+            // with kv_cache concat path
+            mha = std::make_shared<ov::intel_cpu::MHA2Node>(pvmap[q],
+                                            pvmap[kt], pvmap[vt],
+                                            pvmap[k_cache], pvmap[v_cache],
+                                            with_causal_mask,
+                                            m.get_match_root()->get_friendly_name());
+
+            ngraph::copy_runtime_info({pvmap.at(qk).get_node_shared_ptr(),
+                                       pvmap.at(w).get_node_shared_ptr(),
+                                       pvmap.at(wv1).get_node_shared_ptr()},
+                                       mha);
+        }
+
+        if (transformation_callback(mha))
+            return false;
+
+        ngraph::replace_node(m.get_match_root(), {mha->output(0)});
+
+        if (with_kv_cache) {
+            ngraph::replace_node(pvmap.at(newk).get_node_shared_ptr(), {mha->output(1)});
+            ngraph::replace_node(pvmap.at(newv).get_node_shared_ptr(), {mha->output(2)});
+        }
+        return false;
+    };
+    auto m = std::make_shared<ngraph::pattern::Matcher>(wv4, matcher_name);
     this->register_matcher(m, callback);
 }
 

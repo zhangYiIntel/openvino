@@ -37,6 +37,12 @@ public:
     MHAFloatFusion2();
 };
 
+class MHAFloatFusionWhisper: public MHAFusionBase {
+public:
+    OPENVINO_RTTI("MHAFloatFusionWhisper", "0");
+    MHAFloatFusionWhisper();
+};
+
 class MHAQuantFusion: public MHAFusionBase {
 public:
     OPENVINO_RTTI("MHAQuantFusion", "0");
@@ -55,6 +61,7 @@ public:
     MHAFusion() {
         add_matcher<MHAFloatFusion>();
         add_matcher<MHAFloatFusion2>();
+        add_matcher<MHAFloatFusionWhisper>();
         add_matcher<MHAQuantFusion>();
         add_matcher<MHAQuantFusion2>();
     }

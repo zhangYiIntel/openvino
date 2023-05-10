@@ -90,6 +90,7 @@
 #include "nodes/eye.h"
 #include "nodes/interaction.h"
 #include "nodes/mha.h"
+#include "nodes/mha2.h"
 #include "nodes/unique.hpp"
 #include "nodes/ngram.h"
 
@@ -197,6 +198,7 @@ Node::NodesFactory::NodesFactory()
     INTEL_CPU_NODE(Interaction, Type::Interaction);
     INTEL_CPU_NODE(MHA, Type::MHA);
     INTEL_CPU_NODE(Snippet, Type::Subgraph);
+    INTEL_CPU_NODE(MHA2, Type::MHA2);
 #endif
 }
 

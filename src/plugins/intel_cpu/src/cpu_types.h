@@ -111,7 +111,8 @@ enum class Type {
     Interaction,
     MHA,
     Unique,
-    Ngram
+    Ngram,
+    MHA2,
 };
 
 enum class Algorithm {
