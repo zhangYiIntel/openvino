@@ -187,7 +187,6 @@ ExecNetwork::GraphGuard::Lock ExecNetwork::GetGraph() const {
 
                     ctx = std::make_shared<GraphContext>(_cfg, extensionManager, weightsCache, isQuantizedFlag);
                 }
-                graphLock._graph.SetGraphID(streamId * 1000);
                 graphLock._graph.CreateGraph(_network, ctx);
             } catch (...) {
                 exception = std::current_exception();
