@@ -33,7 +33,6 @@ namespace cpu {
 class ThreadPool {
 public:
     ThreadPool() {
-        std::cout << "Fake ThreadTool" << std::endl;
     }
 };
 size_t getTotalThreads() {
@@ -236,8 +235,6 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
             wgtNode->get_data_ptr<float>(),
             transposeIn[1] ? K : N,
             packedBPtr->get_ptr());
-        std::cout << "YI_MLAS|transposeIn[1]|" << transposeIn[1] << "|B|" << B << "|K|"<< K << "|N|" << N <<
-            "|MLAS packed B size " << packed_b_size << std::endl;
         }
 }
 
@@ -602,7 +599,7 @@ void MatMul::prepareParams() {
     if (!src0MemPtr || !src0MemPtr->isAllocated() || !src1MemPtr || !src1MemPtr->isAllocated())
         IE_THROW()  << errorPrefix << " did not allocate input memory";
     if (packedBPtr) {
-        std::cout << "YI_MLAS|" << getName() << "|MLAS no need to prepare" << std::endl;
+        return;
     } else {
         const NodeDesc *selected_pd = getSelectedPrimitiveDescriptor();
         if (selected_pd == nullptr)
@@ -625,8 +622,6 @@ void MatMul::prepareParams() {
 
             auto src1Shape = src1Desc.getShape();
             auto src1Strides = getStridesAndModifyShape(src1Shape, transposeIn[1]);
-            std::cout << "original shape " << src1Strides[0] << "|" <<
-                src1Strides[1] << "|" << src1Strides[2] << std::endl;
             src1TransposedDesc = std::make_shared<DnnlBlockedMemoryDesc>(src1Desc.getPrecision(), src1Shape, src1Strides);
         } else {
             attr = initPrimitiveAttr();
@@ -728,7 +723,6 @@ void MatMul::execute(dnnl::stream strm) {
         auto& src0MemPtr = getParentEdgeAt(0)->getMemoryPtr();
         const auto& inputShape = src0MemPtr->GetShape().getStaticDims();
         size_t M = inputShape[inputShape.size()-2];
-        // std::cout << "run " << M << "|" << K << "|" << N << std::endl;
         gemmMlas[0].BIsPacked = true;
         gemmMlas[0].A = reinterpret_cast<float*>(src0MemPtr->GetData());
         gemmMlas[0].lda = K;
