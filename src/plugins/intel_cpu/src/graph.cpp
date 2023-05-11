@@ -928,7 +928,7 @@ void Graph::PullOutputData(BlobMap &out) {
         const Memory& intr_blob = parentEdge->getMemory();
 
         const auto ext_blob_map = out.find(name);
-        const auto ext_blob = ext_blob_map->second;
+        auto ext_blob = ext_blob_map->second;
         if (ext_blob_map == out.end()) {
             IE_THROW(Unexpected) << "The CPU plugin graph doesn't contain output node with name: \"" << name << "\"";
         }
@@ -956,7 +956,18 @@ void Graph::PullOutputData(BlobMap &out) {
             if (expectedDesc.getLayout() == InferenceEngine::Layout::BLOCKED) {
                 expectedDesc = TensorDesc(expectedDesc.getPrecision(), expectedDesc.getLayout());
             }
-            out[name]->setShape(outDims);
+            if (name == "logits") {
+                InferenceEngine::Blob::Ptr newBlob =
+                    InferenceEngine::make_shared_blob<float>(actualDesc,
+                                                             static_cast<float*>(intr_blob.GetData()),
+                                                             intr_blob.GetSize());
+                ext_blob = newBlob;
+                // std::cout << "Graph::PullOutputData " << name << ",  " << intr_blob.GetData() << std::endl;
+                std::swap(out[name], newBlob);
+            } else {
+                // std::cout << "Graph::PullOutputData " << name << ", dims " << PartialShape(outDims) << std::endl;
+                out[name]->setShape(outDims);
+            }
         }
 
         // check for empty output blob
