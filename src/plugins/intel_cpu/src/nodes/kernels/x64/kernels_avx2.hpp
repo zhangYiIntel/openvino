@@ -4,6 +4,7 @@
 //#include "tensor2D.hpp"
 #include <memory>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <functional>
 
@@ -110,9 +111,16 @@ struct tensor2D {
 #else
             {
 #endif
+
+#ifdef _WIN32
+                data = std::shared_ptr<T>(
+                            reinterpret_cast<T*>(_aligned_malloc(capacity, 64)),
+                            [](void * p) { _aligned_free(p); });
+#else
                 data = std::shared_ptr<T>(
                             reinterpret_cast<T*>(aligned_alloc(64, capacity)),
                             [](void * p) { ::free(p); });
+#endif
             }
             if (reinterpret_cast<uintptr_t>(data.get()) % 64)
                 std::cout << "WARNING: resize(), data is not cache-line aligned!" << std::endl;

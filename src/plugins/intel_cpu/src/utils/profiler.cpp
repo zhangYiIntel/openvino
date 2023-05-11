@@ -282,12 +282,10 @@ void ProfilerManager::dumpAllCounters(chromeTrace& ct) {
 }
 #else
 struct PMUMonitor {
+    bool init_mode = false;
     PMUMonitor(const char* config_file_path) {}
 };
-ProfileCounter & ProfilerManager::addCounter() {
-    all_counters.push_back({});
-    auto& counter = all_counters.back();
-    return counter;
+void ProfilerManager::addCounter() {
 }
 void ProfilerManager::dumpAllCounters(chromeTrace& ct) {}
 #endif
