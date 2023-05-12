@@ -326,6 +326,7 @@ namespace functional {
         row7 = _mm256_permute2f128_ps(__tt3, __tt7, 0x31);
     }
 
+    template<bool skipB1>
     inline void transpose_16xK_ps(float * pBdst, float *pBsrc, int strideB, int K) {
         for(int k = 0; k < K; k+=8, pBsrc+=8) {
             {
@@ -347,7 +348,7 @@ namespace functional {
                 _mm256_storeu_ps(pBdst + 8*12, b6);
                 _mm256_storeu_ps(pBdst + 8*14, b7);
             }
-            {
+            if (!skipB1) {
                 auto b0 = _mm256_loadu_ps(pBsrc + strideB*8);
                 auto b1 = _mm256_loadu_ps(pBsrc + strideB*9);
                 auto b2 = _mm256_loadu_ps(pBsrc + strideB*10);
@@ -998,7 +999,10 @@ struct Matmul {
                 int nsrc = (valid_n <= 8) ? (n1 - 8) : ((valid_n < 16) ? (n1 - 16) : (n0 + n));
                 auto * pBdst = &internalB(n/16, 0);
                 auto * pBsrc = &matB(nsrc, 0);
-                functional::transpose_16xK_ps(pBdst, pBsrc, strideB, K);
+                if (valid_n <= 8)
+                    functional::transpose_16xK_ps<true>(pBdst, pBsrc, strideB, K);
+                else
+                    functional::transpose_16xK_ps<false>(pBdst, pBsrc, strideB, K);
             });
         }
     }
@@ -1058,7 +1062,10 @@ struct Matmul {
             auto * pC = &matC(m, ndst);
             if (use_dynTransB && m == 0) {
                 // dynamically transpose 16 rows of matB into internalB
-                functional::transpose_16xK_ps(&internalB[0], &matB(ndst, 0), strideB, K);
+                if (valid_n <= 8)
+                    functional::transpose_16xK_ps<true>(&internalB[0], &matB(ndst, 0), strideB, K);
+                else
+                    functional::transpose_16xK_ps<false>(&internalB[0], &matB(ndst, 0), strideB, K);
             }
             if (use_dynReorderB && m == 0) {
                 // dynamically reorder B matrix into continous internalB
