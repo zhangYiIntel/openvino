@@ -427,6 +427,8 @@ ov::intel_cpu::MHAFloatFusionWhisper::MHAFloatFusionWhisper() {
         if (transformation_callback(mha))
             return false;
 
+        if (std::getenv("SKIP_MHA2") && atoi(std::getenv("SKIP_MHA2")))
+            return false;
         ngraph::replace_node(m.get_match_root(), {mha->output(0)});
 
         if (with_kv_cache) {

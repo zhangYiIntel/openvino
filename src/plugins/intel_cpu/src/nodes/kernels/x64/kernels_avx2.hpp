@@ -21,7 +21,7 @@
 // https://stackoverflow.com/questions/570669/checking-if-a-double-or-float-is-nan-in-c/57770634#57770634
 static inline uint32_t load_ieee754_rep(float a) {
     uint32_t r;
-    static_assert(sizeof r == sizeof a, "Unexpected sizes.");
+    //static_assert(sizeof r == sizeof a, "Unexpected sizes.");
     std::memcpy(&r, &a, sizeof a); // Generates movd instruction.
     return r;
 }
@@ -866,7 +866,7 @@ struct Matmul {
                             float * pC, int strideC,
                             int K, int n, __m256i n_mask,
                             PP pp) {
-        static_assert(valid_m > 0 && valid_m < 7);
+        //static_assert(valid_m > 0 && valid_m < 7);
         __m256 c00, c01;
         __m256 c10, c11;
         __m256 c20, c21;

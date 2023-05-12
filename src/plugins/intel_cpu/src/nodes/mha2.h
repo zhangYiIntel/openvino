@@ -41,6 +41,7 @@ struct Avx2Kernels {
                             tensor2D<float>& k,
                             tensor2D<float>& v,
                             tensor2D<float>& wv,
+                            int causal_m0,
                             bool causal_mask) {
         auto M = q.dims[0];
         auto N = k.dims[0];
@@ -53,7 +54,7 @@ struct Avx2Kernels {
         // softmax per row
         if (causal_mask && M > 1) {
             for(int m = 0; m<M; m++) {
-                int valid_n = std::min(N, m+1);
+                int valid_n = std::min(N, m + causal_m0 + 1);
                 avx2::functional::softmax(&qk(m,0), valid_n);
                 // the rest part is set as zero
                 memset(&qk(m, valid_n), 0, sizeof(float)*(N - valid_n));
@@ -88,6 +89,7 @@ protected:
     bool needPrepareParams() const override { return false; }
 
     Avx2Kernels kernels;
+    bool verbose;
 };
 
 }   // namespace node

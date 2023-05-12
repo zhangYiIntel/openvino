@@ -48,7 +48,7 @@ MHA2::MHA2(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr context
     if (!isSupportedOperation(op, errorMessage)) {
         IE_THROW(NotImplemented) << errorMessage;
     }
-
+    verbose = (std::getenv("MHA2VERBOSE") && atoi(std::getenv("MHA2VERBOSE")));
     mha2 = std::dynamic_pointer_cast<const MHA2Node>(op);
 }
 
@@ -94,6 +94,41 @@ void MHA2::initSupportedPrimitiveDescriptors() {
     presentk: {1, 6, 5, 64} FP32 abcd
     presentv: {1, 6, 5, 64} FP32 abcd
 */
+
+// A preprocessor argument counter
+#define COUNT(...) COUNT_I(__VA_ARGS__, 9, 8, 7, 6, 5, 4, 3, 2, 1,)
+#define COUNT_I(_9,_8,_7,_6,_5,_4,_3,_2,_1,X,...) X
+// Preprocessor paster
+#define _GLUE(A,B) _GLUE_I(A,B)
+#define _GLUE_I(A,B) A##B
+// chained caller
+#define NAMED_VALUES(...) _GLUE(NAMED_VALUES_,COUNT(__VA_ARGS__))(__VA_ARGS__)
+// chain
+#define NAMED_VALUES_1(a) #a,":",a
+#define NAMED_VALUES_2(a,...) #a,":",a," ",NAMED_VALUES_1(__VA_ARGS__)
+#define NAMED_VALUES_3(a,...) #a,":",a," ",NAMED_VALUES_2(__VA_ARGS__)
+#define NAMED_VALUES_4(a,...) #a,":",a," ",NAMED_VALUES_3(__VA_ARGS__)
+#define NAMED_VALUES_5(a,...) #a,":",a," ",NAMED_VALUES_4(__VA_ARGS__)
+#define NAMED_VALUES_6(a,...) #a,":",a," ",NAMED_VALUES_5(__VA_ARGS__)
+#define NAMED_VALUES_7(a,...) #a,":",a," ",NAMED_VALUES_6(__VA_ARGS__)
+#define NAMED_VALUES_8(a,...) #a,":",a," ",NAMED_VALUES_7(__VA_ARGS__)
+#define NAMED_VALUES_9(a,...) #a,":",a," ",NAMED_VALUES_8(__VA_ARGS__)
+
+#ifndef UNUSED
+#define UNUSED(x) (void)(x)
+#endif
+
+template<typename ... Args>
+static void log(Args&& ... args) {
+    std::stringstream ss;
+    int dummy[] = {(ss << std::forward<Args>(args), 0)...};
+    UNUSED(dummy);
+    ss << std::endl;
+    std::cout << ss.str();
+}
+
+#define NAMED_LOG(prefix, ...) log(prefix, NAMED_VALUES(__VA_ARGS__))
+
 void MHA2::execute(dnnl::stream strm) {
     auto mem_q = getParentEdgeAt(0)->getMemoryPtr();
     auto mem_k = getParentEdgeAt(1)->getMemoryPtr();
@@ -113,27 +148,9 @@ void MHA2::execute(dnnl::stream strm) {
         mem_presentk = getChildEdgeAt(1)->getMemoryPtr();
         mem_presentv = getChildEdgeAt(2)->getMemoryPtr();
     }
-/*
-    std::cout << "MHA2::execute " << getName() << std::endl;
-    std::cout << "q:" << mem_q->getDesc() << std::endl;
-    std::cout << "k:" << mem_k->getDesc() << std::endl;
-    std::cout << "v:" << mem_v->getDesc() << std::endl;
-    if (mem_pastk) std::cout << "pastk:" << mem_pastk->getDesc() << std::endl;
-    if (mem_pastv) std::cout << "pastv:" << mem_pastv->getDesc() << std::endl;
-    std::cout << "wv:" << mem_wv->getDesc() << std::endl;
-    std::cout << "causal_mask: " << mha2->get_causal_mask() << std::endl;
-    if (mem_presentk) std::cout << "presentk: " << mem_presentk->getDesc() << std::endl;
-    if (mem_presentv) std::cout << "presentv: " << mem_presentv->getDesc() << std::endl;
-*/
+
     MemoryPtr final_k;
     MemoryPtr final_v;
-
-    auto shape_q = mem_q->getStaticDims(); // [B, M, H*K]
-    int B = shape_q[0];
-    int M = shape_q[1];
-    int HK = shape_q[2];
-    int K = 64;
-    int H = HK/K;
 
     if (with_kv_cache) {
         mem_pastk = getParentEdgeAt(3)->getMemoryPtr();
@@ -151,19 +168,47 @@ void MHA2::execute(dnnl::stream strm) {
         final_k = mem_k;
         final_v = mem_v;
     }
+    auto shape_q = mem_q->getStaticDims(); // [B, M, H*K]
+    int B = shape_q[0];
+    int M = shape_q[1];
+    int HK = shape_q[2];
+    int K = 64;
+    int H = HK/K;
+    int N;    
+    if (kv_head_transposed) {
+        // k&v: [B, H, N, K]
+        N = final_k->getStaticDims()[2];
+    } else {
+        // k&v: [B, N, H*K]
+        N = final_k->getStaticDims()[1];
+    }
 
     auto pQ = reinterpret_cast<float*>(mem_q->GetPtr());
     auto pK = reinterpret_cast<float*>(final_k->GetPtr());
     auto pV = reinterpret_cast<float*>(final_v->GetPtr());
     auto pWV = reinterpret_cast<float*>(mem_wv->GetPtr());
 
+    bool splitN = parallel_get_max_threads() > B*H;
+
+    if (verbose) {
+        NAMED_LOG("MHA2::execute", getName(), *mha2);
+        NAMED_LOG("\t",with_causal_mask, with_kv_cache, kv_head_transposed, parallel_get_max_threads());
+        NAMED_LOG("\t",B,M,N,H,K);
+        NAMED_LOG("\t",splitN);
+        NAMED_LOG("\t",mem_q->getDesc());
+        NAMED_LOG("\t",mem_k->getDesc());
+        NAMED_LOG("\t",mem_v->getDesc());
+        if (mem_pastk) NAMED_LOG("\t",mem_pastk->getDesc());
+        if (mem_pastv) NAMED_LOG("\t",mem_pastv->getDesc());
+        NAMED_LOG("\t",mem_wv->getDesc());
+        if (mem_presentk) NAMED_LOG("\t",mem_presentk->getDesc());
+        if (mem_presentv) NAMED_LOG("\t",mem_presentv->getDesc());
+    }
     // q: [B, M, H*k]
     if (kv_head_transposed) {
         // k&v: [B, H, N, K]
         int N = final_k->getStaticDims()[2];
         int stride_b_q = M*H*K;
-        int stride_b_kv = N*H*K;
-        int stride_h_kv = N*K;
         int stride_h_q = K;
         int stride_bytes_hk = H*K*sizeof(float);
         int stride_bytes_K = K*sizeof(float);
@@ -205,28 +250,61 @@ void MHA2::execute(dnnl::stream strm) {
             tensor2D<float> k(N, K, pheadK, stride_bytes_K);
             tensor2D<float> v(N, K, pheadV, stride_bytes_K);
             tensor2D<float> wv(M, K, pWV + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
-            kernels.one_head_attention(tid, q, k, v, wv, with_causal_mask);
+            kernels.one_head_attention(tid, q, k, v, wv, 0, with_causal_mask);
         });
     } else {
+        // with_causal_mask:0   with_kv_cache:0   kv_head_transposed:0
+        // parallel in B/H/M dimensions
         // k&v: [B, N, H*K]
         int N = final_k->getStaticDims()[1];
-        int stride_b_q = M*H*K;
-        int stride_b_kv = N*H*K;
         int stride_bytes_hk = H*K*sizeof(float);
-        int stride_h = K;
-        parallel_for2d(B, H, [&](size_t b, size_t h) {
-            size_t tid = parallel_get_thread_num();
-            // M can also run in parallel, but since
-            // it's range is small, if we run it in one core, it can share k
-            //  q[b, 0:M, h, K] => MxK
-            //  k[b, 0:N, h, K] => NxK
-            //  v[b, 0:N, h, K] => NxK
-            // wv[b, 0:M, h, K] => MxK
-            tensor2D<float> q(M, K, pQ + b*stride_b_q + h*stride_h, stride_bytes_hk);
-            tensor2D<float> k(N, K, pK + b*stride_b_kv + h*stride_h, stride_bytes_hk);
-            tensor2D<float> v(N, K, pV + b*stride_b_kv + h*stride_h, stride_bytes_hk);
-            tensor2D<float> wv(M, K, pWV + b*stride_b_q + h*stride_h, stride_bytes_hk);
-            kernels.one_head_attention(tid, q, k, v, wv, with_causal_mask);
+
+        // kernel register blocking on 6 rows
+        const size_t work_amount = (size_t)B*H * M;
+
+        auto coord2D = [&](size_t index, size_t D0, size_t D1, size_t &i0, size_t &i1) {
+            // i = d0 * D1 + d1
+            i0 = index/D1;
+            i1 = index - i0*D1;
+        };
+
+        parallel_nt(0, [&](int ithr, int nthr) {
+            size_t start{0}, end{0};
+            splitter(work_amount, nthr, ithr, start, end);
+            size_t bh0, mb0;
+            size_t bh1, mb1;
+            if (start == end) return;
+            coord2D(start, B*H, M, bh0, mb0);
+            coord2D(end, B*H, M, bh1, mb1);
+            auto m_start = mb0;
+            auto m_end = std::min(size_t(M), mb1);
+
+            // first head
+            auto m0 = m_start;
+            auto m1 = m0;
+            // bh = b*H + h
+            for(auto bh = bh0; bh <= bh1; bh++) {
+                // determine m1 for current head
+                m1 = (bh == bh1) ? m_end : M;
+                if (m1 <= m0) break;
+
+                //  q[b, m0:m1, h, K] => (m1-m0)xK
+                //  k[b, 0:N,   h, K] => NxK
+                //  v[b, 0:N,   h, K] => NxK
+                // wv[b, m0:m1, h, K] => (m1-m0)xK
+                auto b = bh/H;
+                auto h = bh - b*H;
+                auto kv_off = b*(N*H*K) + h*K;
+                auto q_off = b*(M*H*K) + m0*(H*K) + h*K;
+                tensor2D<float> q(m1 - m0,  K, pQ + q_off, stride_bytes_hk);
+                tensor2D<float> k(N,        K, pK + kv_off, stride_bytes_hk);
+                tensor2D<float> v(N,        K, pV + kv_off, stride_bytes_hk);
+                tensor2D<float> wv(m1 - m0, K, pWV + q_off, stride_bytes_hk);
+                kernels.one_head_attention(ithr, q, k, v, wv, m0, with_causal_mask);
+
+                // m0 for next head is always 0
+                m0 = 0;
+            }
         });
     }
 }
