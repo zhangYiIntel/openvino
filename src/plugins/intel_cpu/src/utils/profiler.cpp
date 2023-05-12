@@ -285,7 +285,7 @@ struct PMUMonitor {
     bool init_mode = false;
     PMUMonitor(const char* config_file_path) {}
 };
-void ProfilerManager::addCounter() {
+void ProfilerManager::addCounter(uint64_t tsc) {
 }
 void ProfilerManager::dumpAllCounters(chromeTrace& ct) {}
 #endif

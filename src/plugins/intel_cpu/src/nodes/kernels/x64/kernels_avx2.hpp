@@ -1074,7 +1074,7 @@ struct Matmul {
                 for(int k = 0; k < K; k++) {
                     auto b0 = _mm256_loadu_ps(pBsrc);
                     auto b1 = _mm256_loadu_ps(pBsrc + 8);
-                    _mm_prefetch(pBsrc + 32*strideB, _MM_HINT_T1);
+                    _mm_prefetch(reinterpret_cast<const char *>(pBsrc + 32*strideB), _MM_HINT_T1);
                     _mm256_storeu_ps(pBdst, b0);
                     _mm256_storeu_ps(pBdst + 8, b1);
                     pBsrc += strideB;
