@@ -326,49 +326,147 @@ namespace functional {
         row7 = _mm256_permute2f128_ps(__tt3, __tt7, 0x31);
     }
 
-    template<bool skipB1>
-    inline void transpose_16xK_ps(float * pBdst, float *pBsrc, int strideB, int K) {
+    inline void transpose_16xK_ps(float * pBdst, float *pBsrc, int strideB, int valid_n, int K) {
+        __m256 b0, b1, b2, b3, b4, b5, b6, b7;
+
+#define STORE_B0_B7(dst) _mm256_storeu_ps(dst, b0); \
+                        _mm256_storeu_ps(dst + 8*2, b1); \
+                        _mm256_storeu_ps(dst + 8*4, b2); \
+                        _mm256_storeu_ps(dst + 8*6, b3); \
+                        _mm256_storeu_ps(dst + 8*8, b4); \
+                        _mm256_storeu_ps(dst + 8*10, b5); \
+                        _mm256_storeu_ps(dst + 8*12, b6); \
+                        _mm256_storeu_ps(dst + 8*14, b7);
+ 
+        if (valid_n < 8) {
+            b0 = b1 = b2 = b3 = b4 = b5 = b6 = _mm256_setzero_ps();
+            switch(valid_n) {
+                case 1:
+                    for(int k = 0; k < K; k+=8, pBsrc+=8, pBdst += 8*16) {
+                        b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                        functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                        STORE_B0_B7(pBdst);
+                    }
+                    return;
+                case 2:
+                    for(int k = 0; k < K; k+=8, pBsrc+=8, pBdst += 8*16) {
+                        b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                        b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                        functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                        STORE_B0_B7(pBdst);
+                    }
+                    return;
+                case 3:
+                    for(int k = 0; k < K; k+=8, pBsrc+=8, pBdst += 8*16) {
+                        b5 = _mm256_loadu_ps(pBsrc + strideB*5);
+                        b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                        b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                        functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                        STORE_B0_B7(pBdst);
+                    }
+                    return;
+                case 4:
+                    for(int k = 0; k < K; k+=8, pBsrc+=8, pBdst += 8*16) {
+                        b4 = _mm256_loadu_ps(pBsrc + strideB*4);
+                        b5 = _mm256_loadu_ps(pBsrc + strideB*5);
+                        b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                        b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                        functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                        STORE_B0_B7(pBdst);
+                    }
+                    return;
+                case 5:
+                    for(int k = 0; k < K; k+=8, pBsrc+=8, pBdst += 8*16) {
+                        b3 = _mm256_loadu_ps(pBsrc + strideB*3);
+                        b4 = _mm256_loadu_ps(pBsrc + strideB*4);
+                        b5 = _mm256_loadu_ps(pBsrc + strideB*5);
+                        b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                        b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                        functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                        STORE_B0_B7(pBdst);
+                    }
+                    return;
+                case 6:
+                    for(int k = 0; k < K; k+=8, pBsrc+=8, pBdst += 8*16) {
+                        b2 = _mm256_loadu_ps(pBsrc + strideB*2);
+                        b3 = _mm256_loadu_ps(pBsrc + strideB*3);
+                        b4 = _mm256_loadu_ps(pBsrc + strideB*4);
+                        b5 = _mm256_loadu_ps(pBsrc + strideB*5);
+                        b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                        b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                        functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                        STORE_B0_B7(pBdst);
+                    }
+                    return;
+                case 7:
+                    for(int k = 0; k < K; k+=8, pBsrc+=8, pBdst += 8*16) {
+                        b1 = _mm256_loadu_ps(pBsrc + strideB*1);
+                        b2 = _mm256_loadu_ps(pBsrc + strideB*2);
+                        b3 = _mm256_loadu_ps(pBsrc + strideB*3);
+                        b4 = _mm256_loadu_ps(pBsrc + strideB*4);
+                        b5 = _mm256_loadu_ps(pBsrc + strideB*5);
+                        b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                        b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                        functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                        STORE_B0_B7(pBdst);
+                    }
+                    return;
+            }
+        }
+
+        if (valid_n == 8) {
+            for(int k = 0; k < K; k+=8, pBsrc+=8) {
+                b0 = _mm256_loadu_ps(pBsrc);
+                b1 = _mm256_loadu_ps(pBsrc + strideB);
+                b2 = _mm256_loadu_ps(pBsrc + strideB*2);
+                b3 = _mm256_loadu_ps(pBsrc + strideB*3);
+                b4 = _mm256_loadu_ps(pBsrc + strideB*4);
+                b5 = _mm256_loadu_ps(pBsrc + strideB*5);
+                b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
+                STORE_B0_B7(pBdst);
+                pBdst += 8*16;
+            }
+            return;
+        }
+
+        if (valid_n < 16) {
+            // split it into 2 calls
+            transpose_16xK_ps(pBdst, pBsrc, strideB, 8, K);                           // B0
+            transpose_16xK_ps(pBdst + 8, pBsrc + strideB*8, strideB, valid_n - 8, K); // B1
+            return;
+        }
+        
+        // valid_n == 16
         for(int k = 0; k < K; k+=8, pBsrc+=8) {
             {
-                auto b0 = _mm256_loadu_ps(pBsrc);
-                auto b1 = _mm256_loadu_ps(pBsrc + strideB);
-                auto b2 = _mm256_loadu_ps(pBsrc + strideB*2);
-                auto b3 = _mm256_loadu_ps(pBsrc + strideB*3);
-                auto b4 = _mm256_loadu_ps(pBsrc + strideB*4);
-                auto b5 = _mm256_loadu_ps(pBsrc + strideB*5);
-                auto b6 = _mm256_loadu_ps(pBsrc + strideB*6);
-                auto b7 = _mm256_loadu_ps(pBsrc + strideB*7);
+                b0 = _mm256_loadu_ps(pBsrc);
+                b1 = _mm256_loadu_ps(pBsrc + strideB);
+                b2 = _mm256_loadu_ps(pBsrc + strideB*2);
+                b3 = _mm256_loadu_ps(pBsrc + strideB*3);
+                b4 = _mm256_loadu_ps(pBsrc + strideB*4);
+                b5 = _mm256_loadu_ps(pBsrc + strideB*5);
+                b6 = _mm256_loadu_ps(pBsrc + strideB*6);
+                b7 = _mm256_loadu_ps(pBsrc + strideB*7);
                 functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
-                _mm256_storeu_ps(pBdst, b0);
-                _mm256_storeu_ps(pBdst + 8*2, b1);
-                _mm256_storeu_ps(pBdst + 8*4, b2);
-                _mm256_storeu_ps(pBdst + 8*6, b3);
-                _mm256_storeu_ps(pBdst + 8*8, b4);
-                _mm256_storeu_ps(pBdst + 8*10, b5);
-                _mm256_storeu_ps(pBdst + 8*12, b6);
-                _mm256_storeu_ps(pBdst + 8*14, b7);
+                STORE_B0_B7(pBdst);
             }
-            if (!skipB1) {
-                auto b0 = _mm256_loadu_ps(pBsrc + strideB*8);
-                auto b1 = _mm256_loadu_ps(pBsrc + strideB*9);
-                auto b2 = _mm256_loadu_ps(pBsrc + strideB*10);
-                auto b3 = _mm256_loadu_ps(pBsrc + strideB*11);
-                auto b4 = _mm256_loadu_ps(pBsrc + strideB*12);
-                auto b5 = _mm256_loadu_ps(pBsrc + strideB*13);
-                auto b6 = _mm256_loadu_ps(pBsrc + strideB*14);
-                auto b7 = _mm256_loadu_ps(pBsrc + strideB*15);
+            {
+                b0 = _mm256_loadu_ps(pBsrc + strideB*8);
+                b1 = _mm256_loadu_ps(pBsrc + strideB*9);
+                b2 = _mm256_loadu_ps(pBsrc + strideB*10);
+                b3 = _mm256_loadu_ps(pBsrc + strideB*11);
+                b4 = _mm256_loadu_ps(pBsrc + strideB*12);
+                b5 = _mm256_loadu_ps(pBsrc + strideB*13);
+                b6 = _mm256_loadu_ps(pBsrc + strideB*14);
+                b7 = _mm256_loadu_ps(pBsrc + strideB*15);
                 functional::transpose8_ps(b0, b1, b2, b3, b4, b5, b6, b7);
-                _mm256_storeu_ps(pBdst + 8, b0);
-                _mm256_storeu_ps(pBdst + 8*3, b1);
-                _mm256_storeu_ps(pBdst + 8*5, b2);
-                _mm256_storeu_ps(pBdst + 8*7, b3);
-                _mm256_storeu_ps(pBdst + 8*9, b4);
-                _mm256_storeu_ps(pBdst + 8*11, b5);
-                _mm256_storeu_ps(pBdst + 8*13, b6);
-                _mm256_storeu_ps(pBdst + 8*15, b7);
+                STORE_B0_B7(pBdst + 8);
             }
             pBdst += 8*16;
         }
+#undef STORE_B0_B7
     }
 
     inline void hmax(__m256 & x) {
@@ -458,7 +556,7 @@ namespace functional {
     }
 
     template<typename T=float>
-    void softmax(T * v, int N) {
+    void softmax(T * v, int N, float * s_max=nullptr, float * s_sum=nullptr) {
         static __m256 one = _mm256_castsi256_ps(_mm256_set1_epi32(0x3f800000));                 // 1.0f
         static __m256 lower_32 = _mm256_castsi256_ps(_mm256_set_epi32(0,0,0,0,0,0,0,-1));
         auto x_max = _mm256_set1_ps(std::numeric_limits<float>::lowest());
@@ -473,6 +571,7 @@ namespace functional {
             x_max = _mm256_max_ps(x_max, x);
         }
         avx2::functional::hmax(x_max);
+        if (s_max) *s_max = _mm256_cvtss_f32(x_max);
 
         // softmax
         auto sum_exp = _mm256_setzero_ps();
@@ -497,6 +596,7 @@ namespace functional {
             sum_exp = _mm256_add_ps(sum_exp, sum_exp_tail); // add tail
         }
         avx2::functional::hsum(sum_exp);
+        if (s_sum) *s_sum = _mm256_cvtss_f32(sum_exp);
         auto reciprocal_sum_exp = _mm256_div_ps(one, sum_exp);     // 1/sum_exp
 
         // divide
@@ -999,10 +1099,7 @@ struct Matmul {
                 int nsrc = (valid_n <= 8) ? (n1 - 8) : ((valid_n < 16) ? (n1 - 16) : (n0 + n));
                 auto * pBdst = &internalB(n/16, 0);
                 auto * pBsrc = &matB(nsrc, 0);
-                if (valid_n <= 8)
-                    functional::transpose_16xK_ps<true>(pBdst, pBsrc, strideB, K);
-                else
-                    functional::transpose_16xK_ps<false>(pBdst, pBsrc, strideB, K);
+                functional::transpose_16xK_ps(pBdst, pBsrc, strideB, valid_n, K);
             });
         }
     }
@@ -1062,10 +1159,7 @@ struct Matmul {
             auto * pC = &matC(m, ndst);
             if (use_dynTransB && m == 0) {
                 // dynamically transpose 16 rows of matB into internalB
-                if (valid_n <= 8)
-                    functional::transpose_16xK_ps<true>(&internalB[0], &matB(ndst, 0), strideB, K);
-                else
-                    functional::transpose_16xK_ps<false>(&internalB[0], &matB(ndst, 0), strideB, K);
+                functional::transpose_16xK_ps(&internalB[0], &matB(ndst, 0), strideB, valid_n, K);
             }
             if (use_dynReorderB && m == 0) {
                 // dynamically reorder B matrix into continous internalB
