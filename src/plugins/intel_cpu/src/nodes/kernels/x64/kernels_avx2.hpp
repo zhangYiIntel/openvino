@@ -555,10 +555,26 @@ namespace functional {
         src = _mm256_mul_ps(src, two);
     }
 
-    template<typename T=float>
-    void softmax(T * v, int N, float * s_max=nullptr, float * s_sum=nullptr) {
+    inline __m256i get_mask(int N7) {
+        static __m256i mask[] = {
+            _mm256_set_epi32( 0, 0, 0, 0, 0, 0, 0, 0),
+            _mm256_set_epi32( 0, 0, 0, 0, 0, 0, 0,-1),
+            _mm256_set_epi32( 0, 0, 0, 0, 0, 0,-1,-1),
+            _mm256_set_epi32( 0, 0, 0, 0, 0,-1,-1,-1),
+            _mm256_set_epi32( 0, 0, 0, 0,-1,-1,-1,-1),
+            _mm256_set_epi32( 0, 0, 0,-1,-1,-1,-1,-1),
+            _mm256_set_epi32( 0, 0,-1,-1,-1,-1,-1,-1),
+            _mm256_set_epi32( 0,-1,-1,-1,-1,-1,-1,-1),
+            _mm256_set_epi32(-1,-1,-1,-1,-1,-1,-1,-1),
+        };
+        return _mm256_loadu_si256(&mask[N7]);
+    }
+
+    inline void softmax(float * v, int N, float * s_max=nullptr, float * s_sum=nullptr) {
         static __m256 one = _mm256_castsi256_ps(_mm256_set1_epi32(0x3f800000));                 // 1.0f
-        static __m256 lower_32 = _mm256_castsi256_ps(_mm256_set_epi32(0,0,0,0,0,0,0,-1));
+        auto x_mask = get_mask(N & 7);
+
+        // get max
         auto x_max = _mm256_set1_ps(std::numeric_limits<float>::lowest());
         int i;
         for(i = 0; (i+8) <= N; i+=8) {
@@ -566,8 +582,9 @@ namespace functional {
             x_max = _mm256_max_ps(x_max, x);
         }
         // tails
-        for(;i<N;i++) {
-            auto x = _mm256_broadcast_ss(v + i);
+        if (i < N) {
+            auto x = _mm256_maskload_ps(v+i, x_mask);
+            x = _mm256_blendv_ps(x_max, x, _mm256_castsi256_ps(x_mask)); // replace the padding zero with current max
             x_max = _mm256_max_ps(x_max, x);
         }
         avx2::functional::hmax(x_max);
@@ -583,18 +600,16 @@ namespace functional {
             _mm256_storeu_ps(v + i, x);          // save exp(x-x_max)
         }
 
+        // handle tails
         if (i < N) {
-            auto sum_exp_tail = _mm256_setzero_ps();
-            for(;i<N;i++) {
-                auto x = _mm256_broadcast_ss(v + i);
-                x = _mm256_sub_ps(x, x_max);
-                avx2::functional::exp_ps(x);
-                sum_exp_tail = _mm256_add_ps(sum_exp_tail, x);
-                v[i] = _mm256_cvtss_f32(x);
-            }
-            sum_exp_tail = _mm256_and_ps(sum_exp_tail, lower_32);// only lowest f32 is valid sum
-            sum_exp = _mm256_add_ps(sum_exp, sum_exp_tail); // add tail
+            auto x = _mm256_maskload_ps(v+i, x_mask);
+            x = _mm256_sub_ps(x, x_max);
+            avx2::functional::exp_ps(x);
+            x = _mm256_blendv_ps(_mm256_setzero_ps(), x, _mm256_castsi256_ps(x_mask));
+            sum_exp = _mm256_add_ps(sum_exp, x);
+            _mm256_maskstore_ps(v + i, x_mask, x);
         }
+
         avx2::functional::hsum(sum_exp);
         if (s_sum) *s_sum = _mm256_cvtss_f32(sum_exp);
         auto reciprocal_sum_exp = _mm256_div_ps(one, sum_exp);     // 1/sum_exp
@@ -605,10 +620,11 @@ namespace functional {
             x = _mm256_mul_ps(x, reciprocal_sum_exp);
             _mm256_storeu_ps(v + i, x);
         }
-        for(;i<N;i++) {
-            auto x = _mm256_broadcast_ss(v + i);
+        // handle tails
+        if (i < N) {
+            auto x = _mm256_maskload_ps(v+i, x_mask);
             x = _mm256_mul_ps(x, reciprocal_sum_exp);
-            v[i] = _mm256_cvtss_f32(x);
+            _mm256_maskstore_ps(v + i, x_mask, x);
         }
     }
 
