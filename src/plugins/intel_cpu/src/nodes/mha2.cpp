@@ -15,6 +15,13 @@
 #include "common/cpu_memcpy.h"
 #include "transformations/cpu_opset/x64/op/mha2.hpp"
 
+#include "utils/profiler.hpp"
+
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sched.h>
+
 using namespace InferenceEngine;
 using namespace InferenceEngine::details;
 
@@ -127,6 +134,21 @@ static void log(Args&& ... args) {
     std::cout << ss.str();
 }
 
+static size_t offset2coord(size_t off, size_t D, size_t &d) {
+    auto next_off = off/D;
+    d = off - next_off*D;
+    return next_off;
+}
+
+template<typename ... Args>
+static size_t offset2coord(size_t off, size_t D, size_t &d, Args&& ... args) {
+    off = offset2coord(off, std::forward<Args>(args)...);
+    auto next_off = off/D;
+    d = off - next_off*D;
+    return next_off;
+}
+
+
 #define NAMED_LOG(prefix, ...) log(prefix, NAMED_VALUES(__VA_ARGS__))
 
 void MHA2::execute(dnnl::stream strm) {
@@ -204,6 +226,7 @@ void MHA2::execute(dnnl::stream strm) {
         if (mem_presentk) NAMED_LOG("\t",mem_presentk->getDesc());
         if (mem_presentv) NAMED_LOG("\t",mem_presentv->getDesc());
     }
+
     // q: [B, M, H*k]
     if (kv_head_transposed) {
         // k&v: [B, H, N, K]
@@ -222,36 +245,171 @@ void MHA2::execute(dnnl::stream strm) {
         one_token_k = reinterpret_cast<float*>(mem_k->GetPtr());
         one_token_v = reinterpret_cast<float*>(mem_v->GetPtr());
 
-        parallel_for2d(B, H, [&](size_t b, size_t h) {
-            size_t tid = parallel_get_thread_num();
-            auto bh = (b*H + h);
-            auto * pheadK = pK + bh*N*K;
-            auto * pheadV = pV + bh*N*K;
-            if (with_kv_cache) {
-                // generate presentk/presentv
-                //  k,v : [B, 1, H*k] => [B, 1, H, K] => [B, H, 1, K]
-                // pastk, paskv:                         [B, H, N-1, K]
-                // presentk, presentv:                   [B, H, N, K]
-                auto src1 = one_token_k + bh*K;
-                auto src0 = past_k + bh*(N-1)*K;
-                memcpy(pheadK, src0, (N-1)*K*sizeof(float));
-                memcpy(pheadK + (N-1)*K, src1, K*sizeof(float));
+        static int bN = std::getenv("bN") ? atoi(std::getenv("bN")) : 256;
+        static int sss = 0;
+        // if (N > bN) sss ++;
+        if (with_kv_cache || with_causal_mask || (N < bN) || (sss & 3)==2) {
+            parallel_for2d(B, H, [&](size_t b, size_t h) {
+                size_t tid = parallel_get_thread_num();
+                auto bh = (b*H + h);
+                auto * pheadK = pK + bh*N*K;
+                auto * pheadV = pV + bh*N*K;
+                if (with_kv_cache) {
+                    // generate presentk/presentv
+                    //  k,v : [B, 1, H*k] => [B, 1, H, K] => [B, H, 1, K]
+                    // pastk, paskv:                         [B, H, N-1, K]
+                    // presentk, presentv:                   [B, H, N, K]
+                    auto src1 = one_token_k + bh*K;
+                    auto src0 = past_k + bh*(N-1)*K;
+                    memcpy(pheadK, src0, (N-1)*K*sizeof(float));
+                    memcpy(pheadK + (N-1)*K, src1, K*sizeof(float));
 
-                src1 = one_token_v + bh*K;
-                src0 = past_v + bh*(N-1)*K;
-                memcpy(pheadV, src0, (N-1)*K*sizeof(float));
-                memcpy(pheadV + (N-1)*K, src1, K*sizeof(float));
+                    src1 = one_token_v + bh*K;
+                    src0 = past_v + bh*(N-1)*K;
+                    memcpy(pheadV, src0, (N-1)*K*sizeof(float));
+                    memcpy(pheadV + (N-1)*K, src1, K*sizeof(float));
+                }
+                //  q[b, 0:M, h, K] => MxK
+                //  k[b, h, 0:N, K] => NxK
+                //  v[b, h, 0:N, K] => NxK
+                // wv[b, 0:M, h, K] => MxK
+                tensor2D<float> q(M, K, pQ + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
+                tensor2D<float> k(N, K, pheadK, stride_bytes_K);
+                tensor2D<float> v(N, K, pheadV, stride_bytes_K);
+                tensor2D<float> wv(M, K, pWV + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
+                kernels.one_head_attention(tid, q, k, v, wv, 0, with_causal_mask);
+            });
+        } else {
+            // no with_kv_cache, no with_causal_mask
+            //
+            // kernel register blocking on 6x16, so N is split in unit of 256 columns
+            // that means each token will be encoded by 256 key/values and finally combined
+            // if N is smaller than 256, we don't split them
+            //
+            //
+            int num_sub_states = (N + bN - 1) / bN;
+            const size_t work_amount = (size_t)(B * H) * num_sub_states;
+            
+            //NAMED_LOG("======",num_sub_states, M, N, work_amount);
+            sub_states.resize(B * M * H * num_sub_states, K);
+            qk_max.resize(1, work_amount*M);
+            qk_sum.resize(1, work_amount*M);
+
+            auto _prof = Profile("MHA2_exe");
+            parallel_nt(0, [&](int ithr, int nthr) {
+                // each work item is doing  M x bN sub-states encoding
+                // and finally, main thread will combine sub-states into one
+                size_t start{0}, end{0};
+                splitter(work_amount, nthr, ithr, start, end);
+                if (start == end)
+                    return;
+                //std::stringstream ss; ss << ithr << "/" << nthr << std::endl;   std::cout << ss.str();
+                // encoding sub-states one by one
+                for (auto cur = start; cur < end; cur++) {
+                    size_t h;
+                    size_t nb;
+                    auto b = offset2coord(cur, H, h, num_sub_states, nb);
+                    auto n0 = nb * bN;
+                    auto n1 = std::min(size_t(N), n0 + bN);
+
+                    //  q[b, 0:M, h, K]   => M x K
+                    //  k[b, h, n0:n1, K] => bN x K
+                    //  v[b, h, n0:n1, K] => bN x K
+                    //  s[b, 0:M, h, nb, K] => M x K
+                    // wv[b, 0:M, h, K] => M x K
+
+                    tensor2D<float> q(M, K, pQ + b * stride_b_q + h * stride_h_q, stride_bytes_hk);
+                    tensor2D<float> k(n1 - n0, K, pK + (b * H + h) * N * K + n0 * K, stride_bytes_K);
+                    tensor2D<float> v(n1 - n0, K, pV + (b * H + h) * N * K + n0 * K, stride_bytes_K);
+                    tensor2D<float> s(M,
+                                      K,
+                                      &sub_states(b * (M * H * num_sub_states) + h * (num_sub_states) + nb, 0),
+                                      bN*H*K*sizeof(float));
+                    // tensor2D<float> wv(M, K, s, stride_bytes_hk);
+                    kernels.one_head_attention(ithr, q, k, v, s, 0, with_causal_mask, &qk_max[cur * M], &qk_sum[cur * M]);
+                   
+                    //NAMED_LOG("======",cur, b, h, nb, n0, n1, qk_max[cur * M], qk_sum[cur * M]);
+                }
+            });
+
+            // combine sub-states
+            auto _prof2 = Profile("combine");
+            for(int b = 0; b<B; b++) {
+                for(int h = 0; h<H; h++) {
+                    //  s[b, 0:M, h, nb, K] => M x nb x K
+                    // wv[b, 0:M, h, K] => M x K
+                    // qk_max [b,h,nb,M]
+                    tensor2D<float> wv(M, K, pWV + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
+                
+                    auto cur = (b * H + h) * num_sub_states;
+
+                    //NAMED_LOG("======",b, h, cur);
+                    // qk_max: [b, h, 0:num_sub_states, 0:M]
+                    // qk_sum: [b, h, 0:num_sub_states, 0:M]
+                    float* p_qk_max = &qk_max[cur];  // num_sub_states x M
+                    float* p_qk_sum = &qk_sum[cur];  // num_sub_states x M
+                    for (int m = 0; m < M; m++) {
+                        float * p_wv = &wv(m, 0);
+                        // get weights of sub-states :
+                        //    tmax = max_i(qk_max_i)
+                        //    
+                        //    tsum_i = sum_i * exp(qk_max_i - tmax)
+                        //    weight_i = tsum_i/sum_i(tsum_i)
+                        //float tmax = std::numeric_limits<float>::lowest();
+                        auto tmax = _mm256_set1_ps(std::numeric_limits<float>::lowest());
+                        for (int nb = 0; nb < num_sub_states; nb++) {
+                            auto sub_max = _mm256_broadcast_ss(&p_qk_max[nb*M + m]);
+                            tmax = _mm256_max_ps(tmax, sub_max);
+                        }
+
+                        //NAMED_LOG("======", tmax);
+                        auto tsum = _mm256_setzero_ps();
+                        for (int nb = 0; nb < num_sub_states; nb++) {
+                            auto sub_max = _mm256_broadcast_ss(&p_qk_max[nb*M + m]);
+                            sub_max = _mm256_sub_ps(sub_max, tmax);
+                            auto sub_sum = _mm256_broadcast_ss(&p_qk_sum[nb*M + m]);
+                            avx2::functional::exp_ps(sub_max);
+                            sub_sum = _mm256_mul_ps(sub_sum, sub_max);
+                            p_qk_sum[nb*M + m] = _mm256_cvtss_f32(sub_sum);
+                            tsum = _mm256_add_ps(tsum, sub_sum);
+                            //p_qk_sum[nb*M + m] *= std::exp(p_qk_max[nb*M + m] - tmax);
+                            //tsum += p_qk_sum[nb*M + m];
+                        }
+                        //NAMED_LOG("======", tsum);
+                        static __m256 one = _mm256_castsi256_ps(_mm256_set1_epi32(0x3f800000)); // 1.0f
+                        auto tweight_recip = _mm256_div_ps(one, tsum);                          // 1/sum_exp
+
+                        // linear combine sub-states, 
+                        __m256i wv_mask = _mm256_setzero_si256();
+                        for (int nb = 0; nb < num_sub_states; nb++) {
+                            //
+                            float* p_sub = &sub_states(b * (M * H * num_sub_states) + h * (num_sub_states) + nb, 0);
+
+                            auto x_weight = _mm256_broadcast_ss(&p_qk_sum[nb*M + m]);
+                            x_weight = _mm256_mul_ps(x_weight, tweight_recip);
+                            //auto x_weight = _mm256_set1_ps(p_qk_sum[nb*M + m] * tweight_recip);
+                            // wv = substates * weight    for nb=0
+                            // wv += substates * weight   otherwise
+                            if (nb == 1) wv_mask = avx2::functional::get_mask(8);
+                            int k;
+                            for(k = 0; (k+8) <= K; k += 8) {
+                                auto x_sub = _mm256_loadu_ps(p_sub + k);
+                                auto x_new = _mm256_maskload_ps(p_wv + k, wv_mask);
+                                x_new = _mm256_fmadd_ps(x_sub, x_weight, x_new);
+                                _mm256_storeu_ps(p_wv + k, x_new);
+                            }
+                            if (k < K) {
+                                auto mask = avx2::functional::get_mask(K&7);
+                                auto x_sub = _mm256_maskload_ps(p_sub + k, mask);
+                                auto x_new = _mm256_maskload_ps(p_wv + k, wv_mask);
+                                x_new = _mm256_fmadd_ps(x_sub, x_weight, x_new);
+                                _mm256_maskstore_ps(p_wv + k, mask, x_new);
+                            }
+                        }
+                    }
+                }
             }
-            //  q[b, 0:M, h, K] => MxK
-            //  k[b, h, 0:N, K] => NxK
-            //  v[b, h, 0:N, K] => NxK
-            // wv[b, 0:M, h, K] => MxK
-            tensor2D<float> q(M, K, pQ + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
-            tensor2D<float> k(N, K, pheadK, stride_bytes_K);
-            tensor2D<float> v(N, K, pheadV, stride_bytes_K);
-            tensor2D<float> wv(M, K, pWV + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
-            kernels.one_head_attention(tid, q, k, v, wv, 0, with_causal_mask);
-        });
+        }
     } else {
         // with_causal_mask:0   with_kv_cache:0   kv_head_transposed:0
         // parallel in B/H/M dimensions
@@ -262,20 +420,14 @@ void MHA2::execute(dnnl::stream strm) {
         // kernel register blocking on 6 rows
         const size_t work_amount = (size_t)B*H * M;
 
-        auto coord2D = [&](size_t index, size_t D0, size_t D1, size_t &i0, size_t &i1) {
-            // i = d0 * D1 + d1
-            i0 = index/D1;
-            i1 = index - i0*D1;
-        };
-
         parallel_nt(0, [&](int ithr, int nthr) {
             size_t start{0}, end{0};
             splitter(work_amount, nthr, ithr, start, end);
             size_t bh0, mb0;
             size_t bh1, mb1;
             if (start == end) return;
-            coord2D(start, B*H, M, bh0, mb0);
-            coord2D(end, B*H, M, bh1, mb1);
+            bh0 = offset2coord(start, M, mb0);
+            bh1 = offset2coord(end, M, mb1);
             auto m_start = mb0;
             auto m_end = std::min(size_t(M), mb1);
 
@@ -309,6 +461,44 @@ void MHA2::execute(dnnl::stream strm) {
     }
 }
 
+struct cpu_thr_info {
+    pid_t pid;
+    cpu_set_t cpuset;
+    friend inline std::ostream& operator<<(std::ostream& os, const cpu_thr_info & me) {
+        os << "pid=" << long(me.pid) << " cpuset=";
+        const long nCores = sysconf( _SC_NPROCESSORS_ONLN );
+        for (long i = 0; i < nCores; i++) {
+            if (CPU_ISSET(i, &me.cpuset))
+                os << "X";
+            else
+                os << "_";
+        }
+        return os;
+    }
+    static void test() {
+        static int test_cnt = 5;
+
+        if (test_cnt <= 0) return;
+        test_cnt--;
+
+        cpu_thr_info all_thr[256];
+        std::atomic<long> total_thr;
+        
+        parallel_nt(0, [&](int ithr, int nthr) {
+            total_thr = nthr;
+            auto & info = all_thr[ithr];
+            info.pid = syscall(__NR_gettid);
+            CPU_ZERO(&info.cpuset);
+            sched_getaffinity(0, sizeof(info.cpuset), &info.cpuset);
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        });
+
+        std::cout << "cpu_thr_info total_threads = " << total_thr << ", mappings:" << std::endl;
+        for ( int i=0;i<total_thr; i++)
+            std::cout << "\t thread " << i << ": " << all_thr[i] << std::endl;
+    }
+};
+
 void MHA2::executeDynamicImpl(dnnl::stream strm) {
 #if 0
     // shape infer & allocate output memory
@@ -330,6 +520,8 @@ void MHA2::executeDynamicImpl(dnnl::stream strm) {
     }
     Node::redefineOutputMemory(outputShapes);
 #endif
+
+    //cpu_thr_info::test();
     execute(strm);
 }
 
