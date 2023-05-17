@@ -205,6 +205,7 @@ const InferenceEngine::details::caseless_unordered_map<std::string, Type> type_t
         { "Unique", Type::Unique},
         { "Ngram", Type::Ngram},
         { "MHA2", Type::MHA2},
+        { "AddCustom", Type::AddCustom}
 };
 
 Type TypeFromName(const std::string& type) {
@@ -315,6 +316,7 @@ std::string NameFromType(const Type type) {
         CASE(MHA2);
         CASE(Unique);
         CASE(Ngram);
+        CASE(AddCustom)
         CASE(Unknown);
     }
 #undef CASE

@@ -93,6 +93,7 @@
 #include "nodes/mha2.h"
 #include "nodes/unique.hpp"
 #include "nodes/ngram.h"
+#include "nodes/add_custom.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -199,6 +200,7 @@ Node::NodesFactory::NodesFactory()
     INTEL_CPU_NODE(MHA, Type::MHA);
     INTEL_CPU_NODE(Snippet, Type::Subgraph);
     INTEL_CPU_NODE(MHA2, Type::MHA2);
+    INTEL_CPU_NODE(AddCustom, Type::AddCustom);
 #endif
 }
 

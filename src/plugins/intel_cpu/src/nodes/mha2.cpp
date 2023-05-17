@@ -149,7 +149,7 @@ static size_t offset2coord(size_t off, size_t D, size_t &d, Args&& ... args) {
 }
 
 
-#define NAMED_LOG(prefix, ...) log(prefix, NAMED_VALUES(__VA_ARGS__))
+#define NAMED_LOG(prefix, ...)
 
 void MHA2::execute(dnnl::stream strm) {
     auto mem_q = getParentEdgeAt(0)->getMemoryPtr();
