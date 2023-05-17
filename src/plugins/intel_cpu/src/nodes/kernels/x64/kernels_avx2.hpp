@@ -433,8 +433,8 @@ namespace functional {
 
         if (valid_n < 16) {
             // split it into 2 calls
-            transpose_16xK_ps(pBdst, pBsrc, strideB, 8, K);                           // B0
-            transpose_16xK_ps(pBdst + 8, pBsrc + strideB*8, strideB, valid_n - 8, K); // B1
+            transpose_16xK_ps(pBdst, pBsrc, strideB, valid_n - 8, K);          // B0
+            transpose_16xK_ps(pBdst + 8, pBsrc + strideB*8, strideB, 8, K);    // B1
             return;
         }
         
