@@ -224,7 +224,7 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
     if (ov::is_type<ov::op::v0::Constant>(nodeB)) {
         const auto& wgtShape = nodeB->get_output_shape(0);
         auto wgtNode = ov::as_type<ov::op::v0::Constant>(nodeB);
-        size_t B = wgtShape[0];
+        // size_t B = wgtShape[0];
         K = transposeIn[1] ? wgtShape[2] : wgtShape[1];
         N = transposeIn[1] ? wgtShape[1] : wgtShape[2];
         int packed_b_size = MlasGemmPackBSize(N, K);
@@ -686,7 +686,6 @@ void MatMul::prepareParams() {
             }
             return std::make_shared<DnnlExecutor>(prim_desc);
         };
->>>>>>> fc with mlas
 
         auto cache = context->getParamsCache();
         auto result = cache->getOrCreate(key, builder);
