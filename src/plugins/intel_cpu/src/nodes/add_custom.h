@@ -33,6 +33,8 @@ protected:
 private:
     InferenceEngine::Precision dataPrecision;
     size_t totalElements;
+    bool postGelu = false;
+    bool witBiases = false;
 };
 
 }   // namespace node

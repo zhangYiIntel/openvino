@@ -14,5 +14,18 @@ public:
     OPENVINO_RTTI("ConvertToAddCustom", "0");
     ConvertToAddCustom();
 };
+
+class ConvertSameShapeAddCustom: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("ConvertSameShapeAddCustom", "0");
+    ConvertSameShapeAddCustom();
+};
+
+class FuseAddCustom: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("FuseAddCustom", "0");
+    FuseAddCustom();
+};
+
 }   // namespace intel_cpu
 }   // namespace ov

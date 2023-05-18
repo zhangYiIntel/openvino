@@ -261,7 +261,10 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     CPU_REGISTER_PASS_COMMON(manager, SwapConvertTranspose);
     CPU_REGISTER_PASS_X64(manager, ConvertToInteraction);
     CPU_REGISTER_PASS_X64(manager, ConvertInteractionInt8);
-    CPU_REGISTER_PASS_X64(manager, ConvertToAddCustom);
+    if(getenv("ENABLE_ADDCUSTOM"))
+        CPU_REGISTER_PASS_X64(manager, ConvertToAddCustom);
+        CPU_REGISTER_PASS_X64(manager, ConvertSameShapeAddCustom);
+        CPU_REGISTER_PASS_X64(manager, FuseAddCustom);
     CPU_REGISTER_PASS_ARM(manager, ConvertReduceMultiAxis);
     CPU_REGISTER_PASS_ARM(manager, MishDecomposition);
     CPU_REGISTER_PASS_ARM(manager, ConvertConv1D);
@@ -456,6 +459,7 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     }
 
     manager.run_passes(model);
+    serialize(model, "whisper_preprocess.xml", "whisper_preprocess.bin");
 }
 
 void Transformations::Lpt(const bool hasINT16orINT32Levels, const std::vector<ov::element::Type>& defaultPrecisions) {
