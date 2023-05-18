@@ -16,13 +16,17 @@ public:
 
     AddCustom() = default;
 
-    AddCustom(const ngraph::Output<ngraph::Node> &A, const ngraph::Output<ngraph::Node> &B);
+    AddCustom(const ngraph::Output<ngraph::Node> &A, const ngraph::Output<ngraph::Node> &B, bool fuse_gelu=false);
+
+    AddCustom(const ngraph::Output<ngraph::Node> &A, const ngraph::Output<ngraph::Node> &B, const ngraph::Output<ngraph::Node> &C);
     
     void validate_and_infer_types() override;
 
     bool visit_attributes(ngraph::AttributeVisitor &visitor) override;
 
     std::shared_ptr<ngraph::Node> clone_with_new_inputs(const ngraph::OutputVector &new_args) const override;
+public:
+    bool fuse_gelu = false;
 };
 
 }   // namespace intel_cpu

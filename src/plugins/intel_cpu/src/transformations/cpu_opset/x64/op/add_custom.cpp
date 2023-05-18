@@ -5,15 +5,20 @@
 #include "add_custom.hpp"
 #include "transformations/itt.hpp"
 
-ov::intel_cpu::AddCustom::AddCustom(const ngraph::Output<ngraph::Node> &node1, const ngraph::Output<ngraph::Node> &node2) :
-    op::Op({node1, node2}) {
+ov::intel_cpu::AddCustom::AddCustom(const ngraph::Output<ngraph::Node> &node1, const ngraph::Output<ngraph::Node> &node2, bool fuse_gelu) :
+    op::Op({node1, node2}), fuse_gelu(fuse_gelu) {
+    validate_and_infer_types();
+}
+
+ov::intel_cpu::AddCustom::AddCustom(const ngraph::Output<ngraph::Node> &node1, const ngraph::Output<ngraph::Node> &node2, const ngraph::Output<ngraph::Node> &node3) :
+    op::Op({node1, node2, node3}) {
     validate_and_infer_types();
 }
 
 std::shared_ptr<ngraph::Node> ov::intel_cpu::AddCustom::clone_with_new_inputs(const ngraph::OutputVector& new_args) const {
     INTERNAL_OP_SCOPE(AddCustom_with_new_inputs);
     check_new_args_count(this, new_args);
-    return std::make_shared<ov::intel_cpu::AddCustom>(new_args.at(0), new_args.at(1));
+    return std::make_shared<ov::intel_cpu::AddCustom>(new_args.at(0), new_args.at(1), fuse_gelu);
 }
 
 void ov::intel_cpu::AddCustom::validate_and_infer_types() {
