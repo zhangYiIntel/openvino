@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 #include <functional>
+#include <atomic>
 
 extern "C" {
 #ifdef _WIN32
@@ -67,9 +68,11 @@ class ProfilerManager {
     std::thread::id tid;
     std::deque<ProfileCounter> all_counters;
 
+    int serial;
     std::shared_ptr<void> pmu;
     PMUMonitor * pmum;
 
+    std::atomic<bool> finalized{false};
 public:
     ProfilerManager();
     ~ProfilerManager();

@@ -346,65 +346,75 @@ ProfilerManager::ProfilerManager() {
             tsc_ticks_base.compare_exchange_strong(expected, __rdtsc());
         }
     }
-
-    std::cout << "=== ProfilerManager: is " << (enabled? "enabled":"disabled") << " ====" << std::endl;
-
     tid = std::this_thread::get_id();
-    totalProfilerManagers++;
+    std::stringstream ss;
+    serial = totalProfilerManagers.fetch_add(1);
+    ss << "=== ProfilerManager #" << serial << " : is " << (enabled? "enabled":"disabled") << " ====" << std::endl;
+    std::cout << ss.str();
 }
 
-static std::mutex dump_mutex;
-static std::string dump_text_all;
-static std::atomic<int> total_traces(0);
-static std::atomic<int> fake_tids;
 
 void ProfilerManager::finalize() {
+    static std::mutex finalize_mutex;
+    static const char* dump_file_name = "ov_profile.json";
+    static bool dump_file_created = false;
+
+    // finalization is serialized by this mutex
+    std::lock_guard<std::mutex> lock_g(finalize_mutex);
+
     // collect all entries
-    if (all_data.size()) {
-        std::lock_guard<std::mutex> lock_g(dump_mutex);
-        auto fake_tid = fake_tids.fetch_add(1);
-        std::stringstream dump_ss;
-        chromeTrace ct(dump_ss, fake_tid);
+    if (finalized) return;
+    finalized = true;
+    auto data_size = all_data.size();
+    auto counter_size = all_counters.size();
+    if (data_size) {
+        // open output file
+        std::ofstream fw;
+        if (dump_file_created) {
+            fw.open(dump_file_name, std::ios::out | std::ios::app);
+        } else {
+            fw.open(dump_file_name, std::ios::out);
+            fw << "{\n";
+            fw << "\"schemaVersion\": 1,\n";
+            fw << "\"traceEvents\": [\n";
+            fw.flush();
+            dump_file_created = true;
+        }
+        chromeTrace ct(fw, serial);
         for (auto& d : all_data) {
             ct.addCompleteEvent(d.name, d.cat, tsc_to_usec(d.start), tsc_to_usec(d.end) - tsc_to_usec(d.start), d.args);
-            total_traces++;
         }
         dumpAllCounters(ct);
-        dump_text_all += dump_ss.str();
-        std::cout << "==== Profile: total number of profile entries " << all_data.size() << "," << all_counters.size()
-                  << std::endl;
-    }
-
-    if (totalProfilerManagers.fetch_sub(1) != 1)
-        return;
-
-    if (total_traces == 0)
-        return;
-
-    // the last ProfilerManagers is responsible for dump to file
-    const char* dump_file_name = "ov_profile.json";
-    std::ofstream fw(dump_file_name, std::ios::out);
-
-    if (fw.is_open()) {
-        fw << "{\n";
-        fw << "\"schemaVersion\": 1,\n";
-        fw << "\"traceEvents\": [\n";
-
-        fw << dump_text_all;
-
-        fw << R"({
-            "name": "Profiler End",
-            "ph": "i",
-            "s": "g",
-            "pid": "Traces",
-            "tid": "Trace OV Profiler",
-            "ts":)"
-           << tsc_to_usec(__rdtsc()) << "}",
-            fw << "]\n";
-        fw << "}\n";
         fw.close();
-        std::cout << "==== Profile data is dumpped into " << dump_file_name << "\n";
+        
+        all_data.clear();
+        all_counters.clear();
     }
+
+    int left_profilers = totalProfilerManagers.fetch_sub(1) - 1;
+
+    std::stringstream ss;
+    ss << "==== ProfilerManager #" << serial << " finalize: total number of profile entries " << data_size << "," << counter_size
+       << " left "  << left_profilers << std::endl;
+    std::cout << ss.str();
+
+    if (left_profilers != 0)
+        return;
+
+    // the last ProfilerManagers is responsible for closing the dumps file
+    std::ofstream fw (dump_file_name, std::ios::out | std::ios::app);
+    fw << R"({
+        "name": "Profiler End",
+        "ph": "i",
+        "s": "g",
+        "pid": "Traces",
+        "tid": "Trace OV Profiler",
+        "ts":)"
+        << tsc_to_usec(__rdtsc()) << "}",
+        fw << "]\n";
+    fw << "}\n";
+    fw.close();
+    std::cout << "==== Profile data is dumpped into " << dump_file_name << "\n";
 }
 
 ProfilerManager::~ProfilerManager() {
