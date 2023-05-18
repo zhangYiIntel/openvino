@@ -18,9 +18,11 @@
 #include "utils/profiler.hpp"
 
 #include <sys/types.h>
+#if defined(__linux) || defined(__APPLE__)
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sched.h>
+#endif
 
 using namespace InferenceEngine;
 using namespace InferenceEngine::details;
@@ -461,6 +463,7 @@ void MHA2::execute(dnnl::stream strm) {
     }
 }
 
+#if defined(__linux) || defined(__APPLE__)
 struct cpu_thr_info {
     pid_t pid;
     cpu_set_t cpuset;
@@ -498,6 +501,7 @@ struct cpu_thr_info {
             std::cout << "\t thread " << i << ": " << all_thr[i] << std::endl;
     }
 };
+#endif
 
 void MHA2::executeDynamicImpl(dnnl::stream strm) {
 #if 0
