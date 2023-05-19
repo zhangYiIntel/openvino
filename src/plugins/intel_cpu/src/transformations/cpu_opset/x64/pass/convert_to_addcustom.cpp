@@ -66,10 +66,12 @@ ov::intel_cpu::ConvertSameShapeAddCustom::ConvertSameShapeAddCustom() {
             if (a.compatible(b)) {
                 return true;
             } else {
-                size_t rank_a = a.rank().get_length();
-                size_t rank_b = b.rank().get_length();
-                size_t rank_diff = rank_a > rank_b ? (rank_a - rank_b) : (rank_b - rank_a);
-                return rank_diff == 1;
+                // size_t rank_a = a.rank().get_length();
+                // size_t rank_b = b.rank().get_length();
+                // size_t rank_diff = rank_a > rank_b ? (rank_a - rank_b) : (rank_b - rank_a);
+                // error 
+                return false;
+                //return rank_diff == 1;
             }
         };
         if (!shape_compatible(shape1, shape2)) {

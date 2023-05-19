@@ -582,12 +582,10 @@ void Transformations::PostLpt() {
     // Snippets may brake MHA patterns so the fusion has to performed before
     CPU_REGISTER_PASS_X64(postLPTPassManager, MHAFusion);
     CPU_REGISTER_PASS_X64(postLPTPassManager, FuseFQtoInteraction);
-    if (getenv("ENABLE_ADDCUSTOM")) {
-        CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertToAddCustom);
-        CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertSameShapeAddCustom);
-        CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustom);
-        CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustomGelu);
-    }
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertToAddCustom);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertSameShapeAddCustom);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustom);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustomGelu);
     CPU_SET_CALLBACK_X64(postLPTPassManager,
         ([this](const std::shared_ptr<const ov::Node>& n) -> bool {
             std::string errorMessage;

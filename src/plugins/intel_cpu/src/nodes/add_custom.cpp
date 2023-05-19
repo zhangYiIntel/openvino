@@ -226,11 +226,18 @@ void ov::intel_cpu::node::AddCustom::execute(dnnl::stream strm) {
     auto node0Dims = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
     auto node1Dims = getParentEdgeAt(1)->getMemoryPtr()->getStaticDims();
     size_t channels = node1Dims.back();
-
+    bool addScalar = false;
+    if(node1Dims.size() == 1 && node0Dims.size() == 1 && node1Dims[0] == 1) {
+        addScalar = true;
+    }
     auto total = totalElements;
     auto count = total / channels;
     // assume batch is 1
-    if (postGelu) {
+    if (addScalar) {
+        for(size_t i = 0; i < node0Dims[0]; i++) {
+            dst[i] = node0[i] + node1[0];
+        }
+    } else if (postGelu) {
         parallel_for(count, [&](int i) {
             add2_gelu(node0 + i * channels, node1, dst + i * channels, channels);
         });   
