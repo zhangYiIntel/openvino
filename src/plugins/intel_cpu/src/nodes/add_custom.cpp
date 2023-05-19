@@ -128,16 +128,16 @@ static void add2_gelu(float* a, float *b, float *dst, size_t ele_num) {
         auto a0_f = _mm256_loadu_ps(a+i);
         auto b0_f = _mm256_loadu_ps(b+i);
         auto d_f = _mm256_add_ps(a0_f, b0_f);
-        gelu_erf_minmax_approx(d_f);
-        _mm256_storeu_ps(dst+i, d_f);
+        auto act_f = gelu_erf_minmax_approx(d_f);
+        _mm256_storeu_ps(dst+i, act_f);
     }
     if (i < ele_num) {
         auto msk = get_mask(ele_num - i);
         auto a0_f = _mm256_maskload_ps(a+i, msk);
         auto b0_f = _mm256_maskload_ps(b+i, msk);
         auto d_f = _mm256_add_ps(a0_f, b0_f);
-        gelu_erf_minmax_approx(d_f);
-        _mm256_maskstore_ps(dst+i, msk, d_f);
+        auto act_f = gelu_erf_minmax_approx(d_f);
+        _mm256_maskstore_ps(dst+i, msk, act_f);
     }
 }
 
@@ -190,8 +190,19 @@ void ov::intel_cpu::node::AddCustom::createPrimitive() {
 
 void ov::intel_cpu::node::AddCustom::prepareParams() {
     const auto& dims = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
+    auto node0Dims = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
+    auto node1Dims = getParentEdgeAt(1)->getMemoryPtr()->getStaticDims();
     totalElements =
         std::accumulate(dims.begin(), dims.end(), size_t(1), std::multiplies<size_t>());
+    if (node0Dims.size() == node1Dims.size() && node0Dims == node1Dims) {
+        sameShape = true;
+    } else {
+        size_t rank_a = node0Dims.size();
+        size_t rank_b = node1Dims.size();
+        size_t rank_diff = rank_a > rank_b ? (rank_a - rank_b) : (rank_b - rank_a);
+        size_t fisrt_dim = rank_a > rank_b ? node0Dims[0] : node0Dims[1];
+        sameShape = (rank_diff == 1 && fisrt_dim == 1);
+    }
 }
 
 void ov::intel_cpu::node::AddCustom::executeDynamicImpl(dnnl::stream strm) {
@@ -211,12 +222,11 @@ void ov::intel_cpu::node::AddCustom::execute(dnnl::stream strm) {
     auto node0Dims = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
     auto node1Dims = getParentEdgeAt(1)->getMemoryPtr()->getStaticDims();
     size_t channels = node1Dims.back();
-    bool sameShape = node0Dims.size() == node1Dims.size() && node0Dims == node1Dims;
+
     auto total = totalElements;
     auto count = total / channels;
     // assume batch is 1
     if (postGelu) {
-        std::cout << getName() << "|" << count << "|" << channels << std::endl;
         parallel_for(count, [&](int i) {
             add2_gelu(node0 + i * channels, node1, dst + i * channels, channels);
         });   

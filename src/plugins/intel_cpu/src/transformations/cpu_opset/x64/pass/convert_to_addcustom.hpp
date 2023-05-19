@@ -27,5 +27,11 @@ public:
     FuseAddCustom();
 };
 
+class FuseAddCustomGelu: public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("FuseAddCustomGelu", "0");
+    FuseAddCustomGelu();
+};
+
 }   // namespace intel_cpu
 }   // namespace ov

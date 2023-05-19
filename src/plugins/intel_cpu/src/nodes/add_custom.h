@@ -35,6 +35,7 @@ private:
     size_t totalElements;
     bool postGelu = false;
     bool witBiases = false;
+    bool sameShape = false;
 };
 
 }   // namespace node
