@@ -27,7 +27,7 @@ ov::intel_cpu::ConvertToAddCustom::ConvertToAddCustom() {
         auto addcustom_node = std::make_shared<AddCustom>(input_node, const_node, false);
         addcustom_node->set_friendly_name(add_node->get_friendly_name());
         replace_node(add_node, addcustom_node);
-        std::cout << "Replace Add " << addcustom_node->get_friendly_name() << std::endl;
+        // std::cout << "Replace Add " << addcustom_node->get_friendly_name() << std::endl;
         return true;
     };
 
@@ -38,8 +38,8 @@ ov::intel_cpu::ConvertToAddCustom::ConvertToAddCustom() {
 ov::intel_cpu::ConvertSameShapeAddCustom::ConvertSameShapeAddCustom() {
     MATCHER_SCOPE(ConvertSameAddCustom);
     using namespace ov::pass::pattern;
-    auto input1_m = any_input();
-    auto input2_m = any_input();
+    auto input1_m = any_input(has_static_rank());
+    auto input2_m = any_input(has_static_rank());
     auto add_m = wrap_type<ov::opset8::Add>({input1_m->output(0), input2_m->output(0)});
     matcher_pass_callback callback = [=](Matcher& m) {
         const auto& pattern_to_output = m.get_pattern_value_map();
@@ -48,14 +48,24 @@ ov::intel_cpu::ConvertSameShapeAddCustom::ConvertSameShapeAddCustom() {
         auto add_node =  pattern_to_output.at(add_m).get_node_shared_ptr();
         auto shape1 = input1_node->get_output_partial_shape(0);
         auto shape2 = input2_node->get_output_partial_shape(0);
-        if (!shape1.compatible(shape2)) {
-            std::cout << "Not suitbale Add Node Skip Convert" << add_node->get_friendly_name() << std::endl;
+        auto shape_compatible = [](const ov::PartialShape& a, const ov::PartialShape& b) {
+            if (a.compatible(b)) {
+                return true;
+            } else {
+                size_t rank_a = a.rank().get_length();
+                size_t rank_b = b.rank().get_length();
+                size_t rank_diff = rank_a > rank_b ? (rank_a - rank_b) : (rank_b - rank_a);
+                return rank_diff == 1;
+            }
+        };
+        if (!shape_compatible(shape1, shape2)) {
+            // std::cout << "Not suitbale Add Node Skip Convert|" << add_node->get_friendly_name() << std::endl;
             return false;
         }
         auto addcustom_node = std::make_shared<AddCustom>(input1_node, input2_node);
         addcustom_node->set_friendly_name(add_node->get_friendly_name());
         replace_node(add_node, addcustom_node);
-        std::cout << "Replace Same Add " << addcustom_node->get_friendly_name() << std::endl;
+        // std::cout << "Replace Same Add " << addcustom_node->get_friendly_name() << std::endl;
         return true;
     };
 
@@ -81,16 +91,35 @@ ov::intel_cpu::FuseAddCustom::FuseAddCustom() {
         auto shape1 = input1_node->get_output_partial_shape(0);
         auto shape2 = add1_node->get_output_partial_shape(0);
         if (!shape1.compatible(shape2)) {
-            std::cout << "Not suitbale Add Node Fuse AddCustom" << add2_node->get_friendly_name() << std::endl;
+            // std::cout << "Not suitbale Add Node Fuse AddCustom" << add2_node->get_friendly_name() << std::endl;
             return false;
         }
         auto addcustom_node = std::make_shared<AddCustom>(input1_node, input2_node, const_node);
         addcustom_node->set_friendly_name(add2_node->get_friendly_name());
         replace_node(add2_node, addcustom_node);
-        std::cout << "FuseAddCustom|" << addcustom_node->get_friendly_name() << std::endl;
+        // std::cout << "FuseAddCustom|" << addcustom_node->get_friendly_name() << std::endl;
         return true;
     };
 
     auto m = std::make_shared<Matcher>(add2_m, matcher_name);
+    this->register_matcher(m, callback);
+}
+
+ov::intel_cpu::FuseAddCustomGelu::FuseAddCustomGelu() {
+    MATCHER_SCOPE(FuseAddCustomGelu);
+    using namespace ov::pass::pattern;
+    auto input1_m = wrap_type<ov::intel_cpu::AddCustom>();
+    auto gelu_m = wrap_type<ov::opset7::Gelu>({input1_m});
+    matcher_pass_callback callback = [=](Matcher& m) {
+        const auto& pattern_to_output = m.get_pattern_value_map();
+        auto input1_node =  pattern_to_output.at(input1_m).get_node_shared_ptr();
+        auto gelu_node =  pattern_to_output.at(gelu_m).get_node_shared_ptr();
+        auto addcustom_node = std::make_shared<AddCustom>(input1_node->get_input_source_output(0), input1_node->get_input_source_output(1), true);
+        addcustom_node->set_friendly_name(gelu_node->get_friendly_name());
+        // std::cout << "FuseAddCustomGelu|" << addcustom_node->get_friendly_name() << std::endl;
+        replace_node(gelu_node, addcustom_node);
+        return true;
+    };
+    auto m = std::make_shared<Matcher>(gelu_m, matcher_name);
     this->register_matcher(m, callback);
 }

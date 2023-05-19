@@ -261,10 +261,6 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     CPU_REGISTER_PASS_COMMON(manager, SwapConvertTranspose);
     CPU_REGISTER_PASS_X64(manager, ConvertToInteraction);
     CPU_REGISTER_PASS_X64(manager, ConvertInteractionInt8);
-    if(getenv("ENABLE_ADDCUSTOM"))
-        CPU_REGISTER_PASS_X64(manager, ConvertToAddCustom);
-        CPU_REGISTER_PASS_X64(manager, ConvertSameShapeAddCustom);
-        CPU_REGISTER_PASS_X64(manager, FuseAddCustom);
     CPU_REGISTER_PASS_ARM(manager, ConvertReduceMultiAxis);
     CPU_REGISTER_PASS_ARM(manager, MishDecomposition);
     CPU_REGISTER_PASS_ARM(manager, ConvertConv1D);
@@ -586,6 +582,10 @@ void Transformations::PostLpt() {
     CPU_REGISTER_PASS_X64(postLPTPassManager, MHAFusion);
     CPU_REGISTER_PASS_X64(postLPTPassManager, FuseFQtoInteraction);
 
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertToAddCustom);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertSameShapeAddCustom);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustom);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustomGelu);
     CPU_SET_CALLBACK_X64(postLPTPassManager,
         ([this](const std::shared_ptr<const ov::Node>& n) -> bool {
             std::string errorMessage;
