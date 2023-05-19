@@ -303,6 +303,57 @@ void get_num_streams(const int streams,
                                                                  config.perfHintsConfig.ovPerfHintNumRequests,
                                                                  model_prefer,
                                                                  proc_type_table);
+    {
+        static const char* str_tasksmap = std::getenv("OV_CPU_TASK_MAP");
+        if (str_tasksmap) {
+            if (std::atoi(str_tasksmap) == 0) { // check default setting
+                for (int i = 0;i <executor_config._streams_info_table.size();i++) {
+                std::cout<<executor_config._streams_info_table[i][NUMBER_OF_STREAMS] <<" "<<executor_config._streams_info_table[i][PROC_TYPE] <<" "
+                    <<executor_config._streams_info_table[i][THREADS_PER_STREAM] <<"\n";
+                }
+            } else {
+                std::string s(str_tasksmap);
+                std::vector<std::string> tokens;
+
+                size_t pos = 0;
+                std::string token;
+                const std::string delimiter = ";";
+                while ((pos = s.find(delimiter)) != std::string::npos) {
+                    token = s.substr(0, pos);
+                    tokens.push_back(token);
+                    s.erase(0, pos + delimiter.length());
+                }
+                tokens.push_back(s);
+
+                if (tokens.size() > 0) {
+                    executor_config._streams_info_table.clear();
+                }
+
+                for (auto& s : tokens) {
+                    std::vector<int>sys_conf;
+
+                    size_t pos = 0;
+                    std::string token;
+                    const std::string delimiter = ",";
+                    while ((pos = s.find(delimiter)) != std::string::npos) {
+                        token = s.substr(0, pos);
+                        auto i = std::stoi(token);
+                        sys_conf.push_back(i);
+                        s.erase(0, pos + delimiter.length());
+                    }
+                    sys_conf.push_back(std::stoi(s));
+                    executor_config._streams_info_table.push_back(sys_conf);
+                }
+
+                for (auto& tt : executor_config._streams_info_table) {
+                    std::cout << "item :";
+                    for (auto& t : tt)
+                        std::cout << t << ",";
+                    std::cout << std::endl;
+                }
+            }
+        }
+    }
     executor_config._stream_core_ids = reserve_available_cpus(executor_config._streams_info_table);
     executor_config._threadsPerStream = executor_config._streams_info_table[0][THREADS_PER_STREAM];
     executor_config._streams = 0;
