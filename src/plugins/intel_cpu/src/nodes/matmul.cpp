@@ -235,7 +235,10 @@ MatMul::MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr
             wgtNode->get_data_ptr<float>(),
             transposeIn[1] ? K : N,
             packedBPtr->get_ptr());
-        }
+        kern.setup(true);
+    } else {
+        kern.setup(false);
+    }
 }
 
 bool MatMul::canFuse(const NodePtr& node) const {
@@ -716,22 +719,37 @@ void MatMul::prepareParams() {
 
 void MatMul::execute(dnnl::stream strm) {
     static ov::cpu::ThreadPool fakePool;
+    static int USE_MLAS = std::getenv("USE_MLAS") ? atoi(std::getenv("USE_MLAS")) : 1;
     if (packedBPtr) {
-        std::vector<MLAS_SGEMM_DATA_PARAMS> gemmMlas(1);
-        auto& dstMemPtr = getChildEdgeAt(0)->getMemoryPtr();
-        auto& src0MemPtr = getParentEdgeAt(0)->getMemoryPtr();
-        const auto& inputShape = src0MemPtr->GetShape().getStaticDims();
-        size_t M = inputShape[inputShape.size()-2];
-        gemmMlas[0].BIsPacked = true;
-        gemmMlas[0].A = reinterpret_cast<float*>(src0MemPtr->GetData());
-        gemmMlas[0].lda = K;
-        gemmMlas[0].B = packedBPtr->get_ptr<float>();
-        gemmMlas[0].ldb = N;
-        gemmMlas[0].C = reinterpret_cast<float*>(dstMemPtr->GetData());
-        gemmMlas[0].ldc = N;
-        gemmMlas[0].alpha = 1;
-        gemmMlas[0].beta = 0.0f;
-        MlasGemmBatch(CblasNoTrans, CblasNoTrans, M, N, K, gemmMlas.data(), 1, &fakePool);
+        if (USE_MLAS) {
+            std::vector<MLAS_SGEMM_DATA_PARAMS> gemmMlas(1);
+            auto& dstMemPtr = getChildEdgeAt(0)->getMemoryPtr();
+            auto& src0MemPtr = getParentEdgeAt(0)->getMemoryPtr();
+            const auto& inputShape = src0MemPtr->GetShape().getStaticDims();
+            size_t M = inputShape[inputShape.size()-2];
+            gemmMlas[0].BIsPacked = true;
+            gemmMlas[0].A = reinterpret_cast<float*>(src0MemPtr->GetData());
+            gemmMlas[0].lda = K;
+            gemmMlas[0].B = packedBPtr->get_ptr<float>();
+            gemmMlas[0].ldb = N;
+            gemmMlas[0].C = reinterpret_cast<float*>(dstMemPtr->GetData());
+            gemmMlas[0].ldc = N;
+            gemmMlas[0].alpha = 1;
+            gemmMlas[0].beta = 0.0f;
+            MlasGemmBatch(CblasNoTrans, CblasNoTrans, M, N, K, gemmMlas.data(), 1, &fakePool);
+            //std::cout << "M,K,N=" << M << "," << K << "," << N << std::endl;
+        } else {
+            auto& dstMemPtr = getChildEdgeAt(0)->getMemoryPtr();
+            auto& src0MemPtr = getParentEdgeAt(0)->getMemoryPtr();
+            auto& src1MemPtr = getParentEdgeAt(1)->getMemoryPtr();
+            const auto& inputShape = src0MemPtr->GetShape().getStaticDims();
+            size_t M = inputShape[inputShape.size()-2];
+            kern(
+                reinterpret_cast<float*>(src0MemPtr->GetData()),
+                reinterpret_cast<float*>(src1MemPtr->GetData()),
+                reinterpret_cast<float*>(dstMemPtr->GetData()),
+                M, K, N);
+        }
         return;
     } else {
         if (execPtr) {

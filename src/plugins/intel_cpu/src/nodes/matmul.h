@@ -13,12 +13,49 @@
 #include "common/dnnl_executor.h"
 #include "ngraph/runtime/aligned_buffer.hpp"
 
+#include "kernels/x64/kernels_avx2.hpp"
+#include "ie_parallel.hpp"
 namespace ov {
 namespace intel_cpu {
 namespace node {
 
+struct Avx2MatMul {
+    std::vector<std::shared_ptr<avx2::Matmul>> ops;
+    avx2::PP::None pp_none;
+
+    Avx2MatMul() = default;
+
+    void setup(bool b_is_const) {
+        auto NT = parallel_get_num_threads();
+        for(int i = 0; i < NT; i++) {
+            ops.push_back(std::make_shared<avx2::Matmul>(b_is_const, false));
+        }
+    }
+
+    void operator()(float * A, float * B, float * C,
+                  size_t M, size_t K, size_t N) {
+        constexpr int bN = 16;
+        size_t Nb = (N + bN - 1)/bN;
+        tensor2D<float> matA(M, K, A, K*sizeof(float));
+        tensor2D<float> matB(K, N, B, N*sizeof(float));
+        tensor2D<float> matC(M, N, C, N*sizeof(float));
+        parallel_nt_static(0, [&](int ithr, int nthr) {
+            // each work item is doing  M x bN sub-states encoding
+            // and finally, main thread will combine sub-states into one
+            size_t start{0}, end{0};
+            splitter(Nb, nthr, ithr, start, end);
+            auto n0 = start * bN;
+            auto n1 = end * bN;
+            if (n1 > N) n1 = N;
+            (*ops[ithr])(matA, matB, matC, n0, n1, pp_none);
+        });
+    }
+};
+
 class MatMul : public Node {
 public:
+    Avx2MatMul kern;
+
     MatMul(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr context);
 
     void getSupportedDescriptors() override;
