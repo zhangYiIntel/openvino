@@ -6,6 +6,7 @@
 
 #include <ngraph/node.hpp>
 #include <ngraph/op/op.hpp>
+#include "openvino/op/util/attr_types.hpp"
 
 namespace ov {
 namespace intel_cpu {
@@ -25,8 +26,13 @@ public:
     bool visit_attributes(ngraph::AttributeVisitor &visitor) override;
 
     std::shared_ptr<ngraph::Node> clone_with_new_inputs(const ngraph::OutputVector &new_args) const override;
+    const ov::op::AutoBroadcastSpec& get_autob() const override {
+        return m_autob;
+    }
 public:
     bool fuse_gelu = false;
+    ov::op::AutoBroadcastSpec m_autob = ov::op::AutoBroadcastType::NUMPY;
+
 };
 
 }   // namespace intel_cpu

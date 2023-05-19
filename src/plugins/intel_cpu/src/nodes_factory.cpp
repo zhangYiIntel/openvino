@@ -94,6 +94,7 @@
 #include "nodes/unique.hpp"
 #include "nodes/ngram.h"
 #include "nodes/add_custom.h"
+#include "nodes/layer_norm.h"
 
 namespace ov {
 namespace intel_cpu {
@@ -201,6 +202,7 @@ Node::NodesFactory::NodesFactory()
     INTEL_CPU_NODE(Snippet, Type::Subgraph);
     INTEL_CPU_NODE(MHA2, Type::MHA2);
     INTEL_CPU_NODE(AddCustom, Type::AddCustom);
+    INTEL_CPU_NODE(LayerNorm, Type::LayerNorm);
 #endif
 }
 

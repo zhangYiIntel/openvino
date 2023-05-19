@@ -10,8 +10,12 @@
 #include <utils/shape_inference/shape_inference_internal_dyn.hpp>
 #include <cpu/x64/jit_generator.hpp>
 #include "ie_parallel.hpp"
+#ifdef _WIN32
+#include <intrin.h>
+#else
 #include <x86intrin.h>
 #include <immintrin.h>
+#endif
 using namespace InferenceEngine;
 using namespace ov::intel_cpu;
 using namespace ov::intel_cpu::node;

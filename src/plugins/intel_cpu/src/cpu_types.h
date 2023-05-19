@@ -113,7 +113,8 @@ enum class Type {
     Unique,
     Ngram,
     MHA2,
-    AddCustom
+    AddCustom,
+    LayerNorm
 };
 
 enum class Algorithm {
