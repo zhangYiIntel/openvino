@@ -53,8 +53,7 @@ static inline float _mm256_reduce_add_ps(__m256 x) {
 
 static inline float sum(float* src, size_t ele_num) {
     size_t i = 0;
-    __m256 s;
-    s = _mm256_xor_ps(s, s);
+    __m256 s = _mm256_setzero_ps();
     for (; i < ele_num / 8 * 8; i += 8) {
         auto a0 = _mm256_loadu_ps(src);
         s = _mm256_add_ps(s, a0);
@@ -70,9 +69,8 @@ static inline float sum(float* src, size_t ele_num) {
 
 static inline float sum_power2(float* src, float mean, size_t ele_num) {
     size_t i = 0;
-    __m256 s, zero;
-    s = _mm256_xor_ps(s, s);
-    zero = _mm256_xor_ps(zero, zero);
+    __m256 s = _mm256_setzero_ps();
+    __m256 zero = _mm256_setzero_ps();
     auto m = _mm256_set1_ps(mean);
     for (; i < ele_num / 8 * 8; i += 8) {
         auto a0 = _mm256_loadu_ps(src);
@@ -98,7 +96,7 @@ static inline void mvn(float* src, float mean, float var, size_t ele_num, float*
         auto a0_f = _mm256_loadu_ps(src);
         a0_f = _mm256_sub_ps(a0_f, m);
         a0_f = _mm256_mul_ps(a0_f, v);
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), (__m256i)a0_f);
+        _mm256_storeu_ps(dst, a0_f);
 
         src += 8;
         dst += 8;
@@ -133,7 +131,7 @@ static inline void mvn_scale_bias(float* src, float mean, float var, size_t ele_
         a0_f = _mm256_sub_ps(a0_f, m);
         a0_f = _mm256_mul_ps(a0_f, v);
         a0_f = _mm256_fmadd_ps(a0_f, s, b);
-        _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), (__m256i)a0_f);
+        _mm256_storeu_ps(dst, a0_f);
 
         src += 8;
         dst += 8;
