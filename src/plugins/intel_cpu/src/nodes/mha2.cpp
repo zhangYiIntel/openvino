@@ -214,20 +214,20 @@ void MHA2::execute(dnnl::stream strm) {
 
     bool splitN = parallel_get_max_threads() > B*H;
 
-    if (verbose) {
-        NAMED_LOG("MHA2::execute", getName(), *mha2);
-        NAMED_LOG("\t",with_causal_mask, with_kv_cache, kv_head_transposed, parallel_get_max_threads());
-        NAMED_LOG("\t",B,M,N,H,K);
-        NAMED_LOG("\t",splitN);
-        NAMED_LOG("\t",mem_q->getDesc());
-        NAMED_LOG("\t",mem_k->getDesc());
-        NAMED_LOG("\t",mem_v->getDesc());
-        if (mem_pastk) NAMED_LOG("\t",mem_pastk->getDesc());
-        if (mem_pastv) NAMED_LOG("\t",mem_pastv->getDesc());
-        NAMED_LOG("\t",mem_wv->getDesc());
-        if (mem_presentk) NAMED_LOG("\t",mem_presentk->getDesc());
-        if (mem_presentv) NAMED_LOG("\t",mem_presentv->getDesc());
-    }
+    // if (verbose) {
+    //     NAMED_LOG("MHA2::execute", getName(), *mha2);
+    //     NAMED_LOG("\t",with_causal_mask, with_kv_cache, kv_head_transposed, parallel_get_max_threads());
+    //     NAMED_LOG("\t",B,M,N,H,K);
+    //     NAMED_LOG("\t",splitN);
+    //     NAMED_LOG("\t",mem_q->getDesc());
+    //     NAMED_LOG("\t",mem_k->getDesc());
+    //     NAMED_LOG("\t",mem_v->getDesc());
+    //     if (mem_pastk) NAMED_LOG("\t",mem_pastk->getDesc());
+    //     if (mem_pastv) NAMED_LOG("\t",mem_pastv->getDesc());
+    //     NAMED_LOG("\t",mem_wv->getDesc());
+    //     if (mem_presentk) NAMED_LOG("\t",mem_presentk->getDesc());
+    //     if (mem_presentv) NAMED_LOG("\t",mem_presentv->getDesc());
+    // }
 
     // q: [B, M, H*k]
     if (kv_head_transposed) {
