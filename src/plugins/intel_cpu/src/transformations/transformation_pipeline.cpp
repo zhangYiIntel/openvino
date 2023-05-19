@@ -95,6 +95,7 @@
 #include "transformations/cpu_opset/convert_to_cpu_specific_opset.hpp"
 #include "transformations/snippets/x64/pass/snippets_mark_skipped.hpp"
 #include "transformations/cpu_opset/x64/pass/mha_fusion.hpp"
+#include "transformations/cpu_opset/x64/pass/convert_to_layernorm.hpp"
 #include "transformations/cpu_opset/x64/pass/convert_to_addcustom.hpp"
 #include "transformations/cpu_opset/x64/pass/convert_to_interaction.hpp"
 #include "transformations/cpu_opset/arm/pass/convert_group_conv.hpp"
@@ -261,6 +262,7 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     CPU_REGISTER_PASS_COMMON(manager, SwapConvertTranspose);
     CPU_REGISTER_PASS_X64(manager, ConvertToInteraction);
     CPU_REGISTER_PASS_X64(manager, ConvertInteractionInt8);
+    CPU_REGISTER_PASS_X64(manager, ConvertToLayerNorm);
     CPU_REGISTER_PASS_ARM(manager, ConvertReduceMultiAxis);
     CPU_REGISTER_PASS_ARM(manager, MishDecomposition);
     CPU_REGISTER_PASS_ARM(manager, ConvertConv1D);
@@ -455,7 +457,6 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     }
 
     manager.run_passes(model);
-    serialize(model, "whisper_preprocess.xml", "whisper_preprocess.bin");
 }
 
 void Transformations::Lpt(const bool hasINT16orINT32Levels, const std::vector<ov::element::Type>& defaultPrecisions) {
@@ -581,11 +582,12 @@ void Transformations::PostLpt() {
     // Snippets may brake MHA patterns so the fusion has to performed before
     CPU_REGISTER_PASS_X64(postLPTPassManager, MHAFusion);
     CPU_REGISTER_PASS_X64(postLPTPassManager, FuseFQtoInteraction);
-
-    CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertToAddCustom);
-    CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertSameShapeAddCustom);
-    CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustom);
-    CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustomGelu);
+    if (getenv("ENABLE_ADDCUSTOM")) {
+        CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertToAddCustom);
+        CPU_REGISTER_PASS_X64(postLPTPassManager, ConvertSameShapeAddCustom);
+        CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustom);
+        CPU_REGISTER_PASS_X64(postLPTPassManager, FuseAddCustomGelu);
+    }
     CPU_SET_CALLBACK_X64(postLPTPassManager,
         ([this](const std::shared_ptr<const ov::Node>& n) -> bool {
             std::string errorMessage;

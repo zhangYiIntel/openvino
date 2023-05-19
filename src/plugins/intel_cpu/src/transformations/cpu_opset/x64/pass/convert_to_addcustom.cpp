@@ -12,6 +12,14 @@
 #include "ov_ops/type_relaxed.hpp"
 #include "transformations/cpu_opset/x64/op/add_custom.hpp"
 
+static bool is_conv(std::shared_ptr<ov::Node>& ptr) {
+    if (ov::is_type<ov::opset8::Convolution>(ptr))  {
+        return true;
+    } else {
+        return false;
+    }
+}
+
 ov::intel_cpu::ConvertToAddCustom::ConvertToAddCustom() {
     MATCHER_SCOPE(ConvertToAddCustom);
     using namespace ov::pass::pattern;
@@ -22,6 +30,9 @@ ov::intel_cpu::ConvertToAddCustom::ConvertToAddCustom() {
     matcher_pass_callback callback = [=](Matcher& m) {
         const auto& pattern_to_output = m.get_pattern_value_map();
         auto input_node =  pattern_to_output.at(input_m).get_node_shared_ptr();
+        if (is_conv(input_node)) {
+            return false;
+        }
         auto const_node =  pattern_to_output.at(const_m).get_node_shared_ptr();
         auto add_node =  pattern_to_output.at(add_m).get_node_shared_ptr();
         auto addcustom_node = std::make_shared<AddCustom>(input_node, const_node, false);
@@ -45,6 +56,9 @@ ov::intel_cpu::ConvertSameShapeAddCustom::ConvertSameShapeAddCustom() {
         const auto& pattern_to_output = m.get_pattern_value_map();
         auto input1_node =  pattern_to_output.at(input1_m).get_node_shared_ptr();
         auto input2_node =  pattern_to_output.at(input2_m).get_node_shared_ptr();
+        if (is_conv(input1_node) || is_conv(input2_node)) {
+            return false;
+        }
         auto add_node =  pattern_to_output.at(add_m).get_node_shared_ptr();
         auto shape1 = input1_node->get_output_partial_shape(0);
         auto shape2 = input2_node->get_output_partial_shape(0);
