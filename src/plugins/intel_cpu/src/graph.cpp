@@ -68,6 +68,10 @@ typedef std::unordered_set<EdgePtr> edge_cluster_t;
 typedef std::vector<edge_cluster_t> edge_clusters_t;
 
 Graph::~Graph() {
+    parallel_nt(0, [&](int ithr, int nthr) {
+        profilerManagerInstance.finalize();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    });
     CPU_DEBUG_CAP_ENABLE(summary_perf(*this));
 }
 
@@ -415,7 +419,7 @@ void Graph::InitNodes() {
 
 void Graph::InitDescriptors() {
     OV_ITT_SCOPE_CHAIN(FIRST_INFERENCE, taskChain, itt::domains::intel_cpu_LT, "InitDescriptors", "Prepare");
-    int sub_graph_index = 1;
+
     for (auto &node : graphNodes) {
         if (node->getType() == Type::Input && _normalizePreprocMap.find(node->getName()) != _normalizePreprocMap.end()) {
             auto *inputNode = dynamic_cast<node::Input *>(node.get());
@@ -1255,12 +1259,20 @@ void Graph::InferDynamic(InferRequestBase* request) {
     size_t inferCounter = 0;
 
     for (auto stopIndx : syncIndsWorkSet) {
-        updateNodes->run(stopIndx);
+        if (0){
+            auto _prof = Profile("updateNodes");
+            updateNodes->run(stopIndx);
+        }
         for (; inferCounter < stopIndx; ++inferCounter) {
             auto& node = executableGraphNodes[inferCounter];
             VERBOSE(node, getConfig().debugCaps.verbose);
             PERF(node, getConfig().collectPerfCounters);
 
+            if (node->isDynamicNode()) {
+                //auto _prof = Profile("updateNodes");
+                node->updateShapes();
+                node->updateDynamicParams();
+            }
             auto _prof = Profile([&](ProfileData * p){
                 p->name = node->getTypeStr();
                 p->args = {{"Name", node->getName()}, {"Impl", node->getPrimitiveDescriptorType()}};
@@ -1275,14 +1287,17 @@ void Graph::InferDynamic(InferRequestBase* request) {
 
 inline void Graph::ExecuteNode(const NodePtr& node, const dnnl::stream& stream) const {
     DUMP(node, getConfig().debugCaps, infer_count);
-
+    static std::string LAYER_REPEATS = std::getenv("LAYER_REPEATS") ? std::getenv("LAYER_REPEATS") : "?x??";
     OV_ITT_SCOPED_TASK(itt::domains::intel_cpu, node->profiling.execute);
-
+    int repeat = 0;
+AGAIN:
     if (node->isDynamicNode()) {
         node->executeDynamic(stream);
     } else {
         node->execute(stream);
     }
+
+    if(node->getName() == LAYER_REPEATS && repeat++ < 4) goto AGAIN;
     DEBUG_LOG(*node);
 }
 
