@@ -62,26 +62,29 @@ ov::intel_cpu::ConvertSameShapeAddCustom::ConvertSameShapeAddCustom() {
         auto add_node =  pattern_to_output.at(add_m).get_node_shared_ptr();
         auto shape1 = input1_node->get_output_partial_shape(0);
         auto shape2 = input2_node->get_output_partial_shape(0);
-        auto shape_compatible = [](const ov::PartialShape& a, const ov::PartialShape& b) {
+        std::shared_ptr<ov::Node> left_node = input1_node;
+        std::shared_ptr<ov::Node> right_node = input2_node;
+        auto shape_compatible = [&](const ov::PartialShape& a, const ov::PartialShape& b) {
             if (a.compatible(b)) {
                 return true;
             } else {
-                // size_t rank_a = a.rank().get_length();
-                // size_t rank_b = b.rank().get_length();
-                // size_t rank_diff = rank_a > rank_b ? (rank_a - rank_b) : (rank_b - rank_a);
-                // error 
+                size_t rank_a = a.rank().get_length();
+                size_t rank_b = b.rank().get_length();
+                size_t rank_diff = rank_a > rank_b ? (rank_a - rank_b) : (rank_b - rank_a);
+                if (rank_diff == 1) {
+                    left_node = rank_a > rank_b ? input1_node : input2_node;
+                    right_node = rank_a > rank_b ? input2_node : input1_node;
+                    return true;
+                }
                 return false;
-                //return rank_diff == 1;
             }
         };
         if (!shape_compatible(shape1, shape2)) {
-            // std::cout << "Not suitbale Add Node Skip Convert|" << add_node->get_friendly_name() << std::endl;
             return false;
         }
-        auto addcustom_node = std::make_shared<AddCustom>(input1_node, input2_node);
+        auto addcustom_node = std::make_shared<AddCustom>(left_node, right_node);
         addcustom_node->set_friendly_name(add_node->get_friendly_name());
         replace_node(add_node, addcustom_node);
-        // std::cout << "Replace Same Add " << addcustom_node->get_friendly_name() << std::endl;
         return true;
     };
 
