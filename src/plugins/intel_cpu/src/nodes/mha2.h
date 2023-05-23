@@ -19,7 +19,7 @@ namespace node {
 struct Avx2Kernels {
     std::vector<std::shared_ptr<avx2::Matmul>> ops_qk;
     std::vector<std::shared_ptr<avx2::Matmul>> ops_wv;
-    std::vector<tensor2D<float>> all_qk;
+    std::vector<tensorND<float>> all_qk;
     avx2::PP::None pp_none;
 
     Avx2Kernels() {
@@ -37,20 +37,20 @@ struct Avx2Kernels {
         v: N x K
     */
     void one_head_attention(int tid,
-                            tensor2D<float>& q,
-                            tensor2D<float>& k,
-                            tensor2D<float>& v,
-                            tensor2D<float>& wv,
+                            tensorND<float>& q,
+                            tensorND<float>& k,
+                            tensorND<float>& v,
+                            tensorND<float>& wv,
                             int causal_m0,
                             bool causal_mask,
                             float * qk_max,
                             float * qk_sum) {
-        auto M = q.dims[0];
-        auto N = k.dims[0];
-        auto K = v.dims[1];
+        auto M = q.shape[0];
+        auto N = k.shape[0];
+        auto K = v.shape[1];
 
         auto & qk = all_qk[tid];
-        qk.resize(M, N);
+        qk.resize({M, N}, false);
         (*ops_qk[tid])(q, k, qk, 0, N, pp_none);
 
         // softmax per row
@@ -72,18 +72,18 @@ struct Avx2Kernels {
 
 
     void one_head_attention(int tid,
-                            tensor2D<float>& q,
-                            tensor2D<float>& k,
-                            tensor2D<float>& v,
-                            tensor2D<float>& wv,
+                            tensorND<float>& q,
+                            tensorND<float>& k,
+                            tensorND<float>& v,
+                            tensorND<float>& wv,
                             int causal_m0,
                             bool causal_mask) {
-        auto M = q.dims[0];
-        auto N = k.dims[0];
-        auto K = v.dims[1];
+        auto M = q.shape[0];
+        auto N = k.shape[0];
+        auto K = v.shape[1];
 
         auto & qk = all_qk[tid];
-        qk.resize(M, N);
+        qk.resize({M, N}, false);
         (*ops_qk[tid])(q, k, qk, 0, N, pp_none);
 
         // softmax per row
@@ -127,9 +127,9 @@ protected:
     bool verbose;
 
     // when split on N dimension
-    tensor2D<float> sub_states;
-    tensor2D<float> qk_max;
-    tensor2D<float> qk_sum;
+    tensorND<float> sub_states;
+    tensorND<float> qk_max;
+    tensorND<float> qk_sum;
 };
 
 }   // namespace node

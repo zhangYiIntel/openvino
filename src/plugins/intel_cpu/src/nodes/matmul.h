@@ -36,9 +36,9 @@ struct Avx2MatMul {
                   size_t M, size_t K, size_t N) {
         constexpr int bN = 16;
         size_t Nb = (N + bN - 1)/bN;
-        tensor2D<float> matA(M, K, A, K*sizeof(float));
-        tensor2D<float> matB(K, N, B, N*sizeof(float));
-        tensor2D<float> matC(M, N, C, N*sizeof(float));
+        tensorND<float> matA(A, {M, K});
+        tensorND<float> matB(B, {K, N});
+        tensorND<float> matC(C, {M, N});
         parallel_nt_static(0, [&](int ithr, int nthr) {
             // each work item is doing  M x bN sub-states encoding
             // and finally, main thread will combine sub-states into one

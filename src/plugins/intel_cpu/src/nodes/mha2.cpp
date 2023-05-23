@@ -213,8 +213,6 @@ void MHA2::execute(dnnl::stream strm) {
     auto pV = reinterpret_cast<float*>(final_v->GetPtr());
     auto pWV = reinterpret_cast<float*>(mem_wv->GetPtr());
 
-    bool splitN = parallel_get_max_threads() > B*H;
-
     // if (verbose) {
     //     NAMED_LOG("MHA2::execute", getName(), *mha2);
     //     NAMED_LOG("\t",with_causal_mask, with_kv_cache, kv_head_transposed, parallel_get_max_threads());
@@ -233,11 +231,10 @@ void MHA2::execute(dnnl::stream strm) {
     // q: [B, M, H*k]
     if (kv_head_transposed) {
         // k&v: [B, H, N, K]
-        int N = final_k->getStaticDims()[2];
-        int stride_b_q = M*H*K;
-        int stride_h_q = K;
-        int stride_bytes_hk = H*K*sizeof(float);
-        int stride_bytes_K = K*sizeof(float);
+        tensorND<float> q0(pQ, {B, M, H, K});
+        tensorND<float> k0(pK, {B, H, N, K});
+        tensorND<float> v0(pV, {B, H, N, K});
+        tensorND<float> wv0(pWV, {B, M, H, K});
 
         float* past_k;
         float* past_v;
@@ -254,9 +251,18 @@ void MHA2::execute(dnnl::stream strm) {
         if (with_kv_cache || with_causal_mask || (N < bN) || (sss & 3)==2) {
             parallel_for2d(B, H, [&](size_t b, size_t h) {
                 size_t tid = parallel_get_thread_num();
+                //  q[b, 0:M, h, K] => MxK
+                //  k[b, h, 0:N, K] => NxK
+                //  v[b, h, 0:N, K] => NxK
+                // wv[b, 0:M, h, K] => MxK
+                tensorND<float> q = q0.Slice(b, fullslice(), h, fullslice());
+                tensorND<float> k = k0.Slice(b, h, fullslice(), fullslice());
+                tensorND<float> v = v0.Slice(b, h, fullslice(), fullslice());
+                tensorND<float> wv = wv0.Slice(b, fullslice(), h, fullslice());
+
                 auto bh = (b*H + h);
-                auto * pheadK = pK + bh*N*K;
-                auto * pheadV = pV + bh*N*K;
+                auto * pheadK = k.data;
+                auto * pheadV = v.data;
                 if (with_kv_cache) {
                     // generate presentk/presentv
                     //  k,v : [B, 1, H*k] => [B, 1, H, K] => [B, H, 1, K]
@@ -272,14 +278,6 @@ void MHA2::execute(dnnl::stream strm) {
                     memcpy(pheadV, src0, (N-1)*K*sizeof(float));
                     memcpy(pheadV + (N-1)*K, src1, K*sizeof(float));
                 }
-                //  q[b, 0:M, h, K] => MxK
-                //  k[b, h, 0:N, K] => NxK
-                //  v[b, h, 0:N, K] => NxK
-                // wv[b, 0:M, h, K] => MxK
-                tensor2D<float> q(M, K, pQ + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
-                tensor2D<float> k(N, K, pheadK, stride_bytes_K);
-                tensor2D<float> v(N, K, pheadV, stride_bytes_K);
-                tensor2D<float> wv(M, K, pWV + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
                 kernels.one_head_attention(tid, q, k, v, wv, 0, with_causal_mask);
             });
         } else {
@@ -294,12 +292,14 @@ void MHA2::execute(dnnl::stream strm) {
             const size_t work_amount = (size_t)(B * H) * num_sub_states;
             
             //NAMED_LOG("======",num_sub_states, M, N, work_amount);
-            sub_states.resize(B * M * H * num_sub_states, K);
-            qk_max.resize(1, work_amount*M);
-            qk_sum.resize(1, work_amount*M);
+            // s[B, M, H, nb, K]
+            // 
+            sub_states.resize({B, M, H,num_sub_states, K}, false);
+            qk_max.resize({B, H, num_sub_states, M}, false);
+            qk_sum.resize({B, H, num_sub_states, M}, false);
 
             auto _prof = Profile("MHA2_exe");
-            parallel_nt(0, [&](int ithr, int nthr) {
+            parallel_nt_static(0, [&](int ithr, int nthr) {
                 // each work item is doing  M x bN sub-states encoding
                 // and finally, main thread will combine sub-states into one
                 size_t start{0}, end{0};
@@ -320,16 +320,14 @@ void MHA2::execute(dnnl::stream strm) {
                     //  v[b, h, n0:n1, K] => bN x K
                     //  s[b, 0:M, h, nb, K] => M x K
                     // wv[b, 0:M, h, K] => M x K
+                    tensorND<float> q = q0.Slice(b, fullslice(), h, fullslice());
+                    tensorND<float> k = k0.Slice(b, h, slice(n0, n1), fullslice());
+                    tensorND<float> v = v0.Slice(b, h, slice(n0, n1), fullslice());
+                    tensorND<float> s = sub_states.Slice(b, fullslice(), h, nb, fullslice());
 
-                    tensor2D<float> q(M, K, pQ + b * stride_b_q + h * stride_h_q, stride_bytes_hk);
-                    tensor2D<float> k(n1 - n0, K, pK + (b * H + h) * N * K + n0 * K, stride_bytes_K);
-                    tensor2D<float> v(n1 - n0, K, pV + (b * H + h) * N * K + n0 * K, stride_bytes_K);
-                    tensor2D<float> s(M,
-                                      K,
-                                      &sub_states(b * (M * H * num_sub_states) + h * (num_sub_states) + nb, 0),
-                                      bN*H*K*sizeof(float));
-                    // tensor2D<float> wv(M, K, s, stride_bytes_hk);
-                    kernels.one_head_attention(ithr, q, k, v, s, 0, with_causal_mask, &qk_max[cur * M], &qk_sum[cur * M]);
+                    kernels.one_head_attention(ithr, q, k, v, s, 0, with_causal_mask,
+                                               &qk_max(b, h, nb, 0),
+                                               &qk_sum(b, h, nb, 0));
                    
                     //NAMED_LOG("======",cur, b, h, nb, n0, n1, qk_max[cur * M], qk_sum[cur * M]);
                 }
@@ -342,15 +340,12 @@ void MHA2::execute(dnnl::stream strm) {
                     //  s[b, 0:M, h, nb, K] => M x nb x K
                     // wv[b, 0:M, h, K] => M x K
                     // qk_max [b,h,nb,M]
-                    tensor2D<float> wv(M, K, pWV + b*stride_b_q + h*stride_h_q, stride_bytes_hk);
-                
-                    auto cur = (b * H + h) * num_sub_states;
+                    tensorND<float> wv = wv0.Slice(b, fullslice(), h, fullslice());
 
-                    //NAMED_LOG("======",b, h, cur);
                     // qk_max: [b, h, 0:num_sub_states, 0:M]
                     // qk_sum: [b, h, 0:num_sub_states, 0:M]
-                    float* p_qk_max = &qk_max[cur];  // num_sub_states x M
-                    float* p_qk_sum = &qk_sum[cur];  // num_sub_states x M
+                    auto p_qk_max = qk_max.Slice(b, h, fullslice(), fullslice());  // num_sub_states x M
+                    auto p_qk_sum = qk_sum.Slice(b, h, fullslice(), fullslice());  // num_sub_states x M
                     for (int m = 0; m < M; m++) {
                         float * p_wv = &wv(m, 0);
                         // get weights of sub-states :
@@ -361,24 +356,23 @@ void MHA2::execute(dnnl::stream strm) {
                         //float tmax = std::numeric_limits<float>::lowest();
                         auto tmax = _mm256_set1_ps(std::numeric_limits<float>::lowest());
                         for (int nb = 0; nb < num_sub_states; nb++) {
-                            auto sub_max = _mm256_broadcast_ss(&p_qk_max[nb*M + m]);
+                            auto sub_max = _mm256_broadcast_ss(&p_qk_max(nb,m));
                             tmax = _mm256_max_ps(tmax, sub_max);
                         }
 
-                        //NAMED_LOG("======", tmax);
                         auto tsum = _mm256_setzero_ps();
                         for (int nb = 0; nb < num_sub_states; nb++) {
-                            auto sub_max = _mm256_broadcast_ss(&p_qk_max[nb*M + m]);
+                            auto sub_max = _mm256_broadcast_ss(&p_qk_max(nb,m));
                             sub_max = _mm256_sub_ps(sub_max, tmax);
-                            auto sub_sum = _mm256_broadcast_ss(&p_qk_sum[nb*M + m]);
+                            auto sub_sum = _mm256_broadcast_ss(&p_qk_sum(nb,m));
                             avx2::functional::exp_ps(sub_max);
                             sub_sum = _mm256_mul_ps(sub_sum, sub_max);
-                            p_qk_sum[nb*M + m] = _mm256_cvtss_f32(sub_sum);
+                            p_qk_sum(nb,m) = _mm256_cvtss_f32(sub_sum);
                             tsum = _mm256_add_ps(tsum, sub_sum);
                             //p_qk_sum[nb*M + m] *= std::exp(p_qk_max[nb*M + m] - tmax);
                             //tsum += p_qk_sum[nb*M + m];
                         }
-                        //NAMED_LOG("======", tsum);
+
                         static __m256 one = _mm256_castsi256_ps(_mm256_set1_epi32(0x3f800000)); // 1.0f
                         auto tweight_recip = _mm256_div_ps(one, tsum);                          // 1/sum_exp
 
@@ -386,9 +380,9 @@ void MHA2::execute(dnnl::stream strm) {
                         __m256i wv_mask = _mm256_setzero_si256();
                         for (int nb = 0; nb < num_sub_states; nb++) {
                             //
-                            float* p_sub = &sub_states(b * (M * H * num_sub_states) + h * (num_sub_states) + nb, 0);
+                            float* p_sub = &sub_states(b, 0, h, nb, 0);
 
-                            auto x_weight = _mm256_broadcast_ss(&p_qk_sum[nb*M + m]);
+                            auto x_weight = _mm256_broadcast_ss(&p_qk_sum(nb, m));
                             x_weight = _mm256_mul_ps(x_weight, tweight_recip);
                             //auto x_weight = _mm256_set1_ps(p_qk_sum[nb*M + m] * tweight_recip);
                             // wv = substates * weight    for nb=0
@@ -417,13 +411,14 @@ void MHA2::execute(dnnl::stream strm) {
         // with_causal_mask:0   with_kv_cache:0   kv_head_transposed:0
         // parallel in B/H/M dimensions
         // k&v: [B, N, H*K]
-        int N = final_k->getStaticDims()[1];
-        int stride_bytes_hk = H*K*sizeof(float);
-
         // kernel register blocking on 6 rows
         const size_t work_amount = (size_t)B*H * M;
+        tensorND<float> q0(pQ, {B, M, H, K});
+        tensorND<float> k0(pK, {B, N, H, K});
+        tensorND<float> v0(pV, {B, N, H, K});
+        tensorND<float> wv0(pWV, {B, M, H, K});
 
-        parallel_nt(0, [&](int ithr, int nthr) {
+        parallel_nt_static(0, [&](int ithr, int nthr) {
             size_t start{0}, end{0};
             splitter(work_amount, nthr, ithr, start, end);
             size_t bh0, mb0;
@@ -449,12 +444,10 @@ void MHA2::execute(dnnl::stream strm) {
                 // wv[b, m0:m1, h, K] => (m1-m0)xK
                 auto b = bh/H;
                 auto h = bh - b*H;
-                auto kv_off = b*(N*H*K) + h*K;
-                auto q_off = b*(M*H*K) + m0*(H*K) + h*K;
-                tensor2D<float> q(m1 - m0,  K, pQ + q_off, stride_bytes_hk);
-                tensor2D<float> k(N,        K, pK + kv_off, stride_bytes_hk);
-                tensor2D<float> v(N,        K, pV + kv_off, stride_bytes_hk);
-                tensor2D<float> wv(m1 - m0, K, pWV + q_off, stride_bytes_hk);
+                tensorND<float> q = q0.Slice(b, slice(m0, m1), h, fullslice());
+                tensorND<float> k = k0.Slice(b, fullslice(), h, fullslice());
+                tensorND<float> v = v0.Slice(b, fullslice(), h, fullslice());
+                tensorND<float> wv = wv0.Slice(b, slice(m0, m1), h, fullslice());
                 kernels.one_head_attention(ithr, q, k, v, wv, m0, with_causal_mask);
 
                 // m0 for next head is always 0
@@ -488,7 +481,7 @@ struct cpu_thr_info {
         cpu_thr_info all_thr[256];
         std::atomic<long> total_thr;
         
-        parallel_nt(0, [&](int ithr, int nthr) {
+        parallel_nt_static(0, [&](int ithr, int nthr) {
             total_thr = nthr;
             auto & info = all_thr[ithr];
             info.pid = syscall(__NR_gettid);

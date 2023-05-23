@@ -1,7 +1,7 @@
 
 #pragma once
 
-//#include "tensor2D.hpp"
+#include "tensorND.hpp"
 #include <memory>
 #include <cstring>
 #include <cstdlib>
@@ -18,264 +18,6 @@
 
 #define rndup(x, n) (((x + n - 1)/n)*n)
 
-// https://stackoverflow.com/questions/570669/checking-if-a-double-or-float-is-nan-in-c/57770634#57770634
-static inline uint32_t load_ieee754_rep(float a) {
-    uint32_t r;
-    //static_assert(sizeof r == sizeof a, "Unexpected sizes.");
-    std::memcpy(&r, &a, sizeof a); // Generates movd instruction.
-    return r;
-}
-constexpr uint32_t inf_float_shl1 = UINT32_C(0xff000000);
-// The shift left removes the sign bit. The exponent moves into the topmost bits,
-// so that plain unsigned comparison is enough.
-static inline bool isnan2(float a)     { return load_ieee754_rep(a) << 1  > inf_float_shl1; }
-static inline bool isinf2(float a)     { return load_ieee754_rep(a) << 1 == inf_float_shl1; }
-static inline bool isfinite2(float a)  { return load_ieee754_rep(a) << 1  < inf_float_shl1; }
-
-template<typename T>
-struct tensor2D {
-    int dims[2] = {0};
-    std::shared_ptr<T> data;
-    int64_t capacity = 0;
-    int stride = 0;
-    bool force_compact = false;
-    int padded_dim1 = 0;
-
-    tensor2D() = default;
-
-    operator bool() {
-        return dims[0] * dims[1] > 0;
-    }
-
-    tensor2D(int d0, int d1, bool _force_compact = false) {
-        capacity = 0;
-        resize(d0, d1, _force_compact);
-    }
-
-    tensor2D(int d0, int d1, T * ext, int _stride) {
-        capacity = 1;
-        data = std::shared_ptr<T>(ext, [](void *) {});
-        dims[0] = d0;
-        dims[1] = d1;
-        stride = _stride;
-        padded_dim1 = stride / sizeof(T);
-    }
-
-    tensor2D<T> Tr() {
-        tensor2D<T> ret(dims[1], dims[0]);
-        for(int c0=0; c0 < dims[0]; ++c0) {
-            for(int c1=0; c1 < dims[1]; ++c1) {
-                ret(c1, c0) = (*this)(c0, c1);
-            }
-        }
-        return ret;
-    }
-    tensor2D<T> clone() {
-        tensor2D<T> ret;
-        ret.resize(dims[0], dims[1], force_compact);
-        if (ret.stride == stride) {
-            memcpy(ret.data.get(), data.get(), dims[0] * stride);
-        }else{
-            for(int i=0;i<dims[0];i++) {
-                memcpy(&ret(i,0), &(*this)(i,0), ret.stride);
-            }
-        }
-        return ret;
-    }
-    void resize(int d0, int d1, bool _force_compact = false) {
-        force_compact = _force_compact;
-        dims[0] = d0;
-        dims[1] = d1;
-        stride = d1 * sizeof(T);
-        if ((stride % 64) && (!force_compact)) {
-            auto stride_fix = rndup(stride, 64);
-            //logger() << "\tWarnning: stride " << stride << " is not aligned to cache line, will increase to " << stride_fix
-            //          << " (" << stride_fix/64 << " cache lines)\n";
-            stride = stride_fix;
-        }
-        padded_dim1 = stride / sizeof(T);
-
-        // resize method never shrink capacity, and extra T is added to put nan as test
-        auto need_capacity = dims[0] * stride + sizeof(T);
-        if (capacity < need_capacity) {
-            capacity = need_capacity;
-            // align begin address to cache line is vital, so tile load can
-            // use all bandwidth (L1D/L2 only deliver data in unit of 64-byte aligned cache-line)
-
-#ifdef ENABLE_NUMA
-            if (USE_NUMA) {
-                data = std::shared_ptr<T>(
-                            reinterpret_cast<T*>(numa_alloc_local(capacity)),
-                            [need_capacity](void * p){ numa_free(p, need_capacity); });
-            } else {
-#else
-            {
-#endif
-
-#ifdef _WIN32
-                data = std::shared_ptr<T>(
-                            reinterpret_cast<T*>(_aligned_malloc(capacity, 64)),
-                            [](void * p) { _aligned_free(p); });
-#else
-                data = std::shared_ptr<T>(
-                            reinterpret_cast<T*>(aligned_alloc(64, capacity)),
-                            [](void * p) { ::free(p); });
-#endif
-            }
-            if (reinterpret_cast<uintptr_t>(data.get()) % 64)
-                std::cout << "WARNING: resize(), data is not cache-line aligned!" << std::endl;
-        }
-        // put a NaN at the end to test over-read
-        // https://en.wikipedia.org/wiki/Bfloat16_floating-point_format
-        #define INF 0xff80 
-        #define NAN1 (INF + 1)
-        if (sizeof(T) == 2) {
-            *reinterpret_cast<uint16_t*>(data.get() + dims[0] * padded_dim1) = NAN1;
-        }
-        if (sizeof(T) == 4) {
-            *reinterpret_cast<uint32_t*>(data.get() + dims[0] * padded_dim1) = (INF << 16) + 1;
-        }
-    }
-
-    T & operator[](int i) {
-        return data.get()[i];
-    }
-
-    const T & operator[](int i) const {
-        return data.get()[i];
-    }
-
-    //https://stackoverflow.com/questions/1936399/c-array-operator-with-multiple-arguments
-    T & operator()(int i0, int i1) {
-        return (*this)[i0 * padded_dim1 + i1];
-    }
-
-    const T & operator()(int i0, int i1) const {
-        return (*this)[i0 * padded_dim1 + i1];
-    }
-
-    void operator=(const T & v) {
-        for(int k = 0; k<dims[0]*padded_dim1; k++)
-            (*this)[k] = v;
-    }
-
-    tensor2D<T>& operator=(const tensor2D<T> & t2) {
-        assert(dims[0]*dims[1] == t2.dims[0] * t2.dims[1]);
-        for(int c0 = 0; c0 < dims[0]; c0++)
-        for(int c1 = 0; c1 < dims[1]; c1++) {
-            int k = c0*dims[1] + c1;
-            auto c2 = k / t2.dims[1];
-            auto c3 = k % t2.dims[1];
-            (*this)(c0, c1) = t2(c2, c3);
-        }
-        return *this;
-    }
-
-    // move semantics
-    tensor2D(tensor2D<T> && t2) {
-        dims[0] = t2.dims[0];
-        dims[1] = t2.dims[1];
-        data = t2.data;
-        capacity = t2.capacity;
-        stride = t2.stride;
-        padded_dim1 = t2.padded_dim1;
-        force_compact = t2.force_compact;
-        t2.capacity = 0;
-        t2.data.reset();
-    }
-
-    tensor2D<T>&  operator=(tensor2D<T> && t2) {
-        dims[0] = t2.dims[0];
-        dims[1] = t2.dims[1];
-        data = t2.data;
-        capacity = t2.capacity;
-        stride = t2.stride;
-        padded_dim1 = t2.padded_dim1;
-        force_compact = t2.force_compact;
-        t2.capacity = 0;
-        t2.data.reset();
-        return *this;
-    }
-
-    bool operator==(const tensor2D<T> & rhs) const {
-        if (dims[0] != rhs.dims[0] || dims[1] != rhs.dims[1])
-            return false;
-        for(int i0=0; i0<dims[0]; i0++)
-        for(int i1=0; i1<dims[1]; i1++) {
-            // with -ffast-math,  std::isnan, std::isinf,  x != x  always return false
-            // so we need special logic to test nan here
-            if (std::is_same<T, ov::bfloat16>::value ||
-                std::is_same<T, float>::value) {
-                float f0 = (*this)(i0,i1);
-                float f1 = rhs(i0,i1);
-                if (isnan2(f1) || isnan2(f0)) {
-                    std::cout << " nan is found: f0=" << f0 << ",  f1=" << f1 << std::endl;
-                    return false;
-                }
-            }
-
-            if ((*this)(i0,i1) == rhs(i0,i1))
-                continue;
-            std::cout << " operator== failed at (" << i0 << ", " << i1 << ")  value "
-                        << (*this)(i0,i1) << "!=" << rhs(i0,i1) << std::endl;
-            return false;
-        }
-        return true;
-    }
-
-    bool is_normal() {
-        for(int i0=0; i0<dims[0]; i0++)
-        for(int i1=0; i1<dims[1]; i1++) {
-            float f0 = (*this)(i0,i1);
-            if (isnan2(f0)) {
-                std::cout << " found nan at (" << i0 << "," << i1 << ")" << std::endl;
-                return false;
-            }
-            if (isinf2(f0)) {
-                std::cout << " found inf at (" << i0 << "," << i1 << ")" << std::endl;
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool compare(const tensor2D<T> & rhs, float tolerance) {
-        float max_abs_diff = 0;
-        float max_rel_diff = 0;
-        if (dims[0] != rhs.dims[0] || dims[1] != rhs.dims[1])
-            return false;
-        for(int i0=0; i0<dims[0]; i0++)
-        for(int i1=0; i1<dims[1]; i1++) {
-            auto diff = std::fabs((*this)(i0,i1) - rhs(i0,i1));
-            auto rel_diff = diff/std::fabs((*this)(i0,i1));
-            max_abs_diff = std::max(max_abs_diff, diff);
-            if (std::fabs((*this)(i0,i1) > 0) && diff > 0)
-                max_rel_diff = std::max(max_rel_diff, rel_diff);
-        }
-        std::cout << "max_abs_diff=" << max_abs_diff << " max_rel_diff=" << max_rel_diff;
-        return tolerance > max_abs_diff;
-    }
-    friend std::ostream& operator<<(std::ostream& out, const tensor2D<T>& obj) {
-        int i0;
-        auto showline = [&](int i) {
-            out << "[" << i << "," << 0 << "]: ";
-            int i1;
-            for(i1=0; i1<obj.dims[1] && i1 < 8; i1++) {
-                out << +obj(i0,i1) << ",";
-            }
-            if (i1 < obj.dims[1]) out << "...";
-            out << std::endl;
-        };
-        for(i0=0; i0 < obj.dims[0] && i0 < 32; i0++) {
-            showline(i0);
-        }
-        if (i0 < obj.dims[0]) {
-            out << "... ... ... ..." << std::endl;
-            showline(obj.dims[0] - 1);
-        }
-        return out;
-    }
-};
 
 //https://stackoverflow.com/questions/68340319/differences-between-avx-and-avx2
 //
@@ -966,7 +708,7 @@ void kernel_4x24(float * pA, int strideA,
 #endif
 
 struct Matmul {
-    tensor2D<float> internalB;
+    tensorND<float> internalB;
 
     bool constB;
     bool transposeB;
@@ -1078,15 +820,15 @@ struct Matmul {
         #undef FMADD
     };
 
-    void reorderB(tensor2D<float> & matB, int n0, int n1) {
+    void reorderB(tensorND<float> & matB, int n0, int n1) {
         // transposeB : B_NxK
         //
-        int K = matB.dims[transposeB ? 1 : 0];
+        int K = matB.shape[transposeB ? 1 : 0];
         int N = n1 - n0;
-        auto strideB = matB.stride/sizeof(float);
+        auto strideB = matB.strides[0]/sizeof(float);
         if (!transposeB) {
             // N tails in internalB matrix is aligned to right border of B
-            internalB.resize((N + 15)/16, K*16);
+            internalB.resize({(N + 15)/16, K*16}, false);
             loop2D_no_bM<16>(1, N, [&](int m, int n, int valid_m, int valid_n) {
                 // align to right border of B at N tails
                 int nsrc = (valid_n <= 8) ? (n1 - 8) : ((valid_n < 16) ? (n1 - 16) : (n0 + n));
@@ -1109,7 +851,7 @@ struct Matmul {
             // thus we only want to do it once, due to limited register resource,
             // we cannot archieve that with on-the-fly transpose. so we transpose it
             // into a temp buffer at once
-            internalB.resize((N + 15)/16, rndup(K, 8) *16);
+            internalB.resize({(N + 15)/16, rndup(K, 8) *16}, false);
             loop2D_no_bM<16>(1, N, [&](int m, int n, int valid_m, int valid_n) {
                 // align to right border of B at N tails
                 int nsrc = (valid_n <= 8) ? (n1 - 8) : ((valid_n < 16) ? (n1 - 16) : (n0 + n));
@@ -1121,23 +863,23 @@ struct Matmul {
     }
 
     template<typename P>
-    void operator()(tensor2D<float> & matA,
-                    tensor2D<float> & matB,
-                    tensor2D<float> & matC,
+    void operator()(tensorND<float> & matA,
+                    tensorND<float> & matB,
+                    tensorND<float> & matC,
                     int n0, int n1,
                     P pp) {
-        int M = matA.dims[0];
-        int K = matA.dims[1];
+        int M = matA.shape[0];
+        int K = matA.shape[1];
         int N = n1 - n0;
         
-        assert(K == matB.dims[transposeB ? 1:0]);
-        assert(N <= matB.dims[transposeB ? 0:1]);
-        assert(M == matC.dims[0]);
-        assert(N <= matC.dims[1]);
+        assert(K == matB.shape[transposeB ? 1:0]);
+        assert(N <= matB.shape[transposeB ? 0:1]);
+        assert(M == matC.shape[0]);
+        assert(N <= matC.shape[1]);
 
-        auto strideA = matA.stride/sizeof(float);
-        auto strideB = matB.stride/sizeof(float);
-        auto strideC = matC.stride/sizeof(float);
+        auto strideA = matA.strides[0]/sizeof(float);
+        auto strideB = matB.strides[0]/sizeof(float);
+        auto strideC = matC.strides[0]/sizeof(float);
 
         //std::cout << "Matmul:  transposeB=" << transposeB << "  M,K,N=" << M << "," << K << "," << N << "  strideA,B,C=" << strideA << "," << strideB << "," << strideC << std::endl;
 
@@ -1149,8 +891,10 @@ struct Matmul {
                 reorderB(matB, n0, n1);
         } else {
             // dynamically transpose/reorder 16 columns of matB into internalB
-            internalB.resize(1, rndup(K, 8) * 16);
-            internalB = 0;
+            if (internalB.resize({1, rndup(K, 8) * 16}, false)) {
+                // make sure the physical pages are really allocated
+                internalB = 0;
+            }
             use_dynTransB = transposeB;
             use_dynReorderB = !transposeB;
         }
