@@ -210,8 +210,45 @@ void ov::intel_cpu::node::AddCustom::prepareParams() {
 }
 
 void ov::intel_cpu::node::AddCustom::executeDynamicImpl(dnnl::stream strm) {
-    auto& dims = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
-    redefineOutputMemory({dims});
+    const auto& dims0 = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
+    const auto& dims1 = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
+    
+    std::vector<std::reference_wrapper<const VectorDims>> input_shapes = {dims0, dims1};
+    if (witBiases) {
+        const auto& dims2 = getParentEdgeAt(0)->getMemoryPtr()->getStaticDims();
+        input_shapes.push_back(dims2);
+    }
+    size_t max_rank = 0;
+    size_t max_rank_idx = 0;
+    for (size_t i = 0; i < input_shapes.size(); ++i) {
+        auto item_rank = input_shapes[i].get().size();
+        if (item_rank > max_rank) {
+            max_rank = item_rank;
+            max_rank_idx = i;
+        }
+    }
+    auto output_shape = input_shapes[max_rank_idx].get();
+    // use NUMPY broadcast rule
+    for (size_t i = 0; i < input_shapes.size(); i++) {
+        if (i == max_rank_idx)
+            continue;
+
+        auto& input_shape = input_shapes[i].get();
+        if (input_shape.size() > output_shape.size()) {
+            IE_THROW() << "Eltwise shape infer input and output shapes rank mismatch";
+        }
+        size_t offset = output_shape.size() - input_shape.size();
+        for (size_t j = 0; j < input_shape.size(); ++j) {
+            if (input_shape[j] != output_shape[offset + j]) {
+                if (output_shape[offset + j] == 1) {
+                    output_shape[offset + j] = input_shape[j];
+                } else {
+                    if (input_shape[j] != 1) IE_THROW() << "Eltwise shape infer input shapes dim index: " << j << " mismatch";
+                }
+            }
+        }
+    }
+    redefineOutputMemory({output_shape});
 
     execute(strm);
 }
