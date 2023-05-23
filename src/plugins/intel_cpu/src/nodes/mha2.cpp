@@ -15,6 +15,7 @@
 #include "common/cpu_memcpy.h"
 #include "transformations/cpu_opset/x64/op/mha2.hpp"
 
+#include <utils/shape_inference/shape_inference_internal_dyn.hpp>
 #include "utils/profiler.hpp"
 
 #include <sys/types.h>
@@ -52,7 +53,7 @@ bool MHA2::isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::
 }
 
 MHA2::MHA2(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr context)
-    : Node(op, context, NgraphShapeInferFactory(op, EMPTY_PORT_MASK)) {
+    : Node(op, context, InternalDynShapeInferFactory()) {
     std::string errorMessage;
     if (!isSupportedOperation(op, errorMessage)) {
         IE_THROW(NotImplemented) << errorMessage;
@@ -504,7 +505,6 @@ struct cpu_thr_info {
 #endif
 
 void MHA2::executeDynamicImpl(dnnl::stream strm) {
-#if 0
     // shape infer & allocate output memory
     std::vector<VectorDims> outputShapes;
     auto mem_q = getParentEdgeAt(0)->getMemoryPtr();
@@ -517,13 +517,12 @@ void MHA2::executeDynamicImpl(dnnl::stream strm) {
         auto mem_pastv = getParentEdgeAt(4)->getMemoryPtr();
         auto shape_curk = mem_pastk->getStaticDims();
         auto shape_curv = mem_pastv->getStaticDims();
-        shape_curk[2] += mem_k->getStaticDims()[2];
-        shape_curv[2] += mem_v->getStaticDims()[2];
+        shape_curk[2] += mem_k->getStaticDims()[1];
+        shape_curv[2] += mem_v->getStaticDims()[1];
         outputShapes.push_back(shape_curk);
         outputShapes.push_back(shape_curv);
     }
     Node::redefineOutputMemory(outputShapes);
-#endif
 
     //cpu_thr_info::test();
     execute(strm);
