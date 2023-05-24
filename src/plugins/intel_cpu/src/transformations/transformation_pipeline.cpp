@@ -105,6 +105,8 @@
 #include "transformations/cpu_opset/common/pass/move_eltwise_up_data_movement.hpp"
 #include "transformations/cpu_opset/common/pass/ref_convert_i64_i32.hpp"
 #include "transformations/cpu_opset/common/pass/swap_convert_transpose.hpp"
+#include "transformations/cpu_opset/x64/pass/flash_attn_fusion.hpp"
+#include "openvino/pass/visualize_tree.hpp"
 
 // Snippets
 #include "snippets/pass/tokenization.hpp"
@@ -579,6 +581,7 @@ void Transformations::PostLpt() {
     // Snippets may brake MHA patterns so the fusion has to performed before
     CPU_REGISTER_PASS_X64(postLPTPassManager, MHAFusion);
     CPU_REGISTER_PASS_X64(postLPTPassManager, FuseFQtoInteraction);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, FlashAttentionFusion);
 
     CPU_SET_CALLBACK_X64(postLPTPassManager,
         ([this](const std::shared_ptr<const ov::Node>& n) -> bool {
