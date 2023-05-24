@@ -434,10 +434,10 @@ ov::intel_cpu::MHAFloatFusionWhisper::MHAFloatFusionWhisper() {
         if (with_kv_cache) {
             ngraph::replace_node(pvmap.at(newk).get_node_shared_ptr(), {mha->output(1)});
             ngraph::replace_node(pvmap.at(newv).get_node_shared_ptr(), {mha->output(2)});
-            auto& newk_tensor = mha->output(1).get_tensor();
-            auto& newv_tensor = mha->output(2).get_tensor();
-            ov::descriptor::set_ov_tensor_legacy_name(newk_tensor, pvmap.at(newk).get_node_shared_ptr()->get_friendly_name());
-            ov::descriptor::set_ov_tensor_legacy_name(newv_tensor, pvmap.at(newv).get_node_shared_ptr()->get_friendly_name());
+            // auto& newk_tensor = mha->output(1).get_tensor();
+            // auto& newv_tensor = mha->output(2).get_tensor();
+            // ov::descriptor::set_ov_tensor_legacy_name(newk_tensor, pvmap.at(newk).get_node_shared_ptr()->get_friendly_name());
+            // ov::descriptor::set_ov_tensor_legacy_name(newv_tensor, pvmap.at(newv).get_node_shared_ptr()->get_friendly_name());
         }
         return false;
     };

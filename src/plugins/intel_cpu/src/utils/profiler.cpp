@@ -393,10 +393,10 @@ void ProfilerManager::finalize() {
 
     int left_profilers = totalProfilerManagers.fetch_sub(1) - 1;
 
-    std::stringstream ss;
-    ss << "==== ProfilerManager #" << serial << " finalize: total number of profile entries " << data_size << "," << counter_size
-       << " left "  << left_profilers << std::endl;
-    std::cout << ss.str();
+    // std::stringstream ss;
+    // ss << "==== ProfilerManager #" << serial << " finalize: total number of profile entries " << data_size << "," << counter_size
+    //    << " left "  << left_profilers << std::endl;
+    // std::cout << ss.str();
 
     if (left_profilers != 0)
         return;
