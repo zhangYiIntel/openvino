@@ -128,31 +128,11 @@ void MHA2::initSupportedPrimitiveDescriptors() {
 #define UNUSED(x) (void)(x)
 #endif
 
-template<typename ... Args>
-static void log(Args&& ... args) {
-    std::stringstream ss;
-    int dummy[] = {(ss << std::forward<Args>(args), 0)...};
-    UNUSED(dummy);
-    ss << std::endl;
-    std::cout << ss.str();
-}
-
-static size_t offset2coord(size_t off, size_t D, size_t &d) {
-    auto next_off = off/D;
-    d = off - next_off*D;
-    return next_off;
-}
-
-template<typename ... Args>
-static size_t offset2coord(size_t off, size_t D, size_t &d, Args&& ... args) {
-    off = offset2coord(off, std::forward<Args>(args)...);
-    auto next_off = off/D;
-    d = off - next_off*D;
-    return next_off;
-}
 
 
 #define NAMED_LOG(prefix, ...)
+
+
 
 void MHA2::execute(dnnl::stream strm) {
     auto mem_q = getParentEdgeAt(0)->getMemoryPtr();
@@ -236,21 +216,85 @@ void MHA2::execute(dnnl::stream strm) {
         tensorND<float> v0(pV, {B, H, N, K});
         tensorND<float> wv0(pWV, {B, M, H, K});
 
-        float* past_k;
-        float* past_v;
-        float* one_token_k;
-        float* one_token_v;
-        if (mem_pastk) past_k = reinterpret_cast<float*>(mem_pastk->GetPtr());
-        if (mem_pastv) past_v = reinterpret_cast<float*>(mem_pastv->GetPtr());
-        one_token_k = reinterpret_cast<float*>(mem_k->GetPtr());
-        one_token_v = reinterpret_cast<float*>(mem_v->GetPtr());
+        if (with_kv_cache) {
+            float* past_k;
+            float* past_v;
+            float* one_token_k;
+            float* one_token_v;
+            if (mem_pastk) past_k = reinterpret_cast<float*>(mem_pastk->GetPtr());
+            if (mem_pastv) past_v = reinterpret_cast<float*>(mem_pastv->GetPtr());
+            one_token_k = reinterpret_cast<float*>(mem_k->GetPtr());
+            one_token_v = reinterpret_cast<float*>(mem_v->GetPtr());
+            parallel_nt_static(0, [&](int ithr, int nthr) {
+                const size_t work_amount = size_t(B)*H;
+                size_t start{0}, end{0}, h;
+                splitter(work_amount, nthr, ithr, start, end);
+                if (start == end) return;
+                for(size_t bh = start; bh < end; bh++) {
+                    auto b = bh/H;
+                    h = bh - b*H;                
+                    //  q[b, 0:M, h, K] => MxK
+                    //  k[b, h, 0:N, K] => NxK
+                    //  v[b, h, 0:N, K] => NxK
+                    // wv[b, 0:M, h, K] => MxK
+                    tensorND<float> q = q0.Slice(b, fullslice(), h, fullslice());
+                    tensorND<float> k = k0.Slice(b, h, fullslice(), fullslice());
+                    tensorND<float> v = v0.Slice(b, h, fullslice(), fullslice());
+                    tensorND<float> wv = wv0.Slice(b, fullslice(), h, fullslice());
 
-        static int bN = std::getenv("bN") ? atoi(std::getenv("bN")) : 256;
-        static int sss = 0;
-        // if (N > bN) sss ++;
-        if (with_kv_cache || with_causal_mask || (N < bN) || (sss & 3)==2) {
-            parallel_for2d(B, H, [&](size_t b, size_t h) {
-                size_t tid = parallel_get_thread_num();
+                    auto * pheadK = k.data;
+                    auto * pheadV = v.data;
+                    if (with_kv_cache) {
+                        // generate presentk/presentv
+                        //  k,v : [B, 1, H*k] => [B, 1, H, K] => [B, H, 1, K]
+                        // pastk, paskv:                         [B, H, N-1, K]
+                        // presentk, presentv:                   [B, H, N, K]
+                        auto src1 = one_token_k + bh*K;
+                        auto src0 = past_k + bh*(N-1)*K;
+                        memcpy(pheadK, src0, (N-1)*K*sizeof(float));
+                        memcpy(pheadK + (N-1)*K, src1, K*sizeof(float));
+
+                        src1 = one_token_v + bh*K;
+                        src0 = past_v + bh*(N-1)*K;
+                        memcpy(pheadV, src0, (N-1)*K*sizeof(float));
+                        memcpy(pheadV + (N-1)*K, src1, K*sizeof(float));
+                    }
+                }
+            });
+        }
+        kernels(q0, k0, v0, wv0, kv_head_transposed, with_causal_mask);
+    } else {
+        tensorND<float> q0(pQ, {B, M, H, K});
+        tensorND<float> k0(pK, {B, N, H, K});
+        tensorND<float> v0(pV, {B, N, H, K});
+        tensorND<float> wv0(pWV, {B, M, H, K});
+        kernels(q0, k0, v0, wv0, kv_head_transposed, with_causal_mask);
+    }
+
+#if 0
+    // q: [B, M, H*k]
+    if (kv_head_transposed) {
+        // k&v: [B, H, N, K]
+        tensorND<float> q0(pQ, {B, M, H, K});
+        tensorND<float> k0(pK, {B, H, N, K});
+        tensorND<float> v0(pV, {B, H, N, K});
+        tensorND<float> wv0(pWV, {B, M, H, K});
+
+        if (with_kv_cache) {
+            float* past_k;
+            float* past_v;
+            float* one_token_k;
+            float* one_token_v;
+            if (mem_pastk) past_k = reinterpret_cast<float*>(mem_pastk->GetPtr());
+            if (mem_pastv) past_v = reinterpret_cast<float*>(mem_pastv->GetPtr());
+            one_token_k = reinterpret_cast<float*>(mem_k->GetPtr());
+            one_token_v = reinterpret_cast<float*>(mem_v->GetPtr());
+            parallel_nt_static(0, [&](int ithr, int nthr) {
+                const size_t work_amount = size_t(B)*H;
+                size_t start{0}, end{0}, h;
+                splitter(work_amount, nthr, ithr, start, end);
+                if (start == end) return;
+                auto b = offset2coord(start, H, h);                
                 //  q[b, 0:M, h, K] => MxK
                 //  k[b, h, 0:N, K] => NxK
                 //  v[b, h, 0:N, K] => NxK
@@ -278,7 +322,28 @@ void MHA2::execute(dnnl::stream strm) {
                     memcpy(pheadV, src0, (N-1)*K*sizeof(float));
                     memcpy(pheadV + (N-1)*K, src1, K*sizeof(float));
                 }
-                kernels.one_head_attention(tid, q, k, v, wv, 0, with_causal_mask);
+            });
+        }
+
+        static int bN = std::getenv("bN") ? atoi(std::getenv("bN")) : 256;
+        static int sss = 0;
+        // if (N > bN) sss ++;
+        if (with_kv_cache || with_causal_mask || (N < bN) || (sss & 3)==2) {
+            const size_t work_amount = size_t(B)*H;
+            parallel_nt_static(0, [&](int ithr, int nthr) {
+                size_t start{0}, end{0}, h;
+                splitter(work_amount, nthr, ithr, start, end);
+                if (start == end) return;
+                auto b = offset2coord(start, H, h);
+                //  q[b, 0:M, h, K] => MxK
+                //  k[b, h, 0:N, K] => NxK
+                //  v[b, h, 0:N, K] => NxK
+                // wv[b, 0:M, h, K] => MxK
+                tensorND<float> q = q0.Slice(b, fullslice(), h, fullslice());
+                tensorND<float> k = k0.Slice(b, h, fullslice(), fullslice());
+                tensorND<float> v = v0.Slice(b, h, fullslice(), fullslice());
+                tensorND<float> wv = wv0.Slice(b, fullslice(), h, fullslice());
+                kernels.one_head_attention(ithr, q, k, v, wv, 0, with_causal_mask);
             });
         } else {
             // no with_kv_cache, no with_causal_mask
@@ -304,8 +369,7 @@ void MHA2::execute(dnnl::stream strm) {
                 // and finally, main thread will combine sub-states into one
                 size_t start{0}, end{0};
                 splitter(work_amount, nthr, ithr, start, end);
-                if (start == end)
-                    return;
+                if (start == end) return;
                 //std::stringstream ss; ss << ithr << "/" << nthr << std::endl;   std::cout << ss.str();
                 // encoding sub-states one by one
                 for (auto cur = start; cur < end; cur++) {
@@ -455,6 +519,7 @@ void MHA2::execute(dnnl::stream strm) {
             }
         });
     }
+#endif
 }
 
 #if defined(__linux) || defined(__APPLE__)
