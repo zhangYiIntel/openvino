@@ -10,6 +10,7 @@ set(TARGET_NAME "openvino_intel_cpu_plugin")
 
 if(CMAKE_COMPILER_IS_GNUCXX)
     ie_add_compiler_flags(-Wno-sign-compare)
+    ie_add_compiler_flags(-mavx512f -mavx512bw -mavx512dq -mfma)
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # C4267, 4244 issues from oneDNN headers conversion from 'XXX' to 'YYY', possible loss of data
     ie_add_compiler_flags(/wd4267)

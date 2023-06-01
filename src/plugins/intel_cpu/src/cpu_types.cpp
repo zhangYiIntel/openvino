@@ -203,7 +203,8 @@ const InferenceEngine::details::caseless_unordered_map<std::string, Type> type_t
         {"Interaction", Type::Interaction},
         { "MHA", Type::MHA},
         { "Unique", Type::Unique},
-        { "Ngram", Type::Ngram}
+        { "Ngram", Type::Ngram},
+        {"FlashAttention", Type::FlashAttention}
 };
 
 Type TypeFromName(const std::string& type) {
@@ -403,6 +404,8 @@ std::string NameFromType(const Type type) {
             return "Unique";
         case Type::Ngram:
             return "Ngram";
+        case Type::FlashAttention:
+            return "FlashAttention";
         default:
             return "Unknown";
     }
