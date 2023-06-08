@@ -328,8 +328,10 @@ void FullyConnected::prepareParams() {
             if (isINT8) {
                 const size_t packedBsize = MlasGemmPackBSize(N, K, aSigned, bSigned);
                 uint8_t* weightPtr = reinterpret_cast<uint8_t*>(getParentEdgeAt(1)->getMemoryPtr()->GetPtr());
+                std::vector<uint8_t> tempWgt(N*K, 0);
+                MlasTranspose(weightPtr, tempWgt.data(), N, K);
                 packedBPtr.reset(new ngraph::runtime::AlignedBuffer(packedBsize));
-                MlasGemmPackB(N, K, weightPtr, N, aSigned, bSigned, packedBPtr->get_ptr<uint8_t>());
+                MlasGemmPackB(N, K, tempWgt.data(), N, aSigned, bSigned, packedBPtr->get_ptr<uint8_t>());
             } else {
                 auto packedBsize = ov_sgemm_pack_get_size("B", M, N, K);
                 packedBPtr.reset(new ngraph::runtime::AlignedBuffer(packedBsize * sizeof(float)));
@@ -491,20 +493,25 @@ void FullyConnected::execute(dnnl::stream strm) {
 
             gemm_param.B = packedBPtr->get_ptr<uint8_t>();
             gemm_param.ldb = gemm_shape.N;
+            gemm_param.BIsPacked = true;
             gemm_param.ZeroPointB = &bZp;
             gemm_param.C = reinterpret_cast<int32_t*>(dstMemPtr->GetData());
             gemm_param.ldc = gemm_shape.N;
             gemm_param.PerColumnZeroPoints = false;
             const auto& deq = getDQScales();
-            auto scale_bias_proc_ptr = std::make_shared<MLAS_QGEMM_SCALE_BIAS_OUTPUT_PROCESSOR>(
-            reinterpret_cast<float*>(dstMemPtr->GetData()),
-            static_cast<size_t>(N),
-            deq.data(),
-            nullptr,
-            MLAS_QGEMM_OUTPUT_MODE::ZeroMode,
-            deq.size() > 1 ? MLAS_QUANTIZATION_GRANULARITY::PerColumn : MLAS_QUANTIZATION_GRANULARITY::PerMatrix);
-            if (getenv("ENABLE_DEQ"))
+            std::shared_ptr<MLAS_QGEMM_SCALE_BIAS_OUTPUT_PROCESSOR> scale_bias_proc_ptr = nullptr;
+            if (!deq.empty()) {
+                scale_bias_proc_ptr = std::make_shared<MLAS_QGEMM_SCALE_BIAS_OUTPUT_PROCESSOR>(
+                reinterpret_cast<float*>(dstMemPtr->GetData()),
+                static_cast<size_t>(N),
+                deq.data(),
+                nullptr,
+                MLAS_QGEMM_OUTPUT_MODE::ZeroMode,
+                deq.size() > 1 ? MLAS_QUANTIZATION_GRANULARITY::PerColumn : MLAS_QUANTIZATION_GRANULARITY::PerMatrix);
                 gemm_param.OutputProcessor = scale_bias_proc_ptr.get();
+            } else {
+                gemm_param.OutputProcessor = nullptr;
+            }
             MlasGemmBatch(gemm_shape, &gemm_param, 1, nullptr);
         } else {
             int64_t lda = K;
