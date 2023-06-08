@@ -24,6 +24,7 @@
 #include "common/primitive_hashing_utils.hpp"
 #include "common/primitive_desc.hpp"
 #include "common/primitive_desc_iface.hpp"
+#include "mlas.h"
 
 #include <string>
 #include <vector>
@@ -262,7 +263,16 @@ void FullyConnected::getSupportedDescriptors() {
         inputDataType = outputDataType = memory::data_type::f32;
     }
 #ifdef OV_CPU_WITH_MLAS
-    useMlas = !useSparseWeights && (inputDataType != memory::data_type::bf16) && !isINT8;
+    useMlas = !useSparseWeights && (inputDataType != memory::data_type::bf16) && getenv("ENABLE_MLAS");
+    if (isINT8) {
+        // strict the mlas usage in pure int8 models
+        bool isStrictINT8 = (one_of(inputDataType, memory::data_type::u8, memory::data_type::s8)
+            && weightsDataType == memory::data_type::s8);
+        if (isStrictINT8) {
+            aSigned = inputDataType == memory::data_type::s8 ? true : false;
+            bSigned = true;
+        }
+}
 #endif
     if (useMlas) return;
     inDims = isDynamicNode() ? makeDummyInputDims() : getInputShapeAtPort(DATA_ID).getStaticDims();
@@ -315,12 +325,19 @@ void FullyConnected::prepareParams() {
         N = dims1[dims1.size() - 2];
         M = std::accumulate(dims0.begin(), dims0.end() - 1, 1, std::multiplies<int64_t>());
         if (packedBPtr == nullptr) {
-            auto packedBsize = ov_sgemm_pack_get_size("B", M, N, K);
-            packedBPtr.reset(new ngraph::runtime::AlignedBuffer(packedBsize));
-            float* weightPtr = reinterpret_cast<float*>(getParentEdgeAt(1)->getMemoryPtr()->GetPtr());
-            size_t lda = M;
-            size_t ldb = K;
-            ov_sgemm_pack("B", "N", "T", M, N, K, lda, ldb, weightPtr, packedBPtr->get_ptr<float>());
+            if (isINT8) {
+                const size_t packedBsize = MlasGemmPackBSize(N, K, aSigned, bSigned);
+                uint8_t* weightPtr = reinterpret_cast<uint8_t*>(getParentEdgeAt(1)->getMemoryPtr()->GetPtr());
+                packedBPtr.reset(new ngraph::runtime::AlignedBuffer(packedBsize));
+                MlasGemmPackB(N, K, weightPtr, N, aSigned, bSigned, packedBPtr->get_ptr<uint8_t>());
+            } else {
+                auto packedBsize = ov_sgemm_pack_get_size("B", M, N, K);
+                packedBPtr.reset(new ngraph::runtime::AlignedBuffer(packedBsize * sizeof(float)));
+                float* weightPtr = reinterpret_cast<float*>(getParentEdgeAt(1)->getMemoryPtr()->GetPtr());
+                size_t lda = M;
+                size_t ldb = K;
+                ov_sgemm_pack("B", "N", "T", M, N, K, lda, ldb, weightPtr, packedBPtr->get_ptr<float>());
+            }
         }
         return;
     }
@@ -456,22 +473,57 @@ void FullyConnected::execute(dnnl::stream strm) {
     if (useMlas) {
         auto& dstMemPtr = getChildEdgeAt(0)->getMemoryPtr();
         auto& src0MemPtr = getParentEdgeAt(0)->getMemoryPtr();
-        int64_t lda = K;
-        int64_t ldb = K;
-        int64_t ldc = N;
+        if (isINT8) {
+            auto& dstMemPtr = getChildEdgeAt(0)->getMemoryPtr();
+            auto& src0MemPtr = getParentEdgeAt(0)->getMemoryPtr();
+
+            MLAS_GEMM_QUANT_SHAPE_PARAMS gemm_shape;
+            gemm_shape.AIsSigned = aSigned;
+            gemm_shape.BIsSigned = bSigned;
+            gemm_shape.K = static_cast<size_t>(K);
+            gemm_shape.M = static_cast<size_t>(M);
+            gemm_shape.N = static_cast<size_t>(N);
+
+            MLAS_GEMM_QUANT_DATA_PARAMS gemm_param;
+            gemm_param.A = reinterpret_cast<uint8_t*>(src0MemPtr->GetData());
+            gemm_param.lda = gemm_shape.K;
+            gemm_param.ZeroPointA = 0;
+
+            gemm_param.B = packedBPtr->get_ptr<uint8_t>();
+            gemm_param.ldb = gemm_shape.N;
+            gemm_param.ZeroPointB = &bZp;
+            gemm_param.C = reinterpret_cast<int32_t*>(dstMemPtr->GetData());
+            gemm_param.ldc = gemm_shape.N;
+            gemm_param.PerColumnZeroPoints = false;
+            const auto& deq = getDQScales();
+            auto scale_bias_proc_ptr = std::make_shared<MLAS_QGEMM_SCALE_BIAS_OUTPUT_PROCESSOR>(
+            reinterpret_cast<float*>(dstMemPtr->GetData()),
+            static_cast<size_t>(N),
+            deq.data(),
+            nullptr,
+            MLAS_QGEMM_OUTPUT_MODE::ZeroMode,
+            deq.size() > 1 ? MLAS_QUANTIZATION_GRANULARITY::PerColumn : MLAS_QUANTIZATION_GRANULARITY::PerMatrix);
+            if (getenv("ENABLE_DEQ"))
+                gemm_param.OutputProcessor = scale_bias_proc_ptr.get();
+            MlasGemmBatch(gemm_shape, &gemm_param, 1, nullptr);
+        } else {
+            int64_t lda = K;
+            int64_t ldb = K;
+            int64_t ldc = N;
             ov_sgemm_pack_compute("N",
-                    "N",
-                    M,
-                    N,
-                    K,
-                    1.0f,
-                            reinterpret_cast<float*>(src0MemPtr->GetData()),
-                    lda,
-                    packedBPtr->get_ptr<float>(),
-                    ldb,
-                    0.0f,
-                            reinterpret_cast<float*>(dstMemPtr->GetData()),
-                    ldc);
+                                  "N",
+                                  M,
+                                  N,
+                                  K,
+                                  1.0f,
+                                  reinterpret_cast<float*>(src0MemPtr->GetData()),
+                                  lda,
+                                  packedBPtr->get_ptr<float>(),
+                                  ldb,
+                                  0.0f,
+                                  reinterpret_cast<float*>(dstMemPtr->GetData()),
+                                  ldc);
+        }
         return;
     }
 #endif
@@ -504,6 +556,10 @@ void FullyConnected::executeDynamicImpl(dnnl::stream strm) {
 }
 
 bool FullyConnected::canFuse(const NodePtr& node) const {
+    if (!getenv("ENABLE_FCFUSE")) {
+        std::cout << "!!!!DISBALE FC FUSE" << std::endl;
+        return false;
+    }
     if (node->getType() == Type::FakeQuantize) {
         bool ret = node->getAlgorithm() != Algorithm::FQBinarization;
         for (size_t i = 1; i < node->getParentEdges().size(); i++) {
@@ -511,12 +567,8 @@ bool FullyConnected::canFuse(const NodePtr& node) const {
         }
         return ret;
     } else if (node->getType() == Type::Eltwise) {
-#ifdef OV_CPU_WITH_MLAS
-        return false;
-#else
         return DnnlExtensionUtils::isUnarySupportedAsPostOp(node->getAlgorithm()) ||
             node->canBePerformedAsScaleShift(this);
-#endif
     }
     return false;
 }
@@ -708,17 +760,21 @@ void FullyConnected::initSupportedPrimitiveDescriptors() {
         return;
     if (useMlas) {
         auto dataPrecision = getOriginalInputPrecisionAtPort(0);
+        auto weightPrecision = dataPrecision;
+        if (isINT8) {
+            weightPrecision = InferenceEngine::Precision(InferenceEngine::Precision::I8);
+        }
         if (withBiases) {
             //To Do withBias is not supported for mlas now
             addSupportedPrimDesc({{LayoutType::ncsp, dataPrecision},
-                            {LayoutType::ncsp, dataPrecision},
+                            {LayoutType::ncsp, weightPrecision},
                             {LayoutType::ncsp, dataPrecision}},
-                            {{LayoutType::ncsp, dataPrecision}},
+                            {{LayoutType::ncsp, DnnlExtensionUtils::DataTypeToIEPrecision(outputDataType)}},
                             impl_desc_type::gemm_mlas);
         } else {
             addSupportedPrimDesc({{LayoutType::ncsp, dataPrecision},
-                {LayoutType::ncsp, dataPrecision}},
-                {{LayoutType::ncsp, dataPrecision}},
+                {LayoutType::ncsp, weightPrecision}},
+                {{LayoutType::ncsp, DnnlExtensionUtils::DataTypeToIEPrecision(outputDataType)}},
                 impl_desc_type::gemm_mlas);
         }
     } else {

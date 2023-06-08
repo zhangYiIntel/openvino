@@ -107,6 +107,8 @@ private:
 #ifdef OV_CPU_WITH_MLAS
     int64_t M, N, K;
     std::unique_ptr<ngraph::runtime::AlignedBuffer> packedBPtr;
+    bool aSigned, bSigned;
+    uint8_t bZp = 0;
 #endif
 };
 
