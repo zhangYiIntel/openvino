@@ -64,6 +64,8 @@ if(NOT (AARCH64 OR ARM))
     list(APPEND EXCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/transformations/cpu_opset/arm/*)
 endif()
 
+set(ENABLE_MLAS ON)
+
 if (NOT ENABLE_MLAS)
     list(APPEND EXCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/gemm/*)
 endif()
