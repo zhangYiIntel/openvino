@@ -75,8 +75,13 @@ extern thread_local ProfilerManager profilerManagerInstance;
 #    define PROFILE(var_name, ...)                                         \
         auto var_name = ov::intel_cpu::profilerManagerInstance.startProfile(__VA_ARGS__); \
         (void)var_name;
+
+#    define PROFILE_NEXT(var_name, ...)                                         \
+        var_name = ov::intel_cpu::profilerManagerInstance.startProfile(__VA_ARGS__);
+
 #else
 
 #    define PROFILE(var_name, ...)
+#    define PROFILE_NEXT(var_name, ...)
 
 #endif

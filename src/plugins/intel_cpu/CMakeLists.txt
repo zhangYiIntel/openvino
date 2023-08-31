@@ -155,6 +155,12 @@ cross_compiled_file(${TARGET_NAME}
         NAME        rms_norm
         NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
 )
+set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
+        "-mavx512f")
+set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
+        "-mfma")
+set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
+        "-mavx512bf16")
 # system dependencies must go last
 target_link_libraries(${TARGET_NAME} PRIVATE openvino::pugixml)
 set_ie_threading_interface_for(${TARGET_NAME})

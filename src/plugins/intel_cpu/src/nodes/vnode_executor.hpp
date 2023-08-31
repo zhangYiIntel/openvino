@@ -18,6 +18,14 @@
 #include "vnode_kernels.hpp"
 #include "vnode_rms_norm.hpp"
 
+extern "C" {
+#ifdef _WIN32
+#    include <intrin.h>
+#else
+#    include <x86intrin.h>
+#endif
+}
+
 namespace ov {
 namespace intel_cpu {
 namespace node {
@@ -70,7 +78,9 @@ struct vnode_executor {
         }
     }
 
-    virtual void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) = 0;
+    virtual void exec(Node* node, dnnl::stream strm,
+                      std::map<std::string, double>& symbol2value,
+                      std::map<std::string, double>& attr_map) = 0;
 };
 
 #define EXECUTOR_SIGNATURE(vtype_name)                                                               \
@@ -101,10 +111,9 @@ struct gptneox_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, S]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, S]
 
-    MHA_kernel<KType, RT> kernel;
-    RoPE_kernel<KType, RT> rope_kernel;
+    generic_attention<KType, RT> gen_kernel;
 
-    gptneox_attention_executor() : m_query_emb(true) {
+    gptneox_attention_executor(std::map<std::string, double>& symbol_name2value, std::map<std::string, double>& attr_map) {
         register_inputs(qkv_input,
                         past_key,
                         past_value,
@@ -116,26 +125,16 @@ struct gptneox_attention_executor : public vnode_executor {
         register_outputs(output_emb, present_key, present_value);
     }
 
-    PlainTensor<RT> m_query_emb;  // query with embed
-
-    size_t B;
-    size_t H;
-    size_t L0;
-    size_t L1;
-    size_t S;
-    size_t rotary_dims;
-    size_t max_position_embeddings;
-
-    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value, std::map<std::string, double>& attr_map) override {
         update_inputs(node);
 
-        B = past_key.size(0);
-        H = past_key.size(1);   // 8
-        L0 = past_key.size(2);  // number of tokens to be encoded
-        S = past_key.size(3);   // 64
-        L1 = qkv_input.size(1);
-        rotary_dims = rotary_emb_cos.size(3);
-        max_position_embeddings = rotary_emb_cos.size(2);
+        auto B = past_key.size(0);
+        auto H = past_key.size(1);   // 8
+        auto L0 = past_key.size(2);  // number of tokens to be encoded
+        auto S = past_key.size(3);   // 64
+        auto L1 = qkv_input.size(1);
+        auto rotary_dims = rotary_emb_cos.size(3);
+        auto max_position_embeddings = rotary_emb_cos.size(2);
 
         {
             PROFILE(prof, "redefineOutputMemory");
@@ -150,106 +149,26 @@ struct gptneox_attention_executor : public vnode_executor {
         rotary_emb_cos.assert_dims({1, 1, max_position_embeddings, rotary_dims});
         rotary_emb_sin.assert_dims({1, 1, max_position_embeddings, rotary_dims});
 
-        m_query_emb.resize({B, H, L1, S});
-
         // PlainTensor<RT> qkv_input;          // f32[B, L1, H*3*S] => [B, L1, H, 3, S]
         auto qkv_4d = qkv_input.reshape({B, L1, H, 3 * S});
         auto q_input = qkv_4d.slice(3, 0, S);
         auto k_input = qkv_4d.slice(3, S, 2 * S);
         auto v_input = qkv_4d.slice(3, 2 * S, 3 * S);
-        rope_kernel(q_input,
-                    k_input,
-                    v_input,
-                    past_key,
-                    past_value,
-                    m_query_emb,
-                    present_key,
-                    present_value,
-                    rotary_emb_cos,
-                    rotary_emb_sin);
 
-        kernel(m_query_emb, present_key, present_value, {}, attention_mask, output_emb);
-    }
-};
-
-template <KernelTypes KType, typename RT>
-struct gptj_attention_executor : public vnode_executor {
-    EXECUTOR_SIGNATURE("gptj_attention");
-    PlainTensor<RT> q_input;                // f32[B, L1, H*S]
-    PlainTensor<RT> k_input;                // f32[B, L1, H*S]
-    PlainTensor<RT> v_input;                // f32[B, L1, H*S]
-    PlainTensor<RT> past_key;               // f32[B, H, L0, S]
-    PlainTensor<RT> past_value;             // f32[B, H, L0, S]
-    PlainTensor<float> attention_mask;      // f32[B, 1, 1, L0 + L1]
-    PlainTensor<float> rotary_emb_sin_cos;  // f32[?,?,64]
-
-    PlainTensor<RT> output_emb;     // f32[B, L1, H*S]
-    PlainTensor<RT> present_key;    // f32[B, H, L0+L1, S]
-    PlainTensor<RT> present_value;  // f32[B, H, L0+L1, S]
-
-    MHA_kernel<KType, RT> kernel;
-    RoPE2_kernel<KType, RT> rope_kernel;
-
-    gptj_attention_executor() : m_query_emb(true) {
-        register_inputs(q_input, k_input, v_input, past_key, past_value, attention_mask, rotary_emb_sin_cos);
-        register_outputs(output_emb, present_key, present_value);
-    }
-
-    PlainTensor<RT> m_query_emb;  // query with embed
-
-    size_t B;
-    size_t H;
-    size_t L0;
-    size_t L1;
-    size_t S;
-    size_t rotary_dims;
-    size_t max_position_embeddings;
-
-    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
-        update_inputs(node);
-
-        B = past_key.size(0);
-        H = past_key.size(1);
-        L0 = past_key.size(2);
-        S = past_key.size(3);
-        L1 = q_input.size(1);
-        rotary_dims = rotary_emb_sin_cos.size(2);
-        // DEBUG_LOG_TEMP(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
-        {
-            PROFILE(prof, "redefineOutputMemory");
-            node->redefineOutputMemory({{B, L1, H * S}, {B, H, L0 + L1, S}, {B, H, L0 + L1, S}});
-            update_outputs(node);
-        }
-
-        attention_mask.assert_dims({B, 1, 1, L0 + L1});
-        past_key.assert_dims({B, H, L0, S});
-        past_value.assert_dims({B, H, L0, S});
-        q_input.assert_dims({B, L1, H * S});
-        k_input.assert_dims({B, L1, H * S});
-        v_input.assert_dims({B, L1, H * S});
-        rotary_emb_sin_cos.assert_dims({1, L1, rotary_dims});
-        present_key.assert_dims({B, H, L0 + L1, S});
-        present_value.assert_dims({B, H, L0 + L1, S});
-        m_query_emb.resize({B, H, L1, S});
-
-        auto rope_q = q_input.reshape({B, L1, H, S});
-        auto rope_k = k_input.reshape({B, L1, H, S});
-        auto rope_v = v_input.reshape({B, L1, H, S});
-        auto sin_tab = rotary_emb_sin_cos.slice(2, 0, rotary_dims / 2);
-        auto cos_tab = rotary_emb_sin_cos.slice(2, rotary_dims / 2, rotary_dims);
-
-        rope_kernel(rope_q,
-                    rope_k,
-                    rope_v,
-                    past_key,
-                    past_value,
-                    m_query_emb,
-                    present_key,
-                    present_value,
-                    cos_tab,
-                    sin_tab);
-
-        kernel(m_query_emb, present_key, present_value, {}, attention_mask, output_emb);
+        gen_kernel(node,
+                   1,
+                   q_input,
+                   k_input,
+                   v_input,
+                   past_key,
+                   past_value,
+                   present_key,
+                   present_value,
+                   {},
+                   attention_mask,
+                   rotary_emb_cos,
+                   rotary_emb_sin,
+                   output_emb);
     }
 };
 
@@ -268,17 +187,14 @@ struct falcon_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B*H, L0+L1, S]
     PlainTensor<RT> present_value;  // f32[B*H, L0+L1, S]
 
-    MHA_kernel<KType, RT> kernel;
-    RoPE_kernel<KType, RT> rope_kernel;
+    generic_attention<KType, RT> gen_kernel;
 
-    falcon_attention_executor() : m_query_emb(true) {
+    falcon_attention_executor(std::map<std::string, double>& symbol_name2value, std::map<std::string, double>& attr_map) {
         register_inputs(qkv_proj, past_key, past_value, past_kv_shape, attn_causal_mask, cos_tab, sin_tab);
         register_outputs(output_emb, present_key, present_value);
     }
 
-    PlainTensor<RT> m_query_emb;  // query with embed
-
-    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value, std::map<std::string, double>& attr_map) override {
         update_inputs(node);
 
         auto B = past_key.size(0);
@@ -306,8 +222,6 @@ struct falcon_attention_executor : public vnode_executor {
         present_key.assert_dims({B * H, L0 + L1, S});
         present_value.assert_dims({B * H, L0 + L1, S});
 
-        m_query_emb.resize({B, H, L1, S});
-
         auto qkv5d = qkv_proj.reshape({B, L1, G, (gH + 2), S});
         auto q_5d = qkv5d.slice(3, 0, gH);
         auto k_5d = qkv5d.slice(3, gH, gH + 1);
@@ -319,9 +233,21 @@ struct falcon_attention_executor : public vnode_executor {
 
         auto cos_4d = cos_tab.reshape({1, 1, max_position_embeddings, rotary_dims});
         auto sin_4d = sin_tab.reshape({1, 1, max_position_embeddings, rotary_dims});
-        rope_kernel(q_5d, k_5d, v_5d, past_key, past_value, m_query_emb, present_key, present_value, cos_4d, sin_4d);
 
-        kernel(m_query_emb, present_key, present_value, {}, attn_causal_mask, output_emb);
+        gen_kernel(node,
+                   1,
+                   q_5d,
+                   k_5d,
+                   v_5d,
+                   past_key,
+                   past_value,
+                   present_key,
+                   present_value,
+                   {},
+                   attn_causal_mask,
+                   cos_4d,
+                   sin_4d,
+                   output_emb);
     }
 };
 
@@ -342,10 +268,9 @@ struct llama2_attention_executor : public vnode_executor {
     PlainTensor<RT> present_key;    // f32[B, H, L0+L1, S]
     PlainTensor<RT> present_value;  // f32[B, H, L0+L1, S]
 
-    MHA_kernel<KType, RT> kernel;
-    RoPE_kernel<KT_REF, RT> rope_kernel; // gather_pos_idx only implemented in REF so far
+    generic_attention<KType, RT> gen_kernel;
 
-    llama2_attention_executor() : m_query_emb(true) {
+    llama2_attention_executor(std::map<std::string, double>& symbol_name2value, std::map<std::string, double>& attr_map) {
         register_inputs(q_input,
                         k_input,
                         v_input,
@@ -358,9 +283,7 @@ struct llama2_attention_executor : public vnode_executor {
         register_outputs(output_emb, present_key, present_value);
     }
 
-    PlainTensor<RT> m_query_emb;  // query with embed
-
-    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value, std::map<std::string, double>& attr_map) override {
         update_inputs(node);
 
         auto B = past_key.size(0);
@@ -391,25 +314,27 @@ struct llama2_attention_executor : public vnode_executor {
         present_key.assert_dims({B, H, L0 + L1, S});
         present_value.assert_dims({B, H, L0 + L1, S});
 
-        m_query_emb.resize({B, H, L1, S});
-
         // set gather_pos_idx
         auto rope_q = q_input.reshape({B, L1, H, S});
         auto rope_k = k_input.reshape({B, L1, H, S});
         auto rope_v = v_input.reshape({B, L1, H, S});
-        rope_kernel.gather_pos_idx = gather_pos_idx;
-        rope_kernel(rope_q,
-                    rope_k,
-                    rope_v,
-                    past_key,
-                    past_value,
-                    m_query_emb,
-                    present_key,
-                    present_value,
-                    rotary_emb_cos,
-                    rotary_emb_sin);
 
-        kernel(m_query_emb, present_key, present_value, {}, attn_causal_mask, output_emb);
+        // kernel
+        gen_kernel(node,
+                   1,
+                   rope_q,
+                   rope_k,
+                   rope_v,
+                   past_key,
+                   past_value,
+                   present_key,
+                   present_value,
+                   {},
+                   attn_causal_mask,
+                   rotary_emb_cos,
+                   rotary_emb_sin,
+                   output_emb,
+                   gather_pos_idx);
     }
 };
 template <KernelTypes KType, typename RT>
@@ -420,12 +345,12 @@ struct llama_RMSNorm_executor : public vnode_executor {
     PlainTensor<RT> eps;     // f32[1, 1, 1]
 
     PlainTensor<RT> output;  // f32[?, ?, 4096]
-    llama_RMSNorm_executor() {
+    llama_RMSNorm_executor(std::map<std::string, double>& symbol_name2value, std::map<std::string, double>& attr_map) {
         register_inputs(input, weight, eps);
         register_outputs(output);
     }
 
-    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value) override {
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value, std::map<std::string, double>& attr_map) override {
         update_inputs(node);
         auto data_shape = input.shape();
         auto last_dim = input.size(-1);
@@ -447,6 +372,259 @@ struct llama_RMSNorm_executor : public vnode_executor {
             auto* pdst = &output.at({b, 0});
             InferenceEngine::Extensions::Cpu::XARCH::rms_norm(pdst, psrc, esp_value, pwei, last_dim);
         });
+    }
+};
+
+template <KernelTypes KType, typename RT>
+struct gptj_attention_executor : public vnode_executor {
+    EXECUTOR_SIGNATURE("gptj_attention");
+    PlainTensor<RT> q_input;                // f32[B, L1, H*S]
+    PlainTensor<RT> k_input;                // f32[B, L1, H*S]
+    PlainTensor<RT> v_input;                // f32[B, L1, H*S]
+    PlainTensor<RT> past_key;               // f32[B, H, L0, S]
+    PlainTensor<RT> past_value;             // f32[B, H, L0, S]
+    PlainTensor<float> attention_mask;      // f32[B, 1, 1, L0 + L1]
+    PlainTensor<float> rotary_emb_sin_cos;  // f32[?,?,64]
+
+    PlainTensor<RT> output_emb;     // f32[B, L1, H*S]
+    PlainTensor<RT> present_key;    // f32[B, H, L0+L1, S]
+    PlainTensor<RT> present_value;  // f32[B, H, L0+L1, S]
+
+    generic_attention<KType, RT> gen_kernel;
+
+    gptj_attention_executor(std::map<std::string, double>& symbol_name2value, std::map<std::string, double>& attr_map) {
+        register_inputs(q_input, k_input, v_input, past_key, past_value, attention_mask, rotary_emb_sin_cos);
+        register_outputs(output_emb, present_key, present_value);
+    }
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value, std::map<std::string, double>& attr_map) override {
+        update_inputs(node);
+
+        auto B = past_key.size(0);
+        auto H = past_key.size(1);
+        auto L0 = past_key.size(2);
+        auto S = past_key.size(3);
+        auto L1 = q_input.size(1);
+        auto rotary_dims = rotary_emb_sin_cos.size(2);
+        // DEBUG_LOG_TEMP(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
+        {
+            PROFILE(prof, "redefineOutputMemory");
+            node->redefineOutputMemory({{B, L1, H * S}, {B, H, L0 + L1, S}, {B, H, L0 + L1, S}});
+            update_outputs(node);
+        }
+
+        attention_mask.assert_dims({B, 1, 1, L0 + L1});
+        past_key.assert_dims({B, H, L0, S});
+        past_value.assert_dims({B, H, L0, S});
+        q_input.assert_dims({B, L1, H * S});
+        k_input.assert_dims({B, L1, H * S});
+        v_input.assert_dims({B, L1, H * S});
+        rotary_emb_sin_cos.assert_dims({1, L1, rotary_dims});
+        present_key.assert_dims({B, H, L0 + L1, S});
+        present_value.assert_dims({B, H, L0 + L1, S});
+
+        auto rope_q = q_input.reshape({B, L1, H, S});
+        auto rope_k = k_input.reshape({B, L1, H, S});
+        auto rope_v = v_input.reshape({B, L1, H, S});
+        auto sin_tab = rotary_emb_sin_cos.slice(2, 0, rotary_dims / 2);
+        auto cos_tab = rotary_emb_sin_cos.slice(2, rotary_dims / 2, rotary_dims);
+
+        gen_kernel(node,
+                   2,
+                   rope_q,
+                   rope_k,
+                   rope_v,
+                   past_key,
+                   past_value,
+                   present_key,
+                   present_value,
+                   {},
+                   attention_mask,
+                   cos_tab,
+                   sin_tab,
+                   output_emb);
+    }
+};
+template <KernelTypes KType, typename RT>
+struct experimental_attention_executor : public vnode_executor {
+    EXECUTOR_SIGNATURE("llm::experimental::MultiHeadAttention");
+    PlainTensor<RT> qkv_input;        // f32[B, L1, H*S] / [B, L1, H*3*S]
+    PlainTensor<RT> k_input;          // f32[B, L1, H*S]
+    PlainTensor<RT> v_input;          // f32[B, L1, H*S]
+    PlainTensor<RT> kv_cache;         // f32[2*num_layers, B, H, max_kvLen, S]
+    PlainTensor<int32_t> beam_table;  // i32[B, max_kvLen]
+    PlainTensor<float> attn_mask;     // f32[B, qLen + kvLen]
+    PlainTensor<float> cos_tab;       // f32[max_kv_len, rotary_dims//2]
+    PlainTensor<float> sin_tab;       // f32[max_kv_len, rotary_dims//2]
+
+    PlainTensor<RT> output_emb;  // f32[B, L1, H*S]
+
+    RoPE2_kernel<KT_REF, RT> rope2_kernel;
+    RoPE_kernel<KT_REF, RT> rope1_kernel;
+    MHA_kernel<KType, RT> kernel;
+    MHA_1Token<RT> kernel_1tok;
+
+    PlainTensor<RT> m_query_emb;  // query with RoPE position embedding
+
+    bool qkv_combined;
+
+    experimental_attention_executor(std::map<std::string, double>& symbol_name2value, std::map<std::string, double>& attr_map) : m_query_emb(true) {
+        qkv_combined = (attr_map["arg_k"] == 0 && attr_map["arg_v"] == 0);
+
+        if (qkv_combined) {
+            register_inputs(qkv_input, kv_cache, beam_table, attn_mask, cos_tab, sin_tab);
+        } else {
+            register_inputs(qkv_input, k_input, v_input, kv_cache, beam_table, attn_mask, cos_tab, sin_tab);
+        }
+        register_outputs(output_emb);
+    }
+
+    void exec(Node* node, dnnl::stream strm, std::map<std::string, double>& symbol2value, std::map<std::string, double>& attr_map) override {
+        update_inputs(node);
+
+        auto B = qkv_input.size(0);
+        auto L1 = qkv_input.size(1);
+        auto H = kv_cache.size(2);
+        auto L0 = attn_mask.size(1) - L1;
+        auto S = kv_cache.size(-1);
+        auto half_rotary_dims = cos_tab.size(-1);
+        size_t gH = 0;
+        // DEBUG_LOG_TEMP(" B=", B, " H=", H, " S=", S, " L0=", L0, " L1=", L1);
+        {
+            PROFILE(prof, "redefineOutputMemory");
+            node->redefineOutputMemory({{B, L1, H * S}});
+            update_outputs(node);
+        }
+
+        attn_mask.assert_dims({B, L0 + L1});
+        cos_tab.assert_dims({0, half_rotary_dims}, true);
+        sin_tab.assert_dims({0, half_rotary_dims}, true);
+        attn_mask = attn_mask.reshape({B, 1, 1, L0 + L1});
+
+        auto layer_id = static_cast<int>(attr_map["layer_id"]);
+        auto rotary_dims = static_cast<int>(attr_map["rotary_dims"]);
+        auto rope_type = static_cast<int>(attr_map["rope_type"]);
+        auto num_kv_heads = static_cast<int>(attr_map["num_kv_heads"]);
+        auto n_head = static_cast<int>(attr_map["n_head"]);
+        PlainTensor<RT> rope_q, rope_k, rope_v;
+        if (!qkv_combined) {
+            qkv_input.assert_dims({B, L1, H * S});
+            k_input.assert_dims({B, L1, H * S});
+            v_input.assert_dims({B, L1, H * S});
+
+            rope_q = qkv_input.reshape({B, L1, H, S});
+            rope_k = k_input.reshape({B, L1, H, S});
+            rope_v = v_input.reshape({B, L1, H, S});
+        } else if (num_kv_heads > 0) {
+            // 5D [B, L1, num_kv_heads * (gH + 2) * S]
+            // G*gH = n_head = H
+            gH = H / num_kv_heads;
+            auto qkv5d = qkv_input.reshape({B, L1, num_kv_heads, (gH + 2), S});
+            rope_q = qkv5d.slice(3, 0, gH);
+            rope_k = qkv5d.slice(3, gH, gH + 1);
+            rope_v = qkv5d.slice(3, gH + 1, gH + 2);
+        } else {
+            auto qkv_4d = qkv_input.reshape({B, L1, H, 3 * S});
+            rope_q = qkv_4d.slice(3, 0, S);
+            rope_k = qkv_4d.slice(3, S, 2 * S);
+            rope_v = qkv_4d.slice(3, 2 * S, 3 * S);
+        }
+
+        // kv cache is just a partial view of a big buffer
+
+        if (layer_id == -1) {
+            std::cout << "layer_id= " << layer_id << " B=" << B << " H=" << H << " len=" << L0 << "+" << L1
+                      << " S=" << S << " rotary_dims=" << rotary_dims << " rope_type=" << rope_type
+                      << " num_kv_heads=" << num_kv_heads << std::endl;
+        }
+
+        m_query_emb.resize({B, H, L1, S});
+
+        auto present_key = kv_cache.index({{layer_id * 2 + 0}, {0, B}, {}, {0, L0 + L1}, {}});
+        auto present_value = kv_cache.index({{layer_id * 2 + 1}, {0, B}, {}, {0, L0 + L1}, {}});
+
+        half_rotary_dims = rotary_dims / 2;
+
+        parallel_for3d(B, H, L1, [&](size_t b, size_t h, size_t p) {
+            auto p1 = p + L0;
+            size_t position_id = p1;
+            /*
+            // position derived from attention mask
+            // needs to skip where attention < 0
+            // but it's not required when padding at left
+            for (size_t i = 0; i < p1; i++) {
+                if (attn_mask.at({b, 0, 0, i}) >= 0.0f) {
+                    position_id++;
+                }
+            }
+            */
+            auto* present_k = &present_key.at({b, h, p1, 0});    // f32[B, H, L0+L1, 64]
+            auto* present_v = &present_value.at({b, h, p1, 0});  // f32[B, H, L0+L1, 64]
+            auto* q_embed = &m_query_emb.at({b, h, p, 0});
+            auto* cos = &cos_tab({position_id, 0});
+            auto* sin = &sin_tab({position_id, 0});
+            RT* q;
+            RT* k;
+            RT* v;
+
+            if (gH > 0) {
+                // multi-query: h = G*gH
+                size_t g = h / gH;
+                size_t hg = h % gH;
+                q = &rope_q.at({b, p, g, hg, 0});
+                k = &rope_k.at({b, p, g, 0, 0});
+                v = &rope_v.at({b, p, g, 0, 0});
+            } else {
+                q = &rope_q.at({b, p, h, 0});
+                k = &rope_k.at({b, p, h, 0});
+                v = &rope_v.at({b, p, h, 0});
+            }
+
+            size_t s = 0;
+            if (rope_type > 0) {
+                // gptneox RoPE
+                for (size_t i = 0; s < half_rotary_dims; i++, s++) {
+                    q_embed[s] = cos[i] * q[s] + sin[i] * (-q[s + half_rotary_dims]);
+                    present_k[s] = cos[i] * k[s] + sin[i] * (-k[s + half_rotary_dims]);
+                    present_v[s] = v[s];
+                }
+                for (size_t i = 0; s < rotary_dims; i++, s++) {
+                    q_embed[s] = cos[i] * q[s] + sin[i] * (q[i]);
+                    present_k[s] = cos[i] * k[s] + sin[i] * (k[i]);
+                    present_v[s] = v[s];
+                }
+            } else {
+                // gptj RoPE
+                present_k = &present_key.at({b, h, p1, 0});    // f32[B, H, L0+L1, 64]
+                present_v = &present_value.at({b, h, p1, 0});  // f32[B, H, L0+L1, 64]
+                q_embed = &m_query_emb.at({b, h, p, 0});
+
+                for (size_t i = 0; s < rotary_dims; i++, s += 2) {
+                    q_embed[s] = cos[i] * q[s] - sin[i] * q[s + 1];
+                    q_embed[s + 1] = cos[i] * q[s + 1] + sin[i] * q[s];
+
+                    present_k[s] = cos[i] * k[s] - sin[i] * k[s + 1];
+                    present_k[s + 1] = cos[i] * k[s + 1] + sin[i] * k[s];
+
+                    present_v[s] = v[s];
+                    present_v[s + 1] = v[s + 1];
+                }
+            }
+
+            for (; s < S; s++) {
+                q_embed[s] = q[s];
+                present_k[s] = k[s];
+                present_v[s] = v[s];
+            }
+        });
+
+        if (L1 > 1) {
+            // multi-token version
+            kernel(m_query_emb, present_key, present_value, {}, attn_mask, output_emb);
+        } else {
+            // 1-token version
+            kernel_1tok(m_query_emb, present_key, present_value, {}, attn_mask, output_emb, beam_table);
+        }
     }
 };
 

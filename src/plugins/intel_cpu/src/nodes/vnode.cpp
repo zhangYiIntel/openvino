@@ -5,8 +5,8 @@
 #include "vnode.h"
 
 #include <ngraph/opsets/opset1.hpp>
-#include <string>
 #include <shape_inference/shape_inference_internal_dyn.hpp>
+#include <string>
 #include <vector>
 
 #include "ie_parallel.hpp"
@@ -19,14 +19,18 @@ namespace intel_cpu {
 namespace node {
 
 struct VnodeExecutorFactory {
-    std::map<std::string, std::function<std::shared_ptr<vnode_executor>()>> vem;
+    std::map<
+        std::string,
+        std::function<std::shared_ptr<vnode_executor>(std::map<std::string, double>&, std::map<std::string, double>&)>>
+        vem;
 
     template <typename executor>
     void enroll() {
         std::string signature = executor::get_signature();
-        std::function<std::shared_ptr<vnode_executor>()> creator = []() {
-            return std::make_shared<executor>();
-        };
+        std::function<std::shared_ptr<vnode_executor>(std::map<std::string, double>&, std::map<std::string, double>&)>
+            creator = [](std::map<std::string, double>& symbol_name2value, std::map<std::string, double>& attr_map) {
+                return std::make_shared<executor>(symbol_name2value, attr_map);
+            };
         vem[signature] = creator;
     }
 
@@ -34,8 +38,8 @@ struct VnodeExecutorFactory {
         enroll<gptneox_attention_executor<KT_REF, float>>();
         enroll<gptneox_attention_executor<KT_REF, ov::bfloat16>>();
 
-        enroll<gptj_attention_executor<KT_REF, float>>();
-        enroll<gptj_attention_executor<KT_REF, ov::bfloat16>>();
+        // enroll<gptj_attention_executor<KT_REF, float>>();
+        // enroll<gptj_attention_executor<KT_REF, ov::bfloat16>>();
 
         enroll<falcon_attention_executor<KT_REF, float>>();
         enroll<falcon_attention_executor<KT_REF, ov::bfloat16>>();
@@ -45,31 +49,38 @@ struct VnodeExecutorFactory {
 
         enroll<llama_RMSNorm_executor<KT_REF, float>>();
 
-        #ifdef OV_CPU_WITH_MLAS
+#ifdef OV_CPU_WITH_MLAS
         enroll<gptneox_attention_executor<KT_MLAS, float>>();
         enroll<gptj_attention_executor<KT_MLAS, float>>();
         enroll<falcon_attention_executor<KT_MLAS, float>>();
         enroll<llama2_attention_executor<KT_MLAS, float>>();
-        #endif
-        #ifdef OV_CPU_WITH_LLMDNN
+        enroll<experimental_attention_executor<KT_MLAS, float>>();
+#endif
+#ifdef OV_CPU_WITH_LLMDNN
         enroll<gptneox_attention_executor<KT_LLMDNN, ov::bfloat16>>();
         enroll<gptj_attention_executor<KT_LLMDNN, ov::bfloat16>>();
         enroll<falcon_attention_executor<KT_LLMDNN, ov::bfloat16>>();
         enroll<llama2_attention_executor<KT_LLMDNN, ov::bfloat16>>();
-        #endif
+        enroll<experimental_attention_executor<KT_LLMDNN, ov::bfloat16>>();
+#endif
     }
 
-    std::shared_ptr<vnode_executor> create(std::string signature) {
+    std::shared_ptr<vnode_executor> create(std::string signature,
+                                           std::map<std::string, double>& symbol_name2value,
+                                           std::map<std::string, double>& attr_map) {
         auto it = vem.find(signature);
         if (it != vem.end()) {
-            auto exec = it->second();
+            auto exec = it->second(symbol_name2value, attr_map);
             exec->signature = signature;
             return exec;
         }
         return nullptr;
     }
 
-    std::shared_ptr<vnode_executor> create(std::string vtype, InferenceEngine::Precision prec_hint) {
+    std::shared_ptr<vnode_executor> create(std::string vtype,
+                                           InferenceEngine::Precision prec_hint,
+                                           std::map<std::string, double>& symbol_name2value,
+                                           std::map<std::string, double>& attr_map) {
         static int use_ref = std::getenv("USE_REF") ? atoi(std::getenv("USE_REF")) : 0;
         std::shared_ptr<vnode_executor> ret;
         std::string signature;
@@ -82,13 +93,13 @@ struct VnodeExecutorFactory {
             impl_type = "LLMDNN";
         }
         signature = vtype + "," + impl_type + "," + prec_hint.name();
-        if (ret = create(signature))
+        if (ret = create(signature, symbol_name2value, attr_map))
             return ret;
         signature = vtype + ",REF," + prec_hint.name();
-        if (ret = create(signature))
+        if (ret = create(signature, symbol_name2value, attr_map))
             return ret;
         signature = vtype + ",REF," + InferenceEngine::Precision(InferenceEngine::Precision::FP32).name();
-        if (ret = create(signature))
+        if (ret = create(signature, symbol_name2value, attr_map))
             return ret;
         return nullptr;
     }
@@ -115,7 +126,11 @@ VNode::VNode(const std::shared_ptr<ngraph::Node>& op, const GraphContext::CPtr c
 
     m_vnode = std::dynamic_pointer_cast<ov::intel_cpu::VNode>(op);
     m_vtype = m_vnode->get_vtype();
-    m_symbol_name2value = op->get_rt_info()["symbol_name2value"].as<decltype(m_symbol_name2value)>();
+    auto rt_info = op->get_rt_info();
+    if (rt_info.count("symbol_name2value"))
+        m_symbol_name2value = rt_info["symbol_name2value"].as<decltype(m_symbol_name2value)>();
+    if (rt_info.count("attr_map"))
+        m_attr_map = rt_info["attr_map"].as<decltype(m_attr_map)>();
 }
 
 void VNode::getSupportedDescriptors() {
@@ -147,10 +162,10 @@ size_t VnodeKey::hash() const {
     return seed;
 }
 
-bool VnodeKey::operator==(const VnodeKey &rhs) const {
+bool VnodeKey::operator==(const VnodeKey& rhs) const {
     return vtype == rhs.vtype && prec == rhs.prec;
 }
-} // namespace
+}  // namespace
 
 void VNode::initSupportedPrimitiveDescriptors() {
     static VnodeExecutorFactory factory;
@@ -164,7 +179,7 @@ void VNode::initSupportedPrimitiveDescriptors() {
     VnodeKey key{m_vtype, runtime_precision};
     auto cache = context->getParamsCache();
     auto result = cache->getOrCreate(key, [&](const VnodeKey& key) {
-        auto executor = factory.create(key.vtype, key.prec);
+        auto executor = factory.create(key.vtype, key.prec, m_symbol_name2value, m_attr_map);
         if (executor)
             std::cout << getName() << " created executor: " << executor->signature << std::endl;
         return executor;
@@ -188,7 +203,7 @@ void VNode::initSupportedPrimitiveDescriptors() {
 
 void VNode::execute(dnnl::stream strm) {
     if (m_executor) {
-        m_executor->exec(this, strm, m_symbol_name2value);
+        m_executor->exec(this, strm, m_symbol_name2value, m_attr_map);
     } else {
         IE_THROW() << errorPrefix << " Not implemented for " << m_vtype;
     }
@@ -196,7 +211,7 @@ void VNode::execute(dnnl::stream strm) {
 
 void VNode::executeDynamicImpl(dnnl::stream strm) {
     if (m_executor) {
-        m_executor->exec(this, strm, m_symbol_name2value);
+        m_executor->exec(this, strm, m_symbol_name2value, m_attr_map);
     } else {
         IE_THROW() << errorPrefix << " Not implemented for " << m_vtype;
     }

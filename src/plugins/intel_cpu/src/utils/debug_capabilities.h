@@ -205,9 +205,9 @@ struct EnforceInferPrcDebug {
         if (nodeTypes.size() == 0)
             return true;
         auto idx = nodeTypes.find(type + ",");
-        if (idx != std::string::npos) {
+        if (idx != std::string::npos || nodeTypes == "?") {
             // negative pattern
-            if (idx > 0 && nodeTypes[idx-1] == '-')
+            if (nodeTypes != "?" && idx > 0 && nodeTypes[idx-1] == '-')
                 return false;
             if (count < count_limit) {
                 std::cout << " infer precision enforced: [" << count << "/" << count_limit << "] : " << type << " " << name << std::endl;

@@ -136,6 +136,16 @@ struct PlainTensor : public PlainTensorBase {
         with_storage = _with_storage;
     }
 
+    // copy construct (always not take ownership)
+    PlainTensor<DT> operator=(const PlainTensor<DT>& other) {
+        IE_ASSERT(!with_storage);
+        memcpy(&m_strides, &other.m_strides, sizeof(m_strides));
+        memcpy(&m_dims, &other.m_dims, sizeof(m_dims));
+        m_rank = other.m_rank;
+        m_ptr = other.m_ptr;
+        return *this;
+    }
+
     ~PlainTensor() {
         if (with_storage && m_capacity > 0) {
             ::free(m_ptr);
@@ -377,13 +387,26 @@ struct PlainTensor : public PlainTensorBase {
         return *this;
     }
 
-    DT& operator()(const std::initializer_list<size_t>& index) const {
-        return at(index);
+    DT& operator()(const std::initializer_list<size_t>& index, bool allow_broadcast = false) const {
+        return at(index, allow_broadcast);
     }
 
-    void assert_dims(const std::initializer_list<size_t>& expect_dims) const {
-        if (m_rank != expect_dims.size() ||
-            !std::equal(expect_dims.begin(), expect_dims.end(), m_dims)) {
+    void assert_dims(const std::initializer_list<size_t>& expect_dims, bool special_zero = false) const {
+        bool match = false;
+        if (m_rank == expect_dims.size()) {
+            match = true;
+            auto it = expect_dims.begin();
+            for (size_t i = 0; i < m_rank; ++i, ++it) {
+                if (*it == 0 && special_zero)
+                    continue;
+                if (*it != m_dims[i]) {
+                    match = false;
+                    break;
+                }
+            }
+        }
+
+        if (!match) {
             std::stringstream ss;
             ss << " m_dims=[";
             for (size_t i = 0; i < m_rank; i++)
@@ -392,7 +415,7 @@ struct PlainTensor : public PlainTensorBase {
             for (auto& i : expect_dims)
                 ss << i << ",";
             ss << "]";
-            //asm("int3");
+            // asm("int3");
             IE_ASSERT(false) << ss.str();
         }
     }

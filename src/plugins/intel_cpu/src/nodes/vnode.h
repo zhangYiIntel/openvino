@@ -41,6 +41,7 @@ private:
     std::shared_ptr<vnode_executor> m_executor;
     ov::element::Type inType;
     std::map<std::string, double> m_symbol_name2value;
+    std::map<std::string, double> m_attr_map;
 };
 
 }   // namespace node

@@ -11,6 +11,7 @@
 #include <openvino/pass/pattern/op/wrap_type.hpp>
 #include <transformations/utils/utils.hpp>
 
+#include "ie_common.h"
 #include "itt.hpp"
 #include "ov_ops/type_relaxed.hpp"
 #include "transformations/cpu_opset/common/op/vnode.hpp"
@@ -62,6 +63,8 @@ class VNodeMatcher : public ngraph::pass::MatcherPass {
 public:
     OPENVINO_RTTI("VNodeMatcher", "0");
 
+    int vnode_id = 0;
+
     VNodeMatcher(std::shared_ptr<VNodePattern> pattern) {
         MATCHER_SCOPE(VNodeMatcher);
 #ifdef CPU_DEBUG_CAPS
@@ -82,7 +85,7 @@ public:
         }
         auto pattern_values = pattern->get(fake_inputs);
 
-        matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+        matcher_pass_callback callback = [=, this](ngraph::pattern::Matcher& m) {
             auto& pvmap = m.get_pattern_value_map();
             // auto node_src = pvmap.at(select.node).get_node_shared_ptr();
             auto root_value = m.get_match_value();
@@ -125,9 +128,79 @@ public:
                 auto name = out.get_node_shared_ptr()->get_friendly_name();
                 vnode->output(i).set_names({name});
             }
+
+            vnode->set_friendly_name(std::string("VNode_") + std::to_string(this->vnode_id));
+
+            this->vnode_id++;
             return true;
         };
         auto m = std::make_shared<ngraph::pattern::Matcher>(pattern_values[0], matcher_name);
+        this->register_matcher(m, callback);
+    }
+};
+
+static std::string get_op_versioned_type_name(const std::shared_ptr<Node>& op) {
+    const auto& type_info = op->get_type_info();
+    auto version_info = std::string(type_info.get_version());
+    return version_info + "::" + type_info.name;
+}
+
+// collect attributes which (togather with vtype) defines
+// the expected behaviour of VNode
+
+template <typename T>
+class ScalarAttributeCollector : public ngraph::AttributeVisitor {
+public:
+    std::map<std::string, T> attrs;
+
+    ScalarAttributeCollector() {}
+
+    void on_adapter(const std::string& name, ngraph::ValueAccessor<void>& adapter) override {
+        if (auto a = ov::as_type<ov::AttributeAdapter<int>>(&adapter)) {
+            attrs[name] = static_cast<T>(a->get());
+        } else if (auto a = ov::as_type<ov::AttributeAdapter<float>>(&adapter)) {
+            attrs[name] = static_cast<T>(a->get());
+        } else {
+            IE_ASSERT(false) << "ScalarAttributeCollector: unsupported data type for attribute: " << name;
+        }
+    }
+};
+
+class VNodeFromExtension : public ngraph::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("VNodeFromExtension", "0");
+    VNodeFromExtension(std::string target_versioned_type_name) {
+        MATCHER_SCOPE(VNodeFromExtension);
+        auto pnode = std::make_shared<GenericPattern>();
+        pnode->set_predicate([=](const Output<Node>& value) {
+            auto op = value.get_node_shared_ptr();
+            return get_op_versioned_type_name(op) == target_versioned_type_name;
+        });
+
+        matcher_pass_callback callback = [=](ngraph::pattern::Matcher& m) {
+            auto root = m.get_match_root();
+            auto vnode =
+                std::make_shared<VNode>(root->input_values(), root->outputs(), get_op_versioned_type_name(root));
+            // vnode->get_rt_info()["symbol_name2value"] = symbol_name2value;
+            ngraph::replace_node(root, vnode);
+
+            // collect attributes as map and stores it in VNode's rt_info
+            {
+                ScalarAttributeCollector<double> visitor;
+                if (!root->visit_attributes(visitor)) {
+                    IE_ASSERT(false) << "visit_attributes failed for node: " << root->get_friendly_name();
+                }
+                vnode->get_rt_info()["attr_map"] = visitor.attrs;
+            }
+
+            // for (size_t i = 0; i < root->get_output_size(); i++) {
+            //     auto name = out.get_node_shared_ptr()->get_friendly_name();
+            //     vnode->output(i).set_names({name});
+            // }
+            // std::cout << root << std::endl;
+            return true;
+        };
+        auto m = std::make_shared<ngraph::pattern::Matcher>(pnode, matcher_name);
         this->register_matcher(m, callback);
     }
 };
@@ -141,6 +214,7 @@ VNodeFusion::VNodeFusion(const ov::element::Type inferencePrecision) {
     MATCHER_SCOPE(VNodeFusion);
 
     add_matcher<EliminateMaximum>();
+    add_matcher<VNodeFromExtension>("llm::experimental::MultiHeadAttention");
 
     // enable attention fusion only when proper backend support is ready
     bool enable_attn_fusion = false;
