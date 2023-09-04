@@ -30,6 +30,7 @@ impl_desc_type parse_impl_name(std::string impl_desc_name) {
         SEARCH_WORD(gemm);
     SEARCH_WORD(blas);
     SEARCH_WORD(mlas);
+    SEARCH_WORD(llmdnn);
     SEARCH_WORD(sse42);
     SEARCH_WORD_2(sse41, sse42);
     SEARCH_WORD(avx2);
@@ -120,6 +121,7 @@ const char* impl_type_to_string(impl_desc_type type) {
     CASE(gemm_acl);
     CASE(winograd_acl);
     CASE(gemm_mlas);
+    CASE(gemm_llmdnn);
 
 #undef CASE
     return "unknown";

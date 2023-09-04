@@ -277,3 +277,30 @@ if(ENABLE_INTEL_GNA)
         list(APPEND PATH_VARS "GNA_PATH")
     endif()
 endif()
+
+if (ENABLE_CPU_EXTENSIONS)
+    reset_deps_cache(cpu_extensions_DIR)
+
+    if(LINUX AND X86_64)
+        set(IE_PATH_TO_DEPS "https://github.com/luo-cheng2021/cpu_extensions/releases/download/20230725")
+        RESOLVE_DEPENDENCY(CPU_EXTENSIONS
+                ARCHIVE "cpu_extensions_20230830_lin.tgz"
+                TARGET_PATH "${TEMP}/cpu_extensions"
+                ENVIRONMENT "cpu_extensions_DIR"
+                SHA256 "2343881e044783ba5c8bc00f5025f5324a4f2658a7c1f39f4264b3e8f162828f"
+                USE_NEW_LOCATION TRUE)
+        unset(IE_PATH_TO_DEPS)
+    else()
+        message(FATAL_ERROR "cpu_extensions is not available on current platform (OS = ${CMAKE_SYSTEM_NAME}, glibc ${OV_GLIBC_VERSION})")
+    endif()
+
+    set(CPU_EXTENSIONS_PATH "${CPU_EXTENSIONS}/lib/cmake/cpu_extensions")
+
+    update_deps_cache(cpu_extensions_DIR "${CPU_EXTENSIONS_PATH}" "Path to cpu_extensions package folder")
+    debug_message(STATUS "cpu_extensions=" ${CPU_EXTENSIONS})
+    if(NOT BUILD_SHARED_LIBS)
+        list(APPEND PATH_VARS "CPU_EXTENSIONS_PATH")
+    endif()
+else()
+    reset_deps_cache(cpu_extensions_DIR)
+endif()
