@@ -619,7 +619,7 @@ struct MHA_kernel {
         });
     }
 };
-
+#define OV_CPU_WITH_MLAS
 #ifdef OV_CPU_WITH_MLAS
 template <>
 struct MHA_kernel<KT_MLAS, float> {
@@ -768,7 +768,9 @@ struct MHA_kernel<KT_MLAS, float> {
 };
 #endif
 
+#ifdef __AVX512F__
 #define ENABLE_AVX512_OPT
+#endif
 
 // 2nd token case : only 1 token in query
 template <typename RT>
@@ -918,6 +920,19 @@ struct MHA_1Token {
 #endif
     }
 
+#ifdef __AVX2__
+inline void hsum(__m256& x) {
+    __m256 y;                             // x:  0 1 2 3   4 5 6 7
+    y = _mm256_permute_ps(x, 0x39);       // y:  1 2 3 0   5 6 7 4
+    x = _mm256_add_ps(x, y);              // X:  01 12 23 30  45 56 67 74
+    y = _mm256_permute_ps(x, 0x4e);       // y:  23 30 01 12  67 74 45 56
+    x = _mm256_add_ps(x, y);              // x: 0123 x x x   4567 x x x
+    y = _mm256_permute2f128_ps(x, x, 1);  // y: 4567 x x x  0123 x x x
+    x = _mm256_add_ps(x, y);              // x: 01234567 x x x x x x x
+}
+#endif
+
+
     template<typename T>
     float dot_product_opt(T* a, T* b, size_t n) {
         size_t i = 0;
@@ -930,6 +945,14 @@ struct MHA_1Token {
             vsum = _mm512_fmadd_ps(va, vb, vsum);
         }
         sum = _mm512_reduce_add_ps(vsum);
+#elif defined(__AVX2__)
+        auto vsum = _mm256_set1_ps(0.0f);
+        for(; i < n - 8; i += 8) {
+            auto va = _mm256_loadu_ps(a + i);
+            auto vb = _mm256_loadu_ps(b + i);
+            vsum = _mm256_fmadd_ps(va, vb, vsum);
+        }
+        sum = _mm256_cvtss_f32(v_sum);
 #endif
         for (; i < n; i++) {
             sum += a[i] * b[i];
@@ -947,6 +970,14 @@ struct MHA_1Token {
             auto v_out = mm512_uni_loadu_ps(out + i);
             v_out = _mm512_fmadd_ps(attn_w_vec_fp32, v_value, v_out);
             _mm512_storeu_ps(out + i, v_out);
+        }
+#elif defined(__AVX2__)
+        auto attn_w_vec_fp32 = _mm256_set1_ps(weight);
+        for(; i <= S - 8; i += 8) {
+            auto v_value = _mm256_loadu_ps(v + i);
+            auto v_out = _mm256_loadu_ps(out + i);
+            v_out = _mm256_fmadd_ps(attn_w_vec_fp32, v_value, v_out);
+            _mm256_storeu_ps(out + i, v_out);
         }
 #endif
         for (; i < S; i++) {
