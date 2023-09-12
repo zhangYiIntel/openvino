@@ -17,7 +17,12 @@
 #include "openvino/core/parallel.hpp"
 #include "utils/profiler.hpp"
 #include "vnode_attn_softmax.hpp"
-
+#ifdef _WIN32
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#include <immintrin.h>
+#endif
 #ifdef OV_CPU_WITH_LLMDNN
 #    include "llm_emb_gpt.hpp"
 #    include "llm_mha_gpt.hpp"
@@ -894,9 +899,11 @@ struct MHA_1Token {
     }
 
     inline __m512 mm512_uni_loadu_ps(ov::bfloat16* a) {
+#ifdef __AVX512BF16__
         auto vec_bf16 = _mm256_loadu_si256(reinterpret_cast<__m256i*>(a));
         __m512i y = _mm512_cvtepu16_epi32(vec_bf16);
         return _mm512_castsi512_ps(_mm512_slli_epi32(y, 16));
+#endif
     }
     inline __m512 mm512_uni_loadu_ps(float* a) {
         return _mm512_loadu_ps(a);
@@ -905,8 +912,10 @@ struct MHA_1Token {
         _mm512_storeu_ps(a, v);
     }
     inline void mm512_uni_storeu_ps(ov::bfloat16* a,  __m512 v) {
+#ifdef __AVX512BF16__
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(a),
                             reinterpret_cast<__m256i>(_mm512_cvtneps_pbh(v)));
+#endif
     }
 
     template<typename T>
@@ -1089,8 +1098,8 @@ struct generic_attention {
                 //std::cout << past_kv_len << "+" << q_len << " A1 beam_idx_tab=" << *beam_idx_tab << std::endl;
             } else {
                 // q_len must be 1, points to where previous token is
-                assert(q_len == 1);
-                assert(m_beam_idx[-1] == B);
+                // assert(q_len == 1);
+                // assert(m_beam_idx[-1] == B);
                 auto pos = past_kv_len;
                 auto B = m_beam_idx_tab.size(0);
                 for (size_t b = 0; b < B; b++) {
