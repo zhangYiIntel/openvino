@@ -921,6 +921,36 @@ struct MHA_1Token {
     }
 
 #ifdef __AVX2__
+    inline __m256 mm256_uni_loadu_ps(float* a) {
+        return _mm256_loadu_ps(a);
+    }
+    inline void mm256_uni_storeu_ps(float* a,  __m256 v) {
+        _mm256_storeu_ps(a, v);
+    }
+
+    inline __m256 mm256_uni_loadu_ps(ov::bfloat16* a) {
+        auto vec_bf16 = _mm_loadu_si128(reinterpret_cast<__m128i*>(a));
+        auto o = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(vec_bf16), 16));
+        return o;
+    }
+
+    inline void mm256_uni_storeu_ps(ov::bfloat16* a,  __m256 v) {
+        __m256i iv = _mm256_castps_si256(v);
+        __m256i nan = _mm256_set1_epi32(0xffff);
+        __m256i mask = _mm256_castps_si256(_mm256_cmp_ps(v, v, _CMP_ORD_Q));
+        __m256i ones = _mm256_set1_epi32(0x00010000);;
+        // uint32_t int_i =  input & 1;
+        auto int_i = _mm256_and_si256(iv, ones);
+        int_i = _mm256_srli_epi32(int_i, 1);
+        int_i = _mm256_srli_epi32(_mm256_add_epi32(int_i, iv), 16);
+        int_i = _mm256_blendv_epi8(nan, int_i, mask);
+        int_i = _mm256_packus_epi32(int_i, int_i);
+        int_i = _mm256_permute4x64_epi64(int_i, 0xd8);
+        __m128i bf16_o = _mm256_extractf128_si256(int_i, 1);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(a),
+                    reinterpret_cast<__m128i>(bf16_o));
+    }
+
 inline void hsum(__m256& x) {
     __m256 y;                             // x:  0 1 2 3   4 5 6 7
     y = _mm256_permute_ps(x, 0x39);       // y:  1 2 3 0   5 6 7 4
@@ -947,12 +977,13 @@ inline void hsum(__m256& x) {
         sum = _mm512_reduce_add_ps(vsum);
 #elif defined(__AVX2__)
         auto vsum = _mm256_set1_ps(0.0f);
-        for(; i < n - 8; i += 8) {
-            auto va = _mm256_loadu_ps(a + i);
-            auto vb = _mm256_loadu_ps(b + i);
+        for (; i <= n - 8; i += 8) {
+            auto va = mm256_uni_loadu_ps(a + i);
+            auto vb = mm256_uni_loadu_ps(b + i);
             vsum = _mm256_fmadd_ps(va, vb, vsum);
         }
-        sum = _mm256_cvtss_f32(v_sum);
+        hsum(vsum);
+        sum = _mm256_cvtss_f32(vsum);
 #endif
         for (; i < n; i++) {
             sum += a[i] * b[i];
@@ -973,11 +1004,11 @@ inline void hsum(__m256& x) {
         }
 #elif defined(__AVX2__)
         auto attn_w_vec_fp32 = _mm256_set1_ps(weight);
-        for(; i <= S - 8; i += 8) {
-            auto v_value = _mm256_loadu_ps(v + i);
-            auto v_out = _mm256_loadu_ps(out + i);
+        for (; i <= S - 8; i += 8) {
+            auto v_value = mm256_uni_loadu_ps(v + i);
+            auto v_out = mm256_uni_loadu_ps(out + i);
             v_out = _mm256_fmadd_ps(attn_w_vec_fp32, v_value, v_out);
-            _mm256_storeu_ps(out + i, v_out);
+            mm256_uni_storeu_ps(out + i, v_out);
         }
 #endif
         for (; i < S; i++) {
@@ -1000,6 +1031,17 @@ inline void hsum(__m256& x) {
             }
             // save to bf16
             mm512_uni_storeu_ps(dst + i, result_vec_fp32);
+        }
+#elif defined(__AVX2__)
+        for (; i <= S - 8; i += 8) {
+            auto* src = temp + i;
+            auto result_vec_fp32 = _mm256_set1_ps(0.0f);
+            for (size_t m = 0; m < M; m++) {
+                auto o_vec_fp32 = mm256_uni_loadu_ps(src);
+                result_vec_fp32 = _mm256_add_ps(result_vec_fp32, o_vec_fp32);
+                src += temp_stride;
+            }
+            mm256_uni_storeu_ps(dst + i, result_vec_fp32);
         }
 #endif
         for (; i <S; i++) {

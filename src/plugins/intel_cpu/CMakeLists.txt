@@ -155,6 +155,13 @@ cross_compiled_file(${TARGET_NAME}
         NAME        rms_norm
         NAMESPACE   InferenceEngine::Extensions::Cpu::XARCH
 )
+
+# for avx2 compilation
+set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
+        "-mavx2")
+set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
+        "-mfma")
+
 check_cxx_source_compiles("#include <immintrin.h>\nint main() {auto v_scale = _mm512_set1_ps(0.0f);return 0;}" ENABLE_AVX512)
 if(ENABLE_AVX512)
 set_property(SOURCE src/nodes/vnode.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
