@@ -485,6 +485,11 @@ struct MHASingleToken {
         auto q_len = query.size(2);
         auto S = query.size(3);
         auto kv_len = present_key.size(2);
+        auto h_group_num = present_key.size(1);
+        size_t h_each_group_len = 0;
+        if (h_group_num != H) {
+            h_each_group_len = H / h_group_num;
+        }
 
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(S);
@@ -616,6 +621,11 @@ struct ScaledDotProductAttention::AttentionExecutor : public ScaledDotProductAtt
             // [B, H, L0, S]
             past_k_output.reset(outputs[1]);
             past_v_output.reset(outputs[2]);
+            if (config.config.is_lbhs_input) {
+                // [L, B, H, S] -> [B, H, L, S]
+                past_k_output = past_k_output.permute({1, 2, 0, 3});
+                past_v_output = past_v_output.permute({1, 2, 0, 3});
+            }
             parallel_for3d(B, Hk, L1, [&](size_t b, size_t h, size_t m) {
                 std::memcpy(&past_k_output.at({b, h, m + L0, 0}),
                             &k_input.at({b, h, m, 0}),
@@ -674,12 +684,18 @@ struct ScaledDotProductAttention::AttentionExecutor : public ScaledDotProductAtt
         }
 
         // q: [B, H, L1, S]
-        B = q_input.size(0);
-        H = q_input.size(1);
-        L1 = q_input.size(2);
+        B = config.config.is_lbhs_input ? q_input.size(1) : q_input.size(0);
+        H = config.config.is_lbhs_input ? q_input.size(2) : q_input.size(1);
+        L1 = config.config.is_lbhs_input ? q_input.size(0) : q_input.size(2);
         S = q_input.size(-1);
 
         PlainTensor<T> present_key, present_value;
+        if (config.config.is_lbhs_input) {
+            q_input = q_input.permute({1, 2, 0, 3});
+            k_input = k_input.permute({1, 2, 0, 3});
+            v_input = v_input.permute({1, 2, 0, 3});
+        }
+
         concat_pastkv(inputs, outputs, k_input, v_input, present_key, present_value);
 
         ov::intel_cpu::PlainTensor<T> output_emb(outputs[0]);
@@ -779,17 +795,19 @@ void ScaledDotProductAttention::initSupportedPrimitiveDescriptors() {
     }
 
     if (m_config.config.fuse_concat) {
-        ArbitraryOrderDescCreator cabdDescCreator({2, 0, 1, 3});
+        ArbitraryOrderDescCreator fuseConcatDescCreator({2, 0, 1, 3});
+        if (m_config.config.is_lbhs_input)
+            fuseConcatDescCreator = ArbitraryOrderDescCreator({0, 1, 2, 3});
 
-        config.inConfs[orginSDPInputNumber + 0].setMemDesc(cabdDescCreator.createSharedDesc(
+        config.inConfs[orginSDPInputNumber + 0].setMemDesc(fuseConcatDescCreator.createSharedDesc(
             rtPrecision, getInputShapeAtPort(orginSDPInputNumber + 0)));
-        config.inConfs[orginSDPInputNumber + 1].setMemDesc(cabdDescCreator.createSharedDesc(
+        config.inConfs[orginSDPInputNumber + 1].setMemDesc(fuseConcatDescCreator.createSharedDesc(
             rtPrecision, getInputShapeAtPort(orginSDPInputNumber + 1)));
 
-        config.outConfs[1].setMemDesc(cabdDescCreator.createSharedDesc(
+        config.outConfs[1].setMemDesc(fuseConcatDescCreator.createSharedDesc(
             rtPrecision, getOutputShapeAtPort(1)));
         config.outConfs[1].inPlace(orginSDPInputNumber + 0);
-        config.outConfs[2].setMemDesc(cabdDescCreator.createSharedDesc(
+        config.outConfs[2].setMemDesc(fuseConcatDescCreator.createSharedDesc(
             rtPrecision, getOutputShapeAtPort(2)));
         config.outConfs[2].inPlace(orginSDPInputNumber + 1);
     }

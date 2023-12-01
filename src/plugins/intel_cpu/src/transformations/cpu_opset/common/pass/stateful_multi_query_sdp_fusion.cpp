@@ -48,7 +48,8 @@ StatefulMultiQuerySDPFusion::StatefulMultiQuerySDPFusion() {
     auto transpose_v = wrap_type<opset6::Transpose>({reshape1_v, order_v});
 
     auto order_q = wrap_type<opset6::Constant>();
-    auto transpose_q = wrap_type<opset6::Transpose>({any_input(), order_q});
+    auto q_input = any_input();
+    auto transpose_q = wrap_type<opset6::Transpose>({q_input, order_q});
     auto sdp0 = wrap_type<opset13::ScaledDotProductAttention>({transpose_q, transpose_k, transpose_v});
     auto sdp1 = wrap_type<opset13::ScaledDotProductAttention>({transpose_q, transpose_k, transpose_v, any_input()});
     auto sdp2 = wrap_type<opset13::ScaledDotProductAttention>({transpose_q, transpose_k, transpose_v, any_input(), any_input()});
@@ -103,8 +104,8 @@ StatefulMultiQuerySDPFusion::StatefulMultiQuerySDPFusion() {
             return false;
         std::cout << "2Match Multi Query|Find Assign|" << root->get_friendly_name() << std::endl;
         auto args = sdp_node->input_values();
-        std::cout << "args0 shape|" << pattern_map.at(transpose_q).get_node_shared_ptr()->input_value(0).get_partial_shape() << std::endl;
-        args[0] = pattern_map.at(transpose_q).get_node_shared_ptr()->input_value(0);
+        std::cout << "args0 shape|" << pattern_map.at(q_input).get_node_shared_ptr()->output(0).get_partial_shape() << std::endl;
+        args[0] = pattern_map.at(q_input).get_node_shared_ptr()->output(0);
         args[1] = concat_k_node->input_value(1);
         args[2] = concat_v_node->input_value(1);
         std::cout << "-2|" << past_k_node->output(0).get_partial_shape() << std::endl;

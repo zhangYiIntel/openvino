@@ -11,7 +11,7 @@ namespace intel_cpu {
 class StatefulMultiQuerySDPFusion : public ov::pass::MatcherPass {
 public:
     OPENVINO_RTTI("StatefulMultiQuerySDPFusion", "0");
-    StatefulSDPFusion();
+    StatefulMultiQuerySDPFusion();
 };
 
 }   // namespace intel_cpu
