@@ -31,10 +31,20 @@
 #include "kernels/scaled_attn/mha_single_token.hpp"
 #include "kernels/scaled_attn/attn_memcpy.hpp"
 
+#include <cpu/x64/brgemm/brgemm.hpp>
+#include <cpu/x64/matmul/brgemm_matmul_copy_utils.hpp>
+#include <cpu/x64/matmul/brgemm_matmul_utils.hpp>
+#include <cpu/x64/amx_tile_configure.hpp>
+#include <cstddef>
+
+
 using namespace InferenceEngine;
 using namespace InferenceEngine::Extensions::Cpu::XARCH;
 using namespace dnnl::impl::cpu::x64;
 
+using namespace dnnl::impl;
+using namespace dnnl::impl::cpu::x64::matmul;
+#define THROW_ERROR IE_THROW() << "oneDNN 1st token executor with name Init Failure'" << "' "
 namespace ov {
 namespace intel_cpu {
 namespace node {
@@ -184,6 +194,244 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
     using tag = dnnl::memory::format_tag;
     using dt = dnnl::memory::data_type;
 
+    struct brgemmExecutor {
+        brgemmExecutor(size_t M, size_t K, size_t N, size_t lda, size_t ldb, size_t ldc) {
+            lda = lda;
+            ldb = ldb;
+            ldc = ldc;
+            // blocking M
+            M = M;
+            const size_t matmulOptimalM = 32;
+            M_blk = matmulOptimalM;
+            M_tail = M % M_blk;
+            ov::element::Type brg0Prc = ov::element::bf16;
+            brg0VnniFactor = 4 / brg0Prc.size();
+
+            // blocing N
+            N = N;
+            N_blk = 32;
+            N_tail = N % N_blk;
+
+            // blocing N
+            K = K;
+            K_blk = 32;
+            K_tail = K % K_blk;
+            size_t brg0BaseIdx = std::numeric_limits<size_t>::max();
+            for (size_t m = 0; m < 2; m++) {
+                for (size_t k = 0; k < 2; k++) {
+                    for (size_t n = 0; n < 2; n++) {
+                        auto& brgemmCtx = brgCtxs0[getBrgIdx(m, k, n)];
+
+                        auto M_ = m ? M_tail : M < M_blk ? 0 : M_blk;
+                        auto N_ = n ? N_tail : N - N_tail;
+                        auto K_ = k ? K_tail : K - K_tail;
+                        auto beta = k && brgCtxs0[getBrgIdx(m, 0, n)].K != 0 ? 1.0f : 0.0f;
+
+                        brgemmCtx.M = M_;
+                        brgemmCtx.N = N_;
+                        brgemmCtx.K = K_;
+                        brgemmCtx.LDA = lda;
+                        brgemmCtx.LDB = rnd_up(ldb, N_blk);  // ???
+                        brgemmCtx.LDC = ldc;
+                        brgemmCtx.dt_in0 =
+                            static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(brg0Prc));
+                        brgemmCtx.dt_in1 =
+                            static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(brg0Prc));
+                        brgemmCtx.beta = beta;
+
+                        // don't create brgemm kernels for empty tiles
+                        if (M_ != 0 && K_ != 0 && N_ != 0) {
+                            if (brg0BaseIdx == std::numeric_limits<size_t>::max())
+                                brg0BaseIdx = getBrgIdx(m, k, n);
+                            init_brgemm(brgemmCtx, brgKernels[getBrgIdx(m, k, n)], true);
+                        }
+                    }
+                }
+            }
+
+            auto& brgemmCtx0 = brgCtxs0[brg0BaseIdx];
+
+            // TODO: matrix A copy should be performed to enable AMX matmuls for arbitrary shapes
+            if (brgemmCtx0.is_with_amx && K0_tail) {
+                init_brgemm_copy_a(brgCopyAKernel, K, K_blk, K_tail, brgemmCtx0.LDA, brgemmCtx0.dt_in0);
+            }
+
+            if (brgemmCtx0.is_with_amx || brg0Prc == ov::element::i8 || brg0Prc == ov::element::bf16) {
+                init_brgemm_copy_b(brgCopyBKernel, N, N_blk, N_tail, brgemmCtx0.LDB, brgemmCtx0.K,
+                    brgemmCtx0.is_with_amx, brgemmCtx0.dt_in0, brgemmCtx0.dt_in1);
+            }
+        }
+        size_t M = 0, M_blk = 0, M_tail = 0;
+        size_t K = 0, K_blk = 0, K_tail = 0, N = 0, N_blk = 0, N_tail = 0;
+        size_t lda = 0, ldb = 0, ldc = 0;
+        size_t brg0VnniFactor = 0;
+        static constexpr size_t MHA_BRGEMM_KERNELS_NUM = 8;
+        struct brgemmCtx {
+            size_t M = 0, N = 0, K = 0, LDA = 0, LDB = 0, LDC = 0;
+            dnnl_data_type_t dt_in0 = dnnl_data_type_undef;
+            dnnl_data_type_t dt_in1 = dnnl_data_type_undef;
+            char palette[64];
+            bool is_with_amx = false;
+            bool is_with_comp = false;
+            bool transpose_a = false;
+            bool transpose_b = false;
+            float beta = 0.0f;
+        };
+        brgemmCtx brgCtxs0[MHA_BRGEMM_KERNELS_NUM];
+        std::unique_ptr<dnnl::impl::cpu::x64::brgemm_kernel_t> brgKernels[MHA_BRGEMM_KERNELS_NUM];
+        std::unique_ptr<dnnl::impl::cpu::x64::matmul::jit_brgemm_matmul_copy_a_t> brgCopyAKernel;
+        std::unique_ptr<dnnl::impl::cpu::x64::matmul::jit_brgemm_matmul_copy_b_t> brgCopyBKernel;
+        size_t getBrgIdx(size_t mIdx, size_t kIdx, size_t nIdx) {
+            return mIdx * 4 + kIdx * 2 + nIdx;
+        }
+        void init_brgemm(brgemmCtx& ctx,
+                         std::unique_ptr<dnnl::impl::cpu::x64::brgemm_kernel_t>& brgKernel,
+                         bool use_amx) {
+#ifdef OPENVINO_ARCH_X86_64
+            brgemm_t brgDesc;
+
+            const bool is_int8 =
+                one_of(ctx.dt_in0, data_type::u8, data_type::s8) && one_of(ctx.dt_in1, data_type::u8, data_type::s8);
+            auto isa = use_amx                                     ? isa_undef
+                       : ctx.dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16
+                                                                   : (is_int8 ? avx512_core_vnni : avx512_core);
+            auto status = brgemm_desc_init(&brgDesc,
+                                           isa,
+                                           brgemm_addr,
+                                           ctx.dt_in0,
+                                           ctx.dt_in1,
+                                           ctx.transpose_a,
+                                           ctx.transpose_b,
+                                           brgemm_row_major,
+                                           1.f,
+                                           ctx.beta,
+                                           ctx.LDA,
+                                           ctx.LDB,
+                                           ctx.LDC,
+                                           ctx.M,
+                                           ctx.N,
+                                           ctx.K,
+                                           nullptr);
+            if (status != dnnl_success) {
+                THROW_ERROR << "cannot be executed due to invalid brgconv params";
+            }
+
+            ctx.is_with_amx = use_amx;
+            status = brgemm_init_tiles(brgDesc, ctx.palette);
+            if (use_amx) {
+                amx_tile_configure(ctx.palette);
+            }
+
+            ctx.is_with_comp = ctx.dt_in0 == dnnl_data_type_t::dnnl_s8 && !ctx.is_with_amx;
+
+            brgemm_kernel_t* brgKernel_ = nullptr;
+            status = brgemm_kernel_create(&brgKernel_, brgDesc);
+            if (status != dnnl_success) {
+                THROW_ERROR << "cannot be executed due to invalid brgconv params";
+            }
+            brgKernel.reset(brgKernel_);
+#else
+            THROW_ERROR << "is not supported on non-x86_64";
+#endif  // OPENVINO_ARCH_X86_64
+        }
+        void init_brgemm_copy_a(
+            std::unique_ptr<dnnl::impl::cpu::x64::matmul::jit_brgemm_matmul_copy_a_t>& brgCopyKernel,
+            size_t K,
+            size_t K_blk,
+            size_t K_tail,
+            size_t LDA,
+            dnnl_data_type_t dt_in0,
+            bool transpose = false) {
+            brgemm_matmul_conf_t brgCopyKernelConf;
+            brgCopyKernelConf.src_tag = dnnl_abcd;
+            brgCopyKernelConf.K = K;
+            brgCopyKernelConf.K_tail = K_tail;
+            brgCopyKernelConf.K_blk = K_blk;
+            brgCopyKernelConf.use_buffer_a_tail_only = false;
+            brgCopyKernelConf.LDA = LDA;
+            brgCopyKernelConf.has_zero_point_b = false;
+            brgCopyKernelConf.s8s8_compensation_required = false;
+            brgCopyKernelConf.wei_zp_type = dnnl::impl::cpu::x64::none;
+            brgCopyKernelConf.src_zp_type = dnnl::impl::cpu::x64::none;
+            brgCopyKernelConf.src_dt = dt_in0;
+            brgCopyKernelConf.a_dt_sz =
+                DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(dt_in0));
+            brgCopyKernelConf.transposed_A = transpose;
+
+#if defined(OPENVINO_ARCH_X86_64)
+            create_brgemm_matmul_copy_a(brgCopyKernel, &brgCopyKernelConf);
+#endif  // OPENVINO_ARCH_X86_64
+        }
+
+        void init_brgemm_copy_b(
+            std::unique_ptr<dnnl::impl::cpu::x64::matmul::jit_brgemm_matmul_copy_b_t>& brgCopyKernel,
+            size_t N,
+            size_t N_blk,
+            size_t N_tail,
+            size_t LDB,
+            size_t K,
+            bool is_with_amx,
+            dnnl_data_type_t dt_in0,
+            dnnl_data_type_t dt_in1,
+            bool transpose = false) {
+            brgemm_matmul_conf_t brgCopyKernelConf;
+            brgCopyKernelConf.src_dt = dt_in0;
+            brgCopyKernelConf.wei_dt = dt_in1;
+            brgCopyKernelConf.wei_n_blk = N_blk;
+            brgCopyKernelConf.wei_tag = dnnl_abcd;
+            brgCopyKernelConf.copy_B_wei_stride = 0;
+            brgCopyKernelConf.LDB = LDB;
+            brgCopyKernelConf.N = N;
+            brgCopyKernelConf.N_tail = N_tail;
+            brgCopyKernelConf.N_blk = N_blk;
+            brgCopyKernelConf.K = K;
+            brgCopyKernelConf.K_blk = K;
+            brgCopyKernelConf.N_chunk_elems = brgCopyKernelConf.N_blk;
+            brgCopyKernelConf.b_dt_sz =
+                DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(brgCopyKernelConf.src_dt));
+            brgCopyKernelConf.tr_b_dt_sz =
+                DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(brgCopyKernelConf.src_dt));
+            brgCopyKernelConf.req_wei_vnni_downconvert = false;
+
+            if (is_with_amx) {
+                brgCopyKernelConf.isa = avx512_core_amx;
+                brgCopyKernelConf.s8s8_compensation_required = false;
+            } else {
+                brgCopyKernelConf.isa = dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16 : avx512_core_vnni;
+                brgCopyKernelConf.s8s8_compensation_required = dt_in0 == dnnl_data_type_t::dnnl_s8;
+            }
+
+            brgCopyKernelConf.has_zero_point_a = false;
+            brgCopyKernelConf.has_zero_point_b = false;
+            brgCopyKernelConf.src_zp_type = dnnl::impl::cpu::x64::none;
+
+#if defined(OPENVINO_ARCH_X86_64)
+            auto ret = create_brgemm_matmul_copy_b(brgCopyKernel, &brgCopyKernelConf);
+            if (ret != dnnl::impl::status_t::dnnl_success)
+                THROW_ERROR("cannot create_brgemm_matmul_copy_b kernel, dnnl_status: ", ret);
+#endif  // OPENVINO_ARCH_X86_64
+        }
+
+        void callBrgemm(brgemmCtx& ctx,
+                        std::unique_ptr<dnnl::impl::cpu::x64::brgemm_kernel_t>& brgKernel,
+                        const void* pin0,
+                        const void* pin1,
+                        void* pout,
+                        void* wsp) {
+#if defined(OPENVINO_ARCH_X86_64)
+            if (ctx.is_with_amx)
+                amx_tile_configure(ctx.palette);
+            if (ctx.is_with_comp) {
+                brgemm_post_ops_data_t post_ops_data;
+                brgemm_kernel_execute_postops(brgKernel.get(), 1, pin0, pin1, nullptr, pout, pout, post_ops_data, wsp);
+            } else {
+                brgemm_kernel_execute(brgKernel.get(), 1, pin0, pin1, nullptr, pout, wsp);
+            }
+#else
+            THROW_ERROR("is not supported on non-x64 platforms");
+#endif  // OPENVINO_ARCH_X86_64
+        }
+    };
     void prepare_prim(dnnl::stream strm, size_t B, size_t H, size_t Hk, size_t q_len, size_t kv_len, size_t S, bool has_out_transpose) {
         auto make_dnnl_dims = [](const std::vector<size_t>& dims) {
             dnnl::memory::dims dnnl_dims(dims.size());
