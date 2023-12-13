@@ -195,12 +195,14 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
     using dt = dnnl::memory::data_type;
 
     struct brgemmExecutor {
-        brgemmExecutor(size_t M, size_t K, size_t N, size_t lda, size_t ldb, size_t ldc) {
-            lda = lda;
-            ldb = ldb;
-            ldc = ldc;
+        brgemmExecutor(size_t M, size_t K, size_t N, size_t lda, size_t ldb, size_t ldc)
+            : M(M),
+              K(K),
+              N(N),
+              lda(lda),
+              ldb(ldb),
+              ldc(ldc) {
             // blocking M
-            M = M;
             const size_t matmulOptimalM = 32;
             M_blk = matmulOptimalM;
             M_tail = M % M_blk;
@@ -208,14 +210,13 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
             brg0VnniFactor = 4 / brg0Prc.size();
 
             // blocing N
-            N = N;
             N_blk = 32;
             N_tail = N % N_blk;
-
             // blocing N
-            K = K;
             K_blk = 32;
             K_tail = K % K_blk;
+            packedBSize = rnd_up(K, brg0VnniFactor) * rnd_up(N, N_blk) * brg0Prc.size();
+            packedBData.resize(packedBSize);
             size_t brg0BaseIdx = std::numeric_limits<size_t>::max();
             for (size_t m = 0; m < 2; m++) {
                 for (size_t k = 0; k < 2; k++) {
@@ -231,13 +232,14 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
                         brgemmCtx.N = N_;
                         brgemmCtx.K = K_;
                         brgemmCtx.LDA = lda;
-                        brgemmCtx.LDB = rnd_up(ldb, N_blk);  // ???
+                        brgemmCtx.LDB = rnd_up(N, N_blk);  // ???
                         brgemmCtx.LDC = ldc;
                         brgemmCtx.dt_in0 =
                             static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(brg0Prc));
                         brgemmCtx.dt_in1 =
                             static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(brg0Prc));
                         brgemmCtx.beta = beta;
+                        brgemmCtx.is_with_amx = true;
 
                         // don't create brgemm kernels for empty tiles
                         if (M_ != 0 && K_ != 0 && N_ != 0) {
@@ -252,19 +254,29 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
             auto& brgemmCtx0 = brgCtxs0[brg0BaseIdx];
 
             // TODO: matrix A copy should be performed to enable AMX matmuls for arbitrary shapes
-            if (brgemmCtx0.is_with_amx && K0_tail) {
+            if (brgemmCtx0.is_with_amx && K_tail) {
                 init_brgemm_copy_a(brgCopyAKernel, K, K_blk, K_tail, brgemmCtx0.LDA, brgemmCtx0.dt_in0);
             }
 
             if (brgemmCtx0.is_with_amx || brg0Prc == ov::element::i8 || brg0Prc == ov::element::bf16) {
-                init_brgemm_copy_b(brgCopyBKernel, N, N_blk, N_tail, brgemmCtx0.LDB, brgemmCtx0.K,
-                    brgemmCtx0.is_with_amx, brgemmCtx0.dt_in0, brgemmCtx0.dt_in1);
+                init_brgemm_copy_b(brgCopyBKernel,
+                                   N,
+                                   N_blk,
+                                   N_tail,
+                                   brgemmCtx0.LDB,
+                                   brgemmCtx0.K,
+                                   brgemmCtx0.is_with_amx,
+                                   brgemmCtx0.dt_in0,
+                                   brgemmCtx0.dt_in1,
+                                   ldb == 1 ? true : false);
             }
         }
         size_t M = 0, M_blk = 0, M_tail = 0;
         size_t K = 0, K_blk = 0, K_tail = 0, N = 0, N_blk = 0, N_tail = 0;
         size_t lda = 0, ldb = 0, ldc = 0;
         size_t brg0VnniFactor = 0;
+        size_t packedBSize = 0;
+        std::vector<uint8_t> packedBData;
         static constexpr size_t MHA_BRGEMM_KERNELS_NUM = 8;
         struct brgemmCtx {
             size_t M = 0, N = 0, K = 0, LDA = 0, LDB = 0, LDC = 0;
@@ -378,7 +390,7 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
             brgCopyKernelConf.src_dt = dt_in0;
             brgCopyKernelConf.wei_dt = dt_in1;
             brgCopyKernelConf.wei_n_blk = N_blk;
-            brgCopyKernelConf.wei_tag = dnnl_abcd;
+            brgCopyKernelConf.wei_tag = transpose ? dnnl_ba : dnnl_ab;
             brgCopyKernelConf.copy_B_wei_stride = 0;
             brgCopyKernelConf.LDB = LDB;
             brgCopyKernelConf.N = N;
@@ -408,10 +420,63 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
 #if defined(OPENVINO_ARCH_X86_64)
             auto ret = create_brgemm_matmul_copy_b(brgCopyKernel, &brgCopyKernelConf);
             if (ret != dnnl::impl::status_t::dnnl_success)
-                THROW_ERROR("cannot create_brgemm_matmul_copy_b kernel, dnnl_status: ", ret);
+                THROW_ERROR << "cannot create_brgemm_matmul_copy_b kernel, dnnl_status: ";
 #endif  // OPENVINO_ARCH_X86_64
         }
 
+        void executeGemm(void* a, void* b, void* c) {
+            auto ptr_a = reinterpret_cast<uint8_t*>(a);
+            auto ptr_b = reinterpret_cast<uint8_t*>(b);
+            auto ptr_c = reinterpret_cast<uint8_t*>(c);
+            auto dataType = ov::element::bf16;
+            if (brgCopyBKernel) {
+                for (size_t nb = 0; nb < div_up(N, N_blk); nb++) {
+                    auto pCopyKernel0In = ptr_b + nb * N_blk * dataType.size();
+                    auto pCopyKernel0Out = packedBData.data() + nb * N_blk * brg0VnniFactor * dataType.size();
+
+                    auto ctx = jit_brgemm_matmul_copy_b_t::ctx_t();
+
+                    const bool is_N_tail = (N - nb * N_blk < N_blk);
+                    ctx.current_N_blk = is_N_tail ? N_tail : N_blk;
+                    ctx.src = pCopyKernel0In;
+                    ctx.tr_src = pCopyKernel0Out;
+                    ctx.compensation_ptr = nullptr;
+                    ctx.zp_a_compensation_ptr = nullptr;
+                    ctx.zp_a_neg_value_ptr = nullptr;
+                    ctx.current_K_start = 0;
+                    ctx.current_K_iters = K;
+
+                    (*brgCopyBKernel)(&ctx);
+                }
+            }
+            size_t brgIdx0 = getBrgIdx(0, 0, 0);
+            // The step for matrix A over main K dimension
+            size_t K0_step0 = brgCtxs0[brgIdx0].K;
+            // The step for matrix B over main K dimension
+            size_t K0_step1 = brgCtxs0[brgIdx0].K * brgCtxs0[brgIdx0].LDB;
+            // The step for matrix B over N dimension
+            size_t N0_step0 = brgCtxs0[brgIdx0].N * brg0VnniFactor;
+            // The step for matrix C over N dimension
+            size_t N0_step1 = brgCtxs0[brgIdx0].N;
+            for (size_t mb = 0; mb < div_up(M, M_blk); mb++) {
+                const bool is_M_tail = (M - mb * M_blk < M_blk);
+                for (size_t n = 0; n < 2; n++) {
+                    for (size_t k = 0; k < 2; k++) {
+                        size_t mIdx = is_M_tail ? 1 : 0;
+                        auto& brgemmCtx = brgCtxs0[getBrgIdx(mIdx, k, n)];
+
+                        if (brgemmCtx.K != 0 && brgemmCtx.N != 0) {
+                            callBrgemm(brgemmCtx,
+                                    brgKernels[getBrgIdx(mIdx, k, n)],
+                                    ptr_a + (mb * M_blk * brgemmCtx.LDA) * ov::element::bf16.size(),
+                                    packedBData.data() + (k * K0_step1 + n * N0_step0) * ov::element::bf16.size(),
+                                    ptr_c + (mb * M_blk * brgemmCtx.LDC + n * N0_step1) * ov::element::bf16.size(),
+                                    nullptr);
+                        }
+                    }
+                }
+            }
+        }
         void callBrgemm(brgemmCtx& ctx,
                         std::unique_ptr<dnnl::impl::cpu::x64::brgemm_kernel_t>& brgKernel,
                         const void* pin0,
@@ -425,13 +490,65 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
                 brgemm_post_ops_data_t post_ops_data;
                 brgemm_kernel_execute_postops(brgKernel.get(), 1, pin0, pin1, nullptr, pout, pout, post_ops_data, wsp);
             } else {
-                brgemm_kernel_execute(brgKernel.get(), 1, pin0, pin1, nullptr, pout, wsp);
+                brgemm_batch_element_t addr_batch;
+                addr_batch.ptr.A = pin0;
+                addr_batch.ptr.B = pin1;
+                brgemm_kernel_execute(brgKernel.get(), 1, &addr_batch, pout, nullptr, nullptr);
             }
 #else
             THROW_ERROR("is not supported on non-x64 platforms");
 #endif  // OPENVINO_ARCH_X86_64
         }
     };
+
+    std::shared_ptr<brgemmExecutor> qk_gemm_ptr = nullptr;
+
+    void prepare_multiquery_prim(dnnl::stream strm, PlainTensor& query, PlainTensor& present_key) {
+        auto make_dnnl_dims = [](const std::vector<size_t>& dims) {
+            dnnl::memory::dims dnnl_dims(dims.size());
+            for (size_t i = 0; i < dims.size(); i++)
+                dnnl_dims[i] = static_cast<dnnl::memory::dim>(dims[i]);
+            return dnnl_dims;
+        };
+        auto B = query.size(0);
+        auto H = query.size(1);
+        auto q_len = query.size(2);
+        auto head_size = query.size(3);
+        auto Hk = present_key.size(1);
+        auto kv_len = present_key.size(2);
+        if (qk_gemm_ptr == nullptr) {
+            qk_gemm_ptr = std::make_shared<brgemmExecutor>(q_len, head_size, kv_len, query.stride(2), query.stride(3), kv_len);
+        }
+        auto qkv_dt = precision_of<T>::value == ov::element::f32 ? dt::f32 : dt::bf16;
+        dnnl::memory::desc attn_md(make_dnnl_dims({B, H, q_len, kv_len}), dt::f32, tag::abcd);
+        weight_md = dnnl::memory::desc(make_dnnl_dims({B, H, q_len, kv_len}), qkv_dt, tag::abcd);
+        if (!attn_score || attn_md.get_size() > attn_score.get_desc().get_size()) {
+            attn_score = dnnl::memory(attn_md, strm.get_engine());
+            attn_weight = dnnl::memory(weight_md, strm.get_engine());
+        }
+        return;
+    }
+
+    void exec_multiquery_qk(PlainTensor& query, PlainTensor& present_key) {
+        const auto B = query.size(0);
+        const auto H = query.size(1);
+        const auto q_len = query.size(2);
+        const auto head_size = query.size(3);
+        const auto Hk = present_key.size(1);
+        const auto kv_len = present_key.size(2);
+        size_t h_each_group_len = H / Hk;
+        PlainTensor score;
+        score.resize({B, H, q_len, kv_len}, static_cast<float*>(attn_score.get_data_handle()));
+        for (size_t b = 0; b < B; b++) {
+            for (size_t h = 0; h < H; h++) {
+                bfloat16* q_ptr = &query.at<bfloat16>({b, h, 0, 0});
+                bfloat16* k_ptr = &present_key.at<bfloat16>({b, h / h_each_group_len, 0, 0});
+                float* c_ptr = &score.at<float>({b, h, 0, 0});
+                qk_gemm_ptr->executeGemm(q_ptr, k_ptr, c_ptr);
+            }
+        }
+    }
+
     void prepare_prim(dnnl::stream strm, size_t B, size_t H, size_t Hk, size_t q_len, size_t kv_len, size_t S, bool has_out_transpose) {
         auto make_dnnl_dims = [](const std::vector<size_t>& dims) {
             dnnl::memory::dims dnnl_dims(dims.size());
@@ -513,9 +630,16 @@ struct MHAKernel<ScaledDotProductAttention::KT_ONEDNN, T> {
 
         if (d_scale == 0.0f)
             d_scale = 1.0f / sqrt(head_size);
+        // go to multiple-query case
 
-        prepare_prim(strm, B, H, Hk, q_len, kv_len, head_size, has_out_transpose);
-        exec_qk(strm, query, present_key);
+        if (H != Hk) {
+            prepare_multiquery_prim(strm, query, present_key);
+            exec_multiquery_qk(query, present_key);
+            std::cout << "Finish MultiQuery" << std::endl;
+        } else {
+            prepare_prim(strm, B, H, Hk, q_len, kv_len, head_size, has_out_transpose);
+            exec_qk(strm, query, present_key);
+        }
 
         PlainTensor score;
         score.resize({B, H, q_len, kv_len}, static_cast<float*>(attn_score.get_data_handle()));
