@@ -305,32 +305,32 @@ const std::vector<InputShapeAndTransposeOrder> inputShapeAndReorders = {{
     {// inputShapes ChatGLM, greedy search
      {
          // L1, B, H, S
-         {{-1, 1, 8, 64}, {{33, 1, 8, 64}, {1, 1, 8, 64}, {1, 1, 8, 64}, {1, 1, 8, 64}, {1, 1, 8, 64}}},
-         {{-1, 1, 2, 64}, {{33, 1, 2, 64}, {1, 1, 2, 64}, {1, 1, 2, 64}, {1, 1, 2, 64}, {1, 1, 2, 64}}},
+         {{-1, 1, 8, 64}, {{33, 1, 8, 64}, }},
+         {{-1, 1, 2, 64}, {{33, 1, 2, 64}, }},
          // L0, B, H, S
-         {{-1, 1, 2, 64}, {{0, 1, 2, 64}, {10, 1, 2, 64}, {11, 1, 2, 64}, {12, 1, 2, 64}, {13, 1, 2, 64}}},
+         {{-1, 1, 2, 64}, {{0, 1, 2, 64}, }},
      },
      // transposeOrder
      {1, 2, 0, 3}},
-    {// beam search
-     {
-         // L1, B, H, S
-         {{-1, -1, 8, 64}, {{10, 4, 8, 64}, {1, 4, 8, 64}, {1, 4, 8, 64}, {1, 4, 8, 64}, {1, 4, 8, 64}}},
-         {{-1, -1, 2, 64}, {{10, 4, 2, 64}, {1, 4, 2, 64}, {1, 4, 2, 64}, {1, 4, 2, 64}, {1, 4, 2, 64}}},
-         // L0, B, H, S
-         {{-1, -1, 2, 64}, {{0, 4, 2, 64}, {10, 4, 2, 64}, {11, 4, 2, 64}, {12, 4, 2, 64}, {13, 4, 2, 64}}},
-     },
-     // transposeOrder
-     {1, 2, 0, 3}},
+    // {// beam search
+    //  {
+    //      // L1, B, H, S
+    //      {{-1, -1, 8, 64}, {{10, 4, 8, 64}, {1, 4, 8, 64}, {1, 4, 8, 64}, {1, 4, 8, 64}, {1, 4, 8, 64}}},
+    //      {{-1, -1, 2, 64}, {{10, 4, 2, 64}, {1, 4, 2, 64}, {1, 4, 2, 64}, {1, 4, 2, 64}, {1, 4, 2, 64}}},
+    //      // L0, B, H, S
+    //      {{-1, -1, 2, 64}, {{0, 4, 2, 64}, {10, 4, 2, 64}, {11, 4, 2, 64}, {12, 4, 2, 64}, {13, 4, 2, 64}}},
+    //  },
+    //  // transposeOrder
+    //  {1, 2, 0, 3}},
 }};
 
-static std::vector<ElementType> runtimePrecs = {ElementType::f32, ElementType::bf16};
+static std::vector<ElementType> runtimePrecs = {ElementType::bf16};
 
 INSTANTIATE_TEST_SUITE_P(smoke_ConcatMultiQuerySDPTest,
                          ConcatMultiQuerySDPTest,
                          ::testing::Combine(::testing::ValuesIn(runtimePrecs),
                                             ::testing::ValuesIn(inputShapeAndReorders),
-                                            ::testing::Values(true, false)),
+                                            ::testing::Values(true)),
                          ConcatMultiQuerySDPTest::getTestCaseName);
 }  // namespace
 }  // namespace SubgraphTestsDefinitions

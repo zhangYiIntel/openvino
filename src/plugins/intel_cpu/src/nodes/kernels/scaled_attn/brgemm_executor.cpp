@@ -47,7 +47,7 @@ brgemmExecutor::brgemmExecutor(size_t M,
     if (K_tail) {
         K_tail = rnd_up(K_tail, 2);
     }
-    packedBSize = rnd_up(K, brg0VnniFactor) * rnd_up(N, N_blk) * brg0Prc.size();
+    packedBSize = rnd_up(K, K_blk) * rnd_up(N, N_blk) * brg0Prc.size();
     packedASize = M_blk * rnd_up(K, K_blk) * brg0Prc.size();
     //scrach buffer for AMX;
     wsp.resize(wsp_size_per_thread);
@@ -120,6 +120,30 @@ size_t brgemmExecutor::get_scratch_a_size() {
 
 size_t brgemmExecutor::get_scratch_b_size() {
     return packedBSize;
+}
+
+void print_ptr(const std::string& prefix, uint8_t* ptr, size_t row, size_t len, size_t stride) {
+    std::cout << prefix << "|";
+    for (size_t i = 0; i < row; i++) {
+        for (size_t j = 0; j < len; j++) {
+            bfloat16* data = reinterpret_cast<bfloat16*>(ptr + i * stride);
+            std::cout << data[j] << ",";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+void print_float(const std::string& prefix, float* ptr, size_t stride) {
+    std::cout << prefix << "|";
+    for (size_t i = 0; i < 2; i++) {
+        for (size_t j = 0; j < 8; j++) {
+            float* data = ptr + i * stride;
+            std::cout << data[j] << ",";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
 }
 
 void brgemmExecutor::init_brgemm(brgemmCtx& ctx,
@@ -232,6 +256,9 @@ void brgemmExecutor::init_brgemm_copy_b(
     brgCopyKernelConf.N_blk = N_blk;
     brgCopyKernelConf.K = K;
     brgCopyKernelConf.K_blk = K;
+    brgCopyKernelConf.K_tail = K > brgCopyKernelConf.K_blk
+            ? rnd_up(K % brgCopyKernelConf.K_blk, brg0VnniFactor)
+            : 0;
     brgCopyKernelConf.N_chunk_elems = brgCopyKernelConf.N_blk;
     brgCopyKernelConf.b_dt_sz =
         DnnlExtensionUtils::sizeOfDataType(static_cast<dnnl::memory::data_type>(brgCopyKernelConf.src_dt));
@@ -265,8 +292,10 @@ void brgemmExecutor::copy_buffer_b(void* b, void* scratch_b) {
     if (brgCopyBKernel) {
         for (size_t nb = 0; nb < div_up(N, N_blk); nb++) {
             auto N_stride = b_transposed ? ldb : 1;
+            // printf("CopyB ldb %ld n_start %ld\n", N_stride, nb * N_blk);
             auto pCopyKernel0In = ptr_b + nb * N_blk * dataType.size() * N_stride;
             auto pCopyKernel0Out = ptr_scartch_b + nb * N_blk * brg0VnniFactor * dataType.size();
+            // print_ptr("BOrigin|", pCopyKernel0In, 4, 8, N_stride * dataType.size());
 
             auto ctx = jit_brgemm_matmul_copy_b_t::ctx_t();
 
@@ -279,8 +308,8 @@ void brgemmExecutor::copy_buffer_b(void* b, void* scratch_b) {
             ctx.zp_a_neg_value_ptr = nullptr;
             ctx.current_K_start = 0;
             ctx.current_K_iters = K;
-
             (*brgCopyBKernel)(&ctx);
+            print_ptr("BCopied|", pCopyKernel0Out, 2, ctx.current_N_blk * 2, 64 * 2);
         }
     }
 }
@@ -307,7 +336,9 @@ void brgemmExecutor::executeGemm(size_t m_blk, bool is_M_tail, void* a, void* b,
     auto cur_M_blk = is_M_tail ? M_tail : M_blk;
     if (brgCopyAKernel) {
         // only copy the tailed data;
-        auto pCopyKernelIn = ptr_a + K0_step0 * ov::element::bf16.size();
+        size_t K_offset = K < K_blk ? 0 : K0_step0 * ov::element::bf16.size();
+        printf("copy A is small K_offset %ld\n", K_offset);
+        auto pCopyKernelIn = ptr_a + K_offset;
         auto pCopyKernelOut = ptr_scartch_a;
 
         auto ctx = jit_brgemm_matmul_copy_a_t::ctx_t();
@@ -326,27 +357,62 @@ void brgemmExecutor::executeGemm(size_t m_blk, bool is_M_tail, void* a, void* b,
 
         ptr_a_tail = pCopyKernelOut;
     }
+    size_t count_N = 0;
     for (size_t n = 0; n < 2; n++) {
+        size_t count_K = 0;
         for (size_t k = 0; k < 2; k++) {
             size_t mIdx = is_M_tail ? 1 : 0;
-            printf("select M idx %ld\n", mIdx);
             auto& brgemmCtx = brgCtxs0[getBrgIdx(mIdx, k, n)];
-
             if (brgemmCtx.K != 0 && brgemmCtx.N != 0) {
                 if (k) {
+                    auto out_ptr = ptr_c + (count_N > 0 ? n * N0_step1 : 0) * ov::element::f32.size();
+                    printf("tail m_blk %ld N %ld K %ld beta %f out %p n %d k %d countN %ld countK %ld \n",
+                           m_blk,
+                           brgemmCtx.N,
+                           brgemmCtx.K,
+                           brgemmCtx.beta,
+                           out_ptr,
+                           n,
+                           k,
+                           count_N,
+                           count_K);
+                    print_ptr("tail A", ptr_a_tail, 2, 8, K_blk);
+                    auto weight_ptr = ptr_scartch_b + (k * count_K + count_N > 0 ? n * N0_step0 : 0) * ov::element::bf16.size();
+                    print_ptr("tail B", weight_ptr, 2, 8, 64*2);
                     callBrgemm(brgemmCtx,
                             brgKernels[getBrgIdx(mIdx, k, n)],
                             ptr_a_tail,
-                            ptr_scartch_b + (k * K0_step1 + n * N0_step0) * ov::element::bf16.size(),
-                            ptr_c,
+                            weight_ptr,
+                            out_ptr,
                             wsp.data());
+                    print_float("C", reinterpret_cast<float*>(out_ptr), ldc);
                 } else {
+                    auto out_ptr = ptr_c + (count_N > 0 ? n * N0_step1 : 0) * ov::element::f32.size();
+                    auto B_stride = (k * count_K + count_N > 0 ? n * N0_step0 : 0) * ov::element::bf16.size();
+                    auto weight_ptr = ptr_scartch_b + B_stride;
+                    printf("body m_blk %ld N %ld K %ld beta %f out %p n %d k %d countN %ld countK %ld\n",
+                           m_blk,
+                           brgemmCtx.N,
+                           brgemmCtx.K,
+                           brgemmCtx.beta,
+                           out_ptr,
+                           n,
+                           k,
+                           count_N,
+                           count_K);
+                    print_ptr("body A", ptr_a, 2, 8, lda);
+                    print_ptr("body B", weight_ptr, 4, 16, brgemmCtx.LDB * 2);
                     callBrgemm(brgemmCtx,
                             brgKernels[getBrgIdx(mIdx, k, n)],
                             ptr_a,
-                            ptr_scartch_b + (k * K0_step1 + n * N0_step0) * ov::element::bf16.size(),
-                            ptr_c,
+                            weight_ptr,
+                            out_ptr,
                             wsp.data());
+                    print_float("body C", reinterpret_cast<float*>(out_ptr), ldc);
+                    count_K = K0_step1;
+                }
+                if (n == 0) {
+                    count_N = 1;
                 }
             }
         }

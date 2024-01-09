@@ -505,7 +505,7 @@ struct PlainTensor {
                     ss << "?,";
                 cur_line_elecnt++;
                 cur_row_elecnt++;
-                if ((cur_line_elecnt % 16) == 15 || (cur_row_elecnt == last_dim_size)) {
+                if ((cur_line_elecnt % 64) == 63 || (cur_row_elecnt == last_dim_size)) {
                     max_total_lines--;
                     cur_row_lines_left--;
                     if (cur_row_lines_left == 0) {

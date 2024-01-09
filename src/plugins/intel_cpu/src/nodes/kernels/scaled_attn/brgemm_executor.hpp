@@ -36,6 +36,9 @@ public:
     size_t get_mblk_size() {
         return 32;
     }
+    size_t get_k_blk() {
+        return 32;
+    }
 
 private:
     size_t M = 0, M_blk = 0, M_tail = 0;
