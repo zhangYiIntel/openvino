@@ -2083,7 +2083,7 @@ void Reduce::prepareParams() {
         return post_kernel;
     };
 
-    if (compile_post_kernel) {
+    if (compile_post_kernel && mayiuse(cpu::x64::avx2)) {
         setPostOps(attr, dst_dims, true);
 
         ReduceKey key = {jcp, attr.get_post_ops()};

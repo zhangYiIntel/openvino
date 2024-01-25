@@ -60,7 +60,7 @@ else()
     set(ENABLE_MLAS_FOR_CPU_DEFAULT OFF)
 endif()
 ov_option(ENABLE_MLAS_FOR_CPU "Enable MLAS for OpenVINO CPU Plugin" ${ENABLE_MLAS_FOR_CPU_DEFAULT})
-ov_option(ENABLE_SSE_FOR_CPU "ENABLE SSE for OpenVINO CPU Plugin" ON)
+ov_option(ENABLE_SSE_FOR_CPU "ENABLE SSE for OpenVINO CPU Plugin" OFF)
 add_subdirectory(thirdparty)
 
 if(WIN32)
