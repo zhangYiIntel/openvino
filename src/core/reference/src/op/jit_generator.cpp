@@ -54,7 +54,7 @@ bool Generator::mayiuse(const cpu_isa_t cpu_isa) {
     //     return true;
     // }
     if (cpu_isa == sse42)
-        return false;
+        return true;
     return false;
 }
 
