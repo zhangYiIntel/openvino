@@ -28,18 +28,18 @@ void run_test(ov::element::Type rtPrec) {
     size_t K = 33;
     ov::intel_cpu::BrgemmKernel gemm(M, N, K, K, N, N, false, rtPrec);
     size_t nthr = 8;
-    bool is_bf16 = (rtPrec == ov::element::bf16);
+    bool is_f32 = (rtPrec == ov::element::f32);
     std::vector<T> a_data(M * K, (1.0f/33));
     std::vector<T> b_data(K * N, 4.0f);
     std::vector<float> c_data(nthr * M * N, 0.0f);
     std::vector<size_t> wsp(nthr * 4 * 1024, 0.0f);
     std::vector<T> b_scracth(gemm.get_scratch_b_size(), 0.0f);
     std::vector<T> a_scracth(gemm.get_scratch_a_size(), 0.0f);
-    if (is_bf16)
+    if (!is_f32)
         gemm.copy_buffer_b(b_data.data(), b_scracth.data());
     auto m_block_size = gemm.get_mblk_size();
     auto m_blocks = (M + gemm.get_mblk_size() - 1) / m_block_size;
-    T* b_ptr = is_bf16 ? b_scracth.data() : b_data.data();
+    T* b_ptr = !is_f32 ? b_scracth.data() : b_data.data();
     ov::parallel_for2d(nthr, m_blocks, [&](size_t i, size_t m_blk) {
         auto m_start = m_blk * m_block_size;
         auto m_end = std::min(m_start + m_block_size, M);
@@ -76,6 +76,8 @@ TEST_P(BrgemmKernelTest, simpleGemmTest) {
 
     if (rtPrec == ov::element::bf16) {
         run_test<ov::bfloat16>(rtPrec);
+    } else if (rtPrec == ov::element::f16) {
+        run_test<ov::float16>(rtPrec);
     } else {
         run_test<float>(rtPrec);
     }
@@ -83,6 +85,6 @@ TEST_P(BrgemmKernelTest, simpleGemmTest) {
 
 INSTANTIATE_TEST_SUITE_P(BrgemmKernelUnitTest,
                          BrgemmKernelTest,
-                         ::testing::Values(ov::element::f32, ov::element::bf16),
+                         ::testing::Values(ov::element::f16),
                          BrgemmKernelTest::getTestCaseName);
 } // namespace brgemmUnitTest

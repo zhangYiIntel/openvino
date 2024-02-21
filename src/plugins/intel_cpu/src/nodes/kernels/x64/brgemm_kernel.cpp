@@ -38,21 +38,25 @@ BrgemmKernel::BrgemmKernel(size_t M,
     M_tail = M % M_blk;
     brgVnniFactor = 4 / inType.size();
 
-    if (inType != ov::element::bf16 && inType != ov::element::f32)
-        THROW_ERROR("brgemm kernel only supports bf16, f32");
-    bool is_bf16 = inType == ov::element::bf16;
-    if (is_bf16 && !mayiuse(avx512_core_bf16))
+    if (inType != ov::element::bf16 && inType != ov::element::f32 && inType != ov::element::f16)
+        THROW_ERROR("brgemm kernel only supports fp16, bf16, f32");
+    bool is_f32 = inType == ov::element::f32;
+    if (inType == ov::element::bf16 && !mayiuse(avx512_core_bf16))
         THROW_ERROR("brgemm bf16 kernel could only be used above avx512_bf16");
+    if (inType == ov::element::f16 && !mayiuse(avx512_core_fp16))
+        THROW_ERROR("brgemm bf16 kernel could only be used above avx512_fp16");
 
-    bool isAMXSupported = is_bf16 && mayiuse(avx512_core_amx);
+    bool isAMXSupported = (mayiuse(avx512_core_amx) && ov::element::bf16 == inType) ||
+                          (mayiuse(avx512_core_amx_fp16) && ov::element::f16 == inType);
+    bool brgWithAMX = isAMXSupported && !is_f32;
     // blocking N
-    N_blk = is_bf16 ? 32 : N;
+    N_blk = !is_f32 ? 32 : N;
     N_tail = N % N_blk;
 
     // blocking K
-    K_blk = isAMXSupported ? 32 : K;
+    K_blk = brgWithAMX ? 32 : K;
     K_tail = K % K_blk;
-    if (isAMXSupported && K_tail) {
+    if (brgWithAMX && K_tail) {
         K_tail = rnd_up(K_tail, 2);
     }
     size_t vlen = cpu_isa_traits<avx512_core>::vlen;
@@ -73,7 +77,7 @@ BrgemmKernel::BrgemmKernel(size_t M,
                 brgemmCtx.N = N_;
                 brgemmCtx.K = K_;
                 brgemmCtx.LDA = k ? K_blk : lda;
-                brgemmCtx.LDB = (is_bf16 || b_transposed) ? rnd_up(N, N_blk) : ldb;  // bf16/b_transposed needs copy
+                brgemmCtx.LDB = (!is_f32 || b_transposed) ? rnd_up(N, N_blk) : ldb;  // bf16/b_transposed needs copy
                 brgemmCtx.LDC = ldc;
                 brgemmCtx.dt_in0 = static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(inType));
                 brgemmCtx.dt_in1 = static_cast<dnnl_data_type_t>(DnnlExtensionUtils::ElementTypeToDataType(inType));
@@ -83,7 +87,7 @@ BrgemmKernel::BrgemmKernel(size_t M,
                 if (M_ != 0 && K_ != 0 && N_ != 0) {
                     if (brg0BaseIdx == std::numeric_limits<size_t>::max())
                         brg0BaseIdx = getBrgIdx(m, k, n);
-                    init_brgemm(brgemmCtx, brgKernels[getBrgIdx(m, k, n)], isAMXSupported);
+                    init_brgemm(brgemmCtx, brgKernels[getBrgIdx(m, k, n)], brgWithAMX);
                 }
             }
         }
@@ -96,7 +100,7 @@ BrgemmKernel::BrgemmKernel(size_t M,
         packedASize = M_blk * rnd_up(K, K_blk) * inType.size();
     }
 
-    if (brgemmCtx0.is_with_amx || inType == ov::element::bf16 || b_transposed) {
+    if (brgemmCtx0.is_with_amx || !is_f32 || b_transposed) {
         size_t b_stride = 0;
         // must set actual stride when stride is not K/N
         if (b_transposed) {
@@ -134,9 +138,12 @@ void BrgemmKernel::init_brgemm(brgemmCtx& ctx,
 
     const bool is_int8 =
         one_of(ctx.dt_in0, data_type::u8, data_type::s8) && one_of(ctx.dt_in1, data_type::u8, data_type::s8);
-    auto isa = use_amx                                     ? isa_undef
-               : ctx.dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16
-                                                           : (is_int8 ? avx512_core_vnni : avx512_core);
+    cpu_isa_t isa = use_amx                                     ? isa_undef
+                    : ctx.dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16
+                                                                : (is_int8 ? avx512_core_vnni : avx512_core);
+    // if (ctx.dt_in0 == dnnl_data_type_t::dnnl_f16) {
+    //     isa = avx512_core_fp16;
+    // }
     auto status = brgemm_desc_init(&brgDesc,
                                    isa,
                                    brgemm_addr,
@@ -155,7 +162,7 @@ void BrgemmKernel::init_brgemm(brgemmCtx& ctx,
                                    ctx.K,
                                    nullptr);
     if (status != dnnl_success) {
-        THROW_ERROR("cannot be executed due to invalid brgconv params");
+        THROW_ERROR("cannot be executed due to invalid brgemm params");
     }
 
     ctx.is_with_amx = use_amx;
