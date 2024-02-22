@@ -26,35 +26,33 @@ bool Generator::mayiuse(const cpu_isa_t cpu_isa) {
 
     using namespace Xbyak::util;
 
-    // switch (cpu_isa) {
-    // case sse42:
-    //     return cpu.has(Cpu::tSSE42);
-    // case avx:
-    //     return cpu.has(Cpu::tAVX);
-    // case avx2:
-    //     return cpu.has(Cpu::tAVX2);
-    // case avx512_common:
-    //     return cpu.has(Cpu::tAVX512F);
-    // case avx512_core:
-    //     return cpu.has(Cpu::tAVX512F) && cpu.has(Cpu::tAVX512BW) && cpu.has(Cpu::tAVX512VL) && cpu.has(Cpu::tAVX512DQ);
-    // case avx512_core_vnni:
-    //     return cpu.has(Cpu::tAVX512F) && cpu.has(Cpu::tAVX512BW) && cpu.has(Cpu::tAVX512VL) &&
-    //            cpu.has(Cpu::tAVX512DQ) && cpu.has(Cpu::tAVX512_VNNI);
-    // case avx512_mic:
-    //     return cpu.has(Cpu::tAVX512F) && cpu.has(Cpu::tAVX512CD) && cpu.has(Cpu::tAVX512ER) && cpu.has(Cpu::tAVX512PF);
-    // case avx512_mic_4ops:
-    //     return mayiuse(avx512_mic) && cpu.has(Cpu::tAVX512_4FMAPS) && cpu.has(Cpu::tAVX512_4VNNIW);
-    // case avx512_core_bf16:
-    //     return mayiuse(avx512_core_vnni) && cpu.has(Cpu::tAVX512_BF16);
-    // case avx512_vpopcnt:
-    //     return true && cpu.has(Cpu::tAVX512_VPOPCNTDQ);
-    // case fp16:
-    //     return cpu.has(Cpu::tF16C);
-    // case isa_any:
-    //     return true;
-    // }
-    if (cpu_isa == sse42)
-        return false;
+    switch (cpu_isa) {
+    case sse42:
+        return cpu.has(Cpu::tSSE42);
+    case avx:
+        return cpu.has(Cpu::tAVX);
+    case avx2:
+        return cpu.has(Cpu::tAVX2);
+    case avx512_common:
+        return cpu.has(Cpu::tAVX512F);
+    case avx512_core:
+        return cpu.has(Cpu::tAVX512F) && cpu.has(Cpu::tAVX512BW) && cpu.has(Cpu::tAVX512VL) && cpu.has(Cpu::tAVX512DQ);
+    case avx512_core_vnni:
+        return cpu.has(Cpu::tAVX512F) && cpu.has(Cpu::tAVX512BW) && cpu.has(Cpu::tAVX512VL) &&
+               cpu.has(Cpu::tAVX512DQ) && cpu.has(Cpu::tAVX512_VNNI);
+    case avx512_mic:
+        return cpu.has(Cpu::tAVX512F) && cpu.has(Cpu::tAVX512CD) && cpu.has(Cpu::tAVX512ER) && cpu.has(Cpu::tAVX512PF);
+    case avx512_mic_4ops:
+        return mayiuse(avx512_mic) && cpu.has(Cpu::tAVX512_4FMAPS) && cpu.has(Cpu::tAVX512_4VNNIW);
+    case avx512_core_bf16:
+        return mayiuse(avx512_core_vnni) && cpu.has(Cpu::tAVX512_BF16);
+    case avx512_vpopcnt:
+        return true && cpu.has(Cpu::tAVX512_VPOPCNTDQ);
+    case fp16:
+        return cpu.has(Cpu::tF16C);
+    case isa_any:
+        return true;
+    }
     return false;
 }
 
