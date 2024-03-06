@@ -24,6 +24,7 @@ namespace ov {
 namespace intel_cpu {
 
 class SyncInferRequest;
+class ProfilerGraph;
 namespace node {
 class MemoryStateNode;
 } // namespace node
@@ -45,7 +46,9 @@ public:
     bool IsReady() {
         return (status != Status::NotReady);
     }
-
+    void SetGraphID(int id) {
+        graph_id = id;
+    }
     const Config & getConfig() const {
         return context->getConfig();
     }
@@ -204,7 +207,8 @@ protected:
 
     // For dumping purposes. -1 - no counting, all other positive
     // values mean increment it within each Infer() call
-    int infer_count = -1;
+    int infer_count = 0;
+    int graph_id = -1;
 
     bool reuse_io_tensors = true;
 
@@ -256,6 +260,8 @@ private:
 
     void EnforceInferencePrecision();
     void EnforceBF16();
+    bool isSubgraph = false;
+    friend class ProfilerGraph;
     void insertReorder(EdgePtr& edge, bool isOptimized, std::unordered_set<std::string>& uniqueLayerNames);
 };
 
