@@ -117,6 +117,7 @@ CompiledModel::GraphGuard::Lock CompiledModel::get_graph() const {
                     ctx = std::make_shared<GraphContext>(m_cfg, weightsCache, isQuantizedFlag);
                 }
                 const std::shared_ptr<const ov::Model> model = m_model;
+                graphLock._graph.SetGraphID(streamId * 1000);
                 graphLock._graph.CreateGraph(model, ctx);
             } catch (...) {
                 exception = std::current_exception();
