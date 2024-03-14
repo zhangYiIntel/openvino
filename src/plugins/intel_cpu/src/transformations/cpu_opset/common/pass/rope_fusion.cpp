@@ -379,16 +379,17 @@ ov::intel_cpu::RoPEFusionGPTJ::RoPEFusionGPTJ() {
     auto ndims = Symbol("ndims");
 
     auto view_Reshape = makePattern(ov::Rank(4));
-
+    // view_Reshape
     // view_Reshape : B,L,H,S
+    // slice_Slice_3
     auto slice_Slice_965 = GenSlice(view_Reshape, 0, ndims, 1, 3);
-
+    //
     auto gather_sin_cos = makePattern("f32");
 
     auto varsplit = makePattern<opset1::VariadicSplit>({gather_sin_cos, -1, {ndims / 2, -1}});
     varsplit->set_output_size(2);
-    auto unsqueeze_sin = makePattern<opset1::Reshape>({varsplit->output(0), {1, -1, 1, 32}});
-    auto unsqueeze_cos = makePattern<opset1::Reshape>({varsplit->output(1), {1, -1, 1, 32}});
+    auto unsqueeze_sin = makePattern<opset1::Unsqueeze>({varsplit->output(0), 2});
+    auto unsqueeze_cos = makePattern<opset1::Unsqueeze>({varsplit->output(1), 2});
     // repeate cos/sin table
     auto const_idx = makeConst(ov::element::i32, ov::PartialShape::dynamic(), [](const ov::op::v0::Constant& node) {
         const auto& vec = node.get_vector<int32_t>();
@@ -406,29 +407,33 @@ ov::intel_cpu::RoPEFusionGPTJ::RoPEFusionGPTJ() {
     auto t_sin = makePattern(ov::Rank(4));
 
     // x interleave (-x[:,:,:, 1::2], x[:,:,:, 0::2])
+    // slice_Slice_10
     auto slice_Slice_1174 = GenSlice(slice_Slice_965, 1, int32_max, 2, 3);
 
-    auto neg_Multiply_1177 = makePattern<opset1::Multiply>({slice_Slice_1174, -1.0f}, {{"auto_broadcast", "numpy"}});
+    auto neg_Multiply_1177 = makePattern<opset1::Multiply>({slice_Slice_1174, ov::pass::pattern::any_input()});
+    // Unsqueeze_45237
     auto Unsqueeze_65524 = makePattern<opset1::Unsqueeze>({neg_Multiply_1177, -1});
 
+    // slice_Slice_14
     auto slice_Slice_1168 = GenSlice(slice_Slice_965, 0, int32_max, 2, 3);
+    // Unsqueeze_45238
     auto Unsqueeze_65525 = makePattern<opset1::Unsqueeze>({slice_Slice_1168, -1});
     auto stack_1182 = makePattern<opset1::Concat>({Unsqueeze_65524, Unsqueeze_65525}, {{"axis", -1}});
 
-    auto ShapeOf_169068 = makePattern<opset1::ShapeOf>({stack_1182});
-    auto flatten_Slice_1194 = GenSlice(ShapeOf_169068, 0, 3, 1, 0);
-    auto flatten_Concat_1197 = makePattern<opset1::Concat>({flatten_Slice_1194, {-1}}, {{"axis", 0}});
-    auto flatten_Reshape_1198 = makePattern<opset1::Reshape>({stack_1182, flatten_Concat_1197});
+    // auto ShapeOf_169068 = makePattern<opset1::ShapeOf>({stack_1182});
+    // auto flatten_Slice_1194 = GenSlice(ShapeOf_169068, 0, 3, 1, 0);
+    // auto flatten_Concat_1197 = makePattern<opset1::Concat>({flatten_Slice_1194, {-1}}, {{"axis", 0}});
+    auto flatten_Reshape_1198 = makePattern<opset1::Reshape>({stack_1182, ov::pass::pattern::any_input()}, {{"special_zero", true}});
 
     // x*cos [B,L,H,ndims]
     auto mul_cos =
         makePattern<opset1::Multiply>({slice_Slice_965, repeat_interleave_cos}, {{"auto_broadcast", "numpy"}});
     auto mul_sin =
         makePattern<opset1::Multiply>({flatten_Reshape_1198, repeat_interleave_sin}, {{"auto_broadcast", "numpy"}});
-
+    // add_Add
     // *cos + *sin
     auto rotary_emb = makePattern<opset1::Add>({mul_cos, mul_sin}, {{"auto_broadcast", "numpy"}});
-
+    // slice_Slice_21
     auto slice_Slice_971 = GenSlice(view_Reshape, ndims, int32_max, 1, 3);
     auto cat_Concat_1211 = makePattern<opset1::Concat>({rotary_emb, slice_Slice_971}, {{"axis", -1}});
     auto permute_Transpose_1213 = makePattern<opset1::Transpose>({cat_Concat_1211, {0, 2, 1, 3}});
@@ -468,7 +473,7 @@ ov::intel_cpu::RoPEFusionGPTJ::RoPEFusionGPTJ() {
                                 pattern_map.at(Unsqueeze_65524).get_node_shared_ptr(),
                                 pattern_map.at(Unsqueeze_65525).get_node_shared_ptr(),
                                 pattern_map.at(stack_1182).get_node_shared_ptr(),
-                                pattern_map.at(flatten_Concat_1197).get_node_shared_ptr(),
+                                // pattern_map.at(flatten_Concat_1197).get_node_shared_ptr(),
                                 pattern_map.at(mul_cos).get_node_shared_ptr(),
                                 pattern_map.at(mul_sin).get_node_shared_ptr(),
                                 pattern_map.at(rotary_emb).get_node_shared_ptr(),

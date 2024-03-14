@@ -168,8 +168,10 @@ std::shared_ptr<ov::Model> dump_graph_as_ie_ngraph_net(const Graph &graph) {
                 get_inputs(node), node->getSelectedPrimitiveDescriptor()->getConfig().outConfs.size());
 
             for (size_t port = 0; port < return_node->get_output_size(); ++port) {
-                auto& desc = node->getChildEdgeAt(port)->getMemory().getDesc();
-                return_node->set_output_type(port, desc.getPrecision(), desc.getShape().toPartialShape());
+                if (port < node->getChildEdges().size()) {
+                    auto& desc = node->getChildEdgeAt(port)->getMemory().getDesc();
+                    return_node->set_output_type(port, desc.getPrecision(), desc.getShape().toPartialShape());
+                }
             }
         }
 
