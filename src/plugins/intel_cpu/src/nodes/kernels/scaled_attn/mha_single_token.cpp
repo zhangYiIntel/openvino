@@ -644,7 +644,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
 
         size_t b, h_group, pk;
         if (start < end) {
-            parallel_it_init(start, b, B, h_group, h_group_num, pk, kv_len);
+            parallel_it_init(start, pk, kv_len, b, B, h_group, h_group_num);
             if (is_pagedattn) {
                 for (size_t iwork = start; iwork < end; ++iwork) {
                     auto context_len = static_cast<size_t>(context_lens.ptr<int32_t>()[b]);
@@ -661,7 +661,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                             }
                         }
                     }
-                    parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                    parallel_it_step(pk, kv_len, b, B, h_group, h_group_num);
                 }
             } else {
                 if (q_len == 1 && h_each_group_len == 1) {
@@ -674,7 +674,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                             buf_attn_w.ptr<float>(0, h_group, 0)[pk] =
                                     dot_product(query.ptr<T>(0, h_group), p_k,
                                         S, p, p + 1, head_sum.ptr<float>(0, h_group));
-                            parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                            parallel_it_step(pk, kv_len, b, B, h_group, h_group_num);
                         }
                     } else {
                         for (size_t iwork = start; iwork < end; ++iwork) {
@@ -684,7 +684,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                             buf_attn_w.ptr<float>(b, h_group, 0)[pk] =
                                     dot_product(query.ptr<T>(b, h_group), p_k,
                                         S, p, p + 1, head_sum.ptr<float>(b, h_group));
-                            parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                            parallel_it_step(pk, kv_len, b, B, h_group, h_group_num);
                         }
                     }
                 } else {
@@ -698,7 +698,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                                             S, p, p + 1, head_sum.ptr<float>(b, h, pq));
                             }
                         }
-                        parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                        parallel_it_step(pk, kv_len, b, B, h_group, h_group_num);
                     }
                 }
             }
@@ -743,7 +743,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
 
         size_t b, h_group, pv;
         if (start < end) {
-            parallel_it_init(start, b, B, h_group, h_group_num, pv, kv_len);
+            parallel_it_init(start, pv, kv_len, b, B, h_group, h_group_num);
             if (is_pagedattn) {
                 for (size_t iwork = start; iwork < end; ++iwork) {
                     auto context_len = static_cast<size_t>(context_lens.ptr<int32_t>()[b]);
@@ -763,7 +763,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                             }
                         }
                     }
-                    parallel_it_step(b, B, h_group, h_group_num, pv, kv_len);
+                    parallel_it_step(pv, kv_len, b, B, h_group, h_group_num);
                 }
             } else {
                 if (q_len == 1 && h_each_group_len == 1) {
@@ -777,7 +777,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                                     S,
                                     p + 0,
                                     p + 1);
-                        parallel_it_step(b, B, h_group, h_group_num, pv, kv_len);
+                        parallel_it_step(pv, kv_len, b, B, h_group, h_group_num);
                     }
                 } else {
                     for (size_t iwork = start; iwork < end; ++iwork) {
@@ -794,7 +794,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
                                             p + 1);
                             }
                         }
-                        parallel_it_step(b, B, h_group, h_group_num, pv, kv_len);
+                        parallel_it_step(pv, kv_len, b, B, h_group, h_group_num);
                     }
                 }
             }
