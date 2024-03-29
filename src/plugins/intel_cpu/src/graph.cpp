@@ -1308,7 +1308,10 @@ void Graph::InferDynamic(SyncInferRequest* request) {
     size_t inferCounter = 0;
 
     for (auto stopIndx : syncIndsWorkSet) {
-        updateNodes->run(stopIndx);
+        {
+            auto _prof = Profile("Graph::updateNodes");
+            updateNodes->run(stopIndx);
+        }
         for (; inferCounter < stopIndx; ++inferCounter) {
             auto& node = executableGraphNodes[inferCounter];
             VERBOSE(node, getConfig().debugCaps.verbose);

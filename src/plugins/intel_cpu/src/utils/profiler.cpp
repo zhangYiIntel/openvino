@@ -95,7 +95,7 @@ struct linux_perf_event {
             offset = buf->offset;  // used to compensate the initial counter value
             if (index == 0) {      /* rdpmc not allowed */
                 val = 0;
-                std::cout << "rdpmc" << std::endl;
+                std::cout << "rdpmc forbidened" << std::endl;
                 break;
             }
             val = _rdpmc(index - 1);
