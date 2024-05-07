@@ -32,6 +32,7 @@
 #include "openvino/core/except.hpp"
 #include "openvino/core/model.hpp"
 #include "openvino/core/node.hpp"
+#include "openvino/core/type/element_type.hpp"
 #include "utils/debug_capabilities.h"
 #include "utils/general_utils.h"
 #include "utils/ngraph_utils.hpp"
@@ -1735,7 +1736,7 @@ void Graph::EnforceInferencePrecision() {
 
     const auto inferPrec = getConfig().inferencePrecision;
 
-    if (inferPrec == ov::element::f32)
+    if (one_of(inferPrec, ov::element::f32, ov::element::f16))
         return; // nothing to do, only precision reduction is currently allowed
 #if defined(OPENVINO_ARCH_ARM) || defined(OPENVINO_ARCH_ARM64)
     if (inferPrec == ov::element::f16)
