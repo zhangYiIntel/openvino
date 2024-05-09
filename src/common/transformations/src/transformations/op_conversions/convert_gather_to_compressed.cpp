@@ -106,7 +106,12 @@ ov::pass::ConvertGatherToGatherCompressed::ConvertGatherToGatherCompressed() {
         std::shared_ptr<ov::Node> gather_input_scale = scale;
         std::shared_ptr<ov::Node> gather_input_zp = optional_zero_point;
         std::vector<std::shared_ptr<ov::Node>> result_nodes = {};
-
+        ov::element::Type output_type = gather_node->get_output_element_type(0);
+        if(pattern_map.count(last_convert_m)) {
+            auto convert_node = std::dynamic_pointer_cast<ov::op::v0::Convert>(pattern_map.at(last_convert_m).get_node_shared_ptr());
+            output_type = convert_node->get_destination_type();
+            gather_input_scale = pattern_map.at(last_convert_m).get_node_shared_ptr();
+        }
         std::shared_ptr<ov::Node> new_gather_node = nullptr;
         if (with_zero_point) {
             new_gather_node =
@@ -116,7 +121,7 @@ ov::pass::ConvertGatherToGatherCompressed::ConvertGatherToGatherCompressed() {
                                                                      gather_node->get_batch_dims(),
                                                                      gather_input_scale,
                                                                      gather_input_zp,
-                                                                     gather_node->get_output_element_type(0));
+                                                                     output_type);
         } else {
             new_gather_node =
                 std::make_shared<ov::op::internal::GatherCompressed>(gather_input_a,
@@ -124,7 +129,7 @@ ov::pass::ConvertGatherToGatherCompressed::ConvertGatherToGatherCompressed() {
                                                                      gather_input_c,
                                                                      gather_node->get_batch_dims(),
                                                                      gather_input_scale,
-                                                                     gather_node->get_output_element_type(0));
+                                                                     output_type);
         }
 
         transformation_callback(new_gather_node);
