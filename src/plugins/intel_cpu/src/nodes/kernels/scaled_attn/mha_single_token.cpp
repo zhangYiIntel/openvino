@@ -1271,7 +1271,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
         });
     } else {
         {
-            auto _profile = Profile("QK_GEMM");
+            auto _profile = ov::intel_cpu::Profile("QK_GEMM");
             parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
                 size_t start{0}, end{0};
                 splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
@@ -1320,7 +1320,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
             });
         }
         {
-            auto _profile = Profile("SOFTMAX");
+            auto _profile = ov::intel_cpu::Profile("SOFTMAX");
             parallel_for3d(B, H, q_len, [&](size_t b, size_t h, size_t pq) {
                 auto cur_kv_len = kv_len;
                 auto ncausal = auto_causal ? (cur_kv_len - q_len + pq + 1) : cur_kv_len;
@@ -1347,7 +1347,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
         // attn_w * V
         // Fast Path if there are enough works for each thread
         {
-            auto _profile = Profile("WV_Fast_GEMM");
+            auto _profile = ov::intel_cpu::Profile("WV_Fast_GEMM");
             if (B >= static_cast<size_t>(nthr)) {
                 buf_attn_score.resize<float>({static_cast<size_t>(nthr), q_len, h_each_group_len, S});
                 parallel_for2d(B, h_group_num, [&](size_t b, size_t h_group) {
@@ -1383,7 +1383,7 @@ static void mha_single_token_kernel(const ov::intel_cpu::PlainTensor& query,
         buf_attn_score.resize<float>({static_cast<size_t>(nthr), B, q_len, H, S});
         // buf_attn_w {B, H, q_len, kv_len}
         {
-            auto _profile = Profile("WV_GEMM");
+            auto _profile = ov::intel_cpu::Profile("WV_GEMM");
             parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
                 size_t start{0}, end{0};
                 splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
