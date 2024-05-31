@@ -153,7 +153,7 @@ bool ov::pass::CommonOptimizations::run_on_model(const std::shared_ptr<ov::Model
     REGISTER_DISABLED_PASS(manager, ConvertInterpolate1ToInterpolate4)
 
     auto decomp = manager.register_pass<GraphRewrite>();
-    ADD_MATCHER(decomp, ScaledDotProductAttentionDecomposition)
+    // ADD_MATCHER(decomp, ScaledDotProductAttentionDecomposition)
     ADD_MATCHER(decomp, Gelu7Downgrade)
     ADD_MATCHER(decomp, BidirectionalSequenceDecomposition)
     ADD_MATCHER(decomp, ReduceL1Decomposition)
