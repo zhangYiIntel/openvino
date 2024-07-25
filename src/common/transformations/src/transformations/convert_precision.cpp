@@ -410,12 +410,13 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
     if (used_precisions.empty())
         return false;
 
-    bool has_fp16_compression = m_precisions.count(element::f32) > 0 && m_precisions[element::f32] == element::f16;
+    bool has_fp16_compression = m_precisions.count(element::f32) > 0 && (m_precisions[element::f32] == element::f16 || m_precisions[element::f32] == element::bf16);
 
     if (m_keep_precision_sensitive_in_fp32 && has_fp16_compression) {
         pass::Manager manager(get_pass_config());
         // Mark subgraphs with disable_fp16_compression to keep them in FP32
-        manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
+        if (m_precisions[element::f32] == element::f16)
+            manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
         manager.register_pass<pass::AlignMixedFP32FP16Types>();
         manager.run_passes(f);
     }
@@ -1364,6 +1365,9 @@ bool fuse_type_to_constant(const std::shared_ptr<ov::Node>& node,
             new_const = change_constant_precision<ov::element::Type_t::i8, ov::element::Type_t::i64>(constant);
         } else if (from == ov::element::i4 || from == ov::element::u4 || from == ov::element::u1) {
             new_const = convert_low_precisions_int(constant, to);
+        }  else if (from == ov::element::f32 && to == ov::element::bf16) {
+            std::cout << "Change from FP32TOBF16|" << constant->get_friendly_name() << std::endl;
+            new_const = change_constant_precision<ov::element::Type_t::f32, ov::element::Type_t::bf16>(constant);
         } else {
             OPENVINO_THROW("Precision conversion from " + from.get_type_name() + " to " + to.get_type_name() +
                            " is not supported");

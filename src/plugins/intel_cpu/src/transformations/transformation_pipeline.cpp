@@ -134,6 +134,7 @@
 #include "transformations/cpu_opset/common/pass/swap_convert_transpose.hpp"
 #include "transformations/cpu_opset/common/pass/causal_mask_preprocess_fusion.hpp"
 #include "transformations/cpu_opset/common/pass/stateful_sdpa_fusion.hpp"
+#include "transformations/cpu_opset/common/pass/mark_inference_precision.hpp"
 
 // Snippets
 #include "snippets/pass/tokenization.hpp"
@@ -385,6 +386,17 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
 #else
         type_to_fuse_map fuse_map = {};
 #endif
+        const bool keep_precision_sensitive_in_fp32 = true;
+        CPU_REGISTER_PASS_COMMON(manager,
+                                 ov::pass::ConvertPrecision,
+                                 fp_convert_precision_map,
+                                 fuse_map,
+                                 keep_precision_sensitive_in_fp32,
+                                 false);
+    } else if (inferencePrecision == ov::element::bf16) {
+        CPU_REGISTER_PASS_COMMON(manager, MarkInferencePrecision)
+        precisions_map fp_convert_precision_map = {{ov::element::f32, ov::element::bf16}};
+        type_to_fuse_map fuse_map = {};
         const bool keep_precision_sensitive_in_fp32 = true;
         CPU_REGISTER_PASS_COMMON(manager,
                                  ov::pass::ConvertPrecision,

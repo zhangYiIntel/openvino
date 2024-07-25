@@ -142,6 +142,22 @@ bool SupportsFusingWithConvolution_Simple(const std::shared_ptr<const Node> &nod
            ov::is_type<ov::op::v0::FakeQuantize>(node) ||
            canBePerformedAsScaleShift(node, channelAxis);
 }
+// Conv/Reduce(BF16)->Convert(FP32) could be fused into Conv(FP32)
+bool isFusableConvert(const std::shared_ptr<const Node>& node) {
+    bool is_suitable_convert = ov::is_type<ov::op::v0::Convert>(node) &&
+                               (ov::is_type<ov::op::v1::Convolution>(node->get_input_node_ptr(0)) ||
+                                ov::is_type<ov::op::v1::GroupConvolution>(node->get_input_node_ptr(0)) ||
+                                ov::is_type<ov::op::util::ArithmeticReductionKeepDims>(node->get_input_node_ptr(0)));
+    // only has one child
+    if (is_suitable_convert) {
+        const auto out = node->get_input_node_ptr(0)->outputs();
+        const bool has_only_child = (out.size() == 1) && (out[0].get_target_inputs().size() == 1);
+        auto inPrc = node->get_input_element_type(0);
+        auto outPrc = node->get_output_element_type(0);
+        is_suitable_convert = is_suitable_convert && (inPrc == element::bf16 && outPrc == element::f32);
+    }
+    return is_suitable_convert;
+}
 // Convolution is a special case, since it supports peculiar fusings
 bool isSuitableConvolutionParent(const std::shared_ptr<const Node> &node) {
     const bool is_suitable_node = ov::is_type<ov::op::v1::Convolution>(node) ||
@@ -390,11 +406,20 @@ bool isSuitableParentForFusingSumActivation(const std::shared_ptr<const Node> &n
             || (GetNodeFusingType(parent) == NodeFusingType::FusedWithConvolution);
         return is_suitable_parent;
     };
+    auto isFusedConvertNode = [](std::shared_ptr<Node> n) {
+        if (!(ov::is_type<ov::op::v0::Convert>(n) &&
+            GetNodeFusingType(n) == NodeFusingType::FusedWithConvolution))
+            return false;
+        const auto& parent = n->get_input_node_shared_ptr(0);
+        const bool is_suitable_parent = isSuitableConvolutionParent(parent)
+            || (GetNodeFusingType(parent) == NodeFusingType::FusedWithConvolution);
+        return is_suitable_parent;
+    };
     int num_conv_parents = 0;
     for (size_t i = 0; i < node->get_input_size(); i++) {
         const auto n = node->get_input_node_shared_ptr(i);
         //BinaryConvolution allows other ops to be fused before the Add, while Convolution doesn't
-        num_conv_parents += (isSuitableConvolutionParent(n) || isFusedBiasNode(n) || isFusedFQNode(n) ||
+        num_conv_parents += (isSuitableConvolutionParent(n) || isFusedBiasNode(n) || isFusedFQNode(n) || isFusedConvertNode(n) ||
                              GetNodeFusingType(n) == NodeFusingType::FusedWithBinaryConvolution);
     }
     return getNumNonConstInputs(node) == 2 && num_conv_parents >=1;
@@ -528,13 +553,15 @@ bool SnippetsMarkSkipped::run_on_model(const std::shared_ptr<ov::Model> &m) {
         } else {
             for (const auto fusingChainType : getContinuableChains(node)) {
                 if (fusingChainType == NodeFusingType::FusedWithReduce) {
-                    if (isSuitableReduceChild(node, channelAxis))
+                    if (isSuitableReduceChild(node, channelAxis) || isFusableConvert(node))
                         PropagateIfHasOnlyChild(node, fusingChainType);
                 } else if (isSuitableChildForFusingSimple(node, channelAxis)) {
                     PropagateIfHasOnlyChild(node, fusingChainType);
                 } else if (fusingChainType == NodeFusingType::FusedWithConvolution ||
                            fusingChainType == NodeFusingType::FusedWithBinaryConvolution) {
-                    if (isSuitableParentForFusingSumActivation(node)) {
+                    if (isFusableConvert(node)) {
+                        PropagateIfHasOnlyChild(node, fusingChainType);
+                    } else if (isSuitableParentForFusingSumActivation(node)) {
                         PropagateIfHasOnlyChild(node, NodeFusingType::FusedWithConvolutionSumActivation);
                         // Mimic FuseConvolutionAndSimpleOperationThroughMaxPool
                     } else if (isSuitablePoolChild(node)) {

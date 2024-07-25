@@ -61,6 +61,10 @@ void GraphOptimizer::ApplyCommonGraphOptimizations(Graph &graph) {
     // So Locate the FuseConvolutionAndZeroPoints() as the first optimization.
     OV_ITT_SCOPE_CHAIN(FIRST_INFERENCE, taskChain, itt::domains::intel_cpu_LT, "ApplyCommonGraphOptimizations", "FuseConvolutionAndZeroPoints");
     FuseConvolutionAndZeroPoints(graph);
+
+    graph.RemoveDroppedNodes();
+    OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseConvAndConvert");
+    FuseConvert(graph);
     graph.RemoveDroppedNodes();
 
     OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseConvMatmulFCDeconvAndDQScales");
@@ -83,8 +87,8 @@ void GraphOptimizer::ApplyCommonGraphOptimizations(Graph &graph) {
     MergeConvertAndScaleShift(graph);
     graph.RemoveDroppedNodes();
 
-    OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseFCAndConvertOnWeights");
-    FuseFCAndConvertOnWeights(graph);
+    OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseConvertOnWeights");
+    FuseConvertOnWeights(graph);
     graph.RemoveDroppedNodes();
 
     OV_ITT_SCOPE_NEXT(FIRST_INFERENCE, taskChain, "FuseFCAndTransposeOnWeights");
@@ -918,32 +922,64 @@ void GraphOptimizer::MergeConvertAndScaleShift(Graph& graph) {
     }
 }
 
-void GraphOptimizer::FuseFCAndConvertOnWeights(Graph& graph) {
-    // This optimization fuses Convert (fp16 -> bf16/fp32) on weights directly to FC input to allow precision conversion handling based on internal logic
-    // (e.g. fuse conversion with weights reordering)
+void GraphOptimizer::FuseConvertOnWeights(Graph& graph) {
+    // This optimization fuses Convert (fp16 -> bf16/fp32) on weights directly to FC input to allow precision conversion
+    // handling based on internal logic (e.g. fuse conversion with weights reordering)
     auto& graphNodes = graph.GetNodes();
-    for (const auto& fullyConnected : graphNodes) {
-        if (fullyConnected->getType() != Type::FullyConnected) {
+    for (const auto& node : graphNodes) {
+        if (!(one_of(node->getType(), Type::FullyConnected, Type::Convolution, Type::RNNCell, Type::Eltwise))) {
             continue;
         }
-        const auto convert = fullyConnected->getParentEdgeAt(1)->getParent();
-        if (convert->getType() != Type::Convert ||
-            !one_of(convert->getOriginalInputPrecisionAtPort(0), ov::element::f16, ov::element::bf16) ||
-            !one_of(convert->getOriginalOutputPrecisionAtPort(0), ov::element::f32, ov::element::bf16) ||
-            !convert->isConstant()) {
-            continue;
+        std::vector<size_t> constIndexes = std::vector<size_t>{1};
+        if (node->getType() == Type::RNNCell) {
+            // indexes for RNN vary from AUGRU to LSTM, see RNN.cpp's constructor
+            const size_t nums = node->getParentEdges().size();
+            constIndexes.resize(nums - 2);
+            std::iota(constIndexes.begin(), constIndexes.end(), 2);
+        } else if (node->getType() == Type::Eltwise) {
+            const size_t nums = node->getParentEdges().size();
+            constIndexes.resize(nums);
+            std::iota(constIndexes.begin(), constIndexes.end(), 0);
         }
 
-        const auto weights = convert->getParentEdgeAt(0)->getParent();
-        const auto weights_out_edge = weights->getChildEdges()[0].lock();
-        const auto fc_weights_path_edge = fullyConnected->getParentEdgeAt(1);
-        const auto inNum = weights_out_edge->getInputNum();
-        const auto outNum = fc_weights_path_edge->getOutputNum();
-        fullyConnected->setOriginalInputPrecisionAtPort(1, convert->getOriginalInputPrecisionAtPort(0));
-        graph.RemoveEdge(fc_weights_path_edge);
-        graph.CreateEdge(weights, fullyConnected, inNum, outNum);
-        if (convert->getChildEdges().empty()) {
-            graph.DropNode(convert);
+        DEBUG_LOG("FuseConvertOnWeights ", node->getName());
+        auto checkConvert = [](const NodePtr& node, size_t idx) {
+            const auto convert = node->getParentEdgeAt(idx)->getParent();
+            if (node->getType() == Type::FullyConnected) {
+                if (convert->getType() != Type::Convert ||
+                    !one_of(convert->getOriginalInputPrecisionAtPort(0), ov::element::f16, ov::element::bf16) ||
+                    !one_of(convert->getOriginalOutputPrecisionAtPort(0), ov::element::f32, ov::element::bf16) ||
+                    !convert->isConstant()) {
+                    return false;
+                }
+            } else {
+                if (convert->getType() != Type::Convert ||
+                    !one_of(convert->getOriginalInputPrecisionAtPort(0), ov::element::f32) ||
+                    !one_of(convert->getOriginalOutputPrecisionAtPort(0), ov::element::bf16) || !convert->isConstant()) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        for (const auto& idx : constIndexes) {
+            if (!checkConvert(node, idx)) {
+                continue;
+            } else {
+                DEBUG_LOG("FuseConvertOnWeights DropConvert ", node->getName(), " inPort ", idx);
+                const auto convert = node->getParentEdgeAt(idx)->getParent();
+                const auto weights = convert->getParentEdgeAt(0)->getParent();
+                const auto weights_out_edge = weights->getChildEdges()[0].lock();
+                const auto fc_weights_path_edge = node->getParentEdgeAt(idx);
+                const auto inNum = weights_out_edge->getInputNum();
+                const auto outNum = fc_weights_path_edge->getOutputNum();
+                node->setOriginalInputPrecisionAtPort(idx, convert->getOriginalInputPrecisionAtPort(0));
+                graph.RemoveEdge(fc_weights_path_edge);
+                graph.CreateEdge(weights, node, inNum, outNum);
+                if (convert->getChildEdges().empty()) {
+                    graph.DropNode(convert);
+                }
+            }
         }
     }
 }
@@ -1465,7 +1501,7 @@ void GraphOptimizer::FuseConvolutionAndSimpleOperation(Graph &graph) {
             parent++;
             continue;
         }
-
+        DEBUG_LOG("node|", childNode->originalLayers, "is fused into|", parentNode->getName());
         childNode->fuseInto(parentNode);
 
         if (childNode->getType() == Type::FakeQuantize || childNode->getType() == Type::Eltwise) {
@@ -1991,7 +2027,7 @@ void GraphOptimizer::FuseReduceAndSimpleOperation(Graph &graph) {
             parent++;
             continue;
         }
-
+        std::cout << "Reduce|fused|" << childNode->getName() << std::endl;
         childNode->fuseInto(parentNode);
 
         if (childNode->getType() == Type::FakeQuantize || childNode->getType() == Type::Eltwise) {
@@ -3162,6 +3198,26 @@ void GraphOptimizer::MatchSdpaKvCache(Graph &graph) {
 
         graph.AddNode(memInputSdpa);
         graph.AddNode(memOutputStub);
+    }
+}
+
+void GraphOptimizer::FuseConvert(Graph &graph) {
+    // This optimization fuses Convert to Conv/Reduce output to allow post-ops fusion
+    auto& graphNodes = graph.GetNodes();
+    for (const auto& node : graphNodes) {
+        if (!one_of(node->getType(), Type::Convolution, Type::Reduce)) {
+            continue;
+        }
+        // process out_convert
+        {
+            const auto outConvert = node->getChildEdgeAt(0)->getChild();
+            if (outConvert->getType() == Type::Convert &&
+                one_of(outConvert->getOriginalInputPrecisionAtPort(0), ov::element::bf16, ov::element::f32)) {
+                DEBUG_LOG("FuseConvert ", "DropOutConvert ", outConvert->getOriginalInputPrecisionAtPort(0));
+                node->setOriginalOutputPrecisionAtPort(0, outConvert->getOriginalInputPrecisionAtPort(0));
+                graph.DropNode(outConvert);
+            }
+        }
     }
 }
 

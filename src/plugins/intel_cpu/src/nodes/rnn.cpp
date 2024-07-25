@@ -147,6 +147,13 @@ const std::map<memory::data_type, memory::data_type> RNN::weightsByinputDataType
     {memory::data_type::s8,   memory::data_type::s8},
 };
 
+inline const Input* getWeightPtr(const NodePtr& parentNode) {
+    const Input* inputNode = dynamic_cast<const Input*>(parentNode.get());
+    if (inputNode == nullptr) {
+        OPENVINO_THROW("[CPU]RNN cannot cast weightPtr to Constant");
+    }
+    return inputNode;
+}
 
 struct RNNKey {
     const std::vector<DnnlBlockedMemoryDescPtr> inDataDescs;
@@ -795,10 +802,10 @@ void RNN::fillWeights(const int *gate_map, const size_t wIdx, const size_t rIdx)
     const size_t ie_w_vec_size = getInputShapeAtPort(wIdx).getElementsCount();
     const size_t ie_r_vec_size = getInputShapeAtPort(rIdx).getElementsCount();
 
-    auto *wInputNode = dynamic_cast<Input *>(getParentEdgeAt(wIdx)->getParent().get());
+    auto wInputNode = getWeightPtr(getParentEdgeAt(wIdx)->getParent());
     auto wConstBlob = wInputNode->getMemoryPtr();
 
-    auto *rInputNode = dynamic_cast<Input *>(getParentEdgeAt(rIdx)->getParent().get());
+    auto rInputNode = getWeightPtr(getParentEdgeAt(rIdx)->getParent());
     auto rConstBlob = rInputNode->getMemoryPtr();
 
     std::vector<Prec> ie_w_vec(ie_w_vec_size), ie_r_vec(ie_r_vec_size);
@@ -848,8 +855,7 @@ void RNN::fillBiases(const int *gate_map) {
     auto b_ptr = static_cast<dataType*>(w_bias_data_mem->getData());
     if (b_ptr == nullptr)
         OPENVINO_THROW("NotAllocated: Internal blob was not allocated for node ", getName(), ".");
-
-    auto *constInputNode = dynamic_cast<Input *>(getParentEdgeAt(bIdx)->getParent().get());
+    auto *constInputNode = getWeightPtr(getParentEdgeAt(bIdx)->getParent());
     auto constBlob = constInputNode->getMemoryPtr();
     auto const elementsCount = constBlob->getSize() / constBlob->getDesc().getPrecision().size();
 
@@ -1203,6 +1209,7 @@ std::shared_ptr<MemoryDesc> RNN::getDstMemDesc(const dnnl::primitive_desc& prim_
 }
 
 void RNN::execute(dnnl::stream strm) {
+    std::cout << getName() << "execute" << std::endl;
     if (!execPtr)
         THROW_ERROR("does not have initialized primitive to execute.");
 

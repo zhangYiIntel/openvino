@@ -134,8 +134,8 @@ INSTANTIATE_TEST_SUITE_P(smoke_Snippets_Eltwise_BF16, AddRollConst,
                 ::testing::ValuesIn(inShapesAddConst),
                 ::testing::ValuesIn(inShapesConstAddConst),
                 ::testing::Values(ov::element::bf16),
-                ::testing::Values(3), // Add + reorder + roll after inputs
-                ::testing::Values(1), // Subgraph is created, since the inputs are followed by converts
+                ::testing::Values(4), // Add + reorder + roll after inputs
+                ::testing::Values(2), // 2 Subgraphs for input/output
                 ::testing::Values(ov::test::utils::DEVICE_CPU)),
         AddRollConst::getTestCaseName);
 

@@ -255,7 +255,6 @@ private:
     GraphContext::CPtr context;
     dnnl::stream m_stream;
 
-    void EnforceInferencePrecision();
     void EnforceBF16();
     void insertReorder(EdgePtr& edge, bool isOptimized, std::unordered_set<std::string>& uniqueLayerNames);
 };

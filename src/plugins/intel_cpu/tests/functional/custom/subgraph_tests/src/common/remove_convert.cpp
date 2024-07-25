@@ -59,6 +59,8 @@ public:
                                                                 std::vector<int64_t>{},
                                                                 std::vector<int64_t>{},
                                                                 std::vector<int64_t>{});
+        if (inType == ov::element::bf16)
+            slice->get_rt_info() = CPUTestsBase::makeCPUInfo({}, {}, {});
         auto convert2 = std::make_shared<ov::op::v0::Convert>(slice, inType);
         function = std::make_shared<ov::Model>(convert2, ov::ParameterVector{input_params}, "remove_convert");
     };

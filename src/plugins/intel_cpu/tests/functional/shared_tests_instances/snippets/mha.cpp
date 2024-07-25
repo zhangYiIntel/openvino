@@ -152,8 +152,8 @@ INSTANTIATE_TEST_SUITE_P(smoke_Snippets_MHAEnforceBF16,
                                             ::testing::Values(ov::element::bf16),
                                             ::testing::ValuesIn({false}),
                                             ::testing::Values(MHA::default_thread_count),
-                                            ::testing::Values(7),
-                                            ::testing::Values(6),
+                                            ::testing::Values(3), // MHA + 1 Convert + 1 Transpose on output Converts after Parameter are removed for bf16
+                                            ::testing::Values(2), // MHA + 1 Convert
                                             ::testing::Values(ov::test::utils::DEVICE_CPU),
                                             ::testing::Values(CPUTestUtils::cpu_bf16_plugin_config)),
                          MHA::getTestCaseName);
@@ -310,8 +310,8 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(ov::element::bf16),
                        ::testing::ValuesIn({true}),  // Need to support False for graph builder in tests
                        ::testing::Values(MHA::default_thread_count),
-                       ::testing::Values(5),  // MHA + 4 extra Converts on inputs and output
-                       ::testing::Values(5),  // MHA + 4 extra Converts on inputs and output
+                       ::testing::Values(1),  // MHA converts are eliminated by ConverPrecision(BF16)
+                       ::testing::Values(1),  // MHA converts are eliminated by ConverPrecision(BF16)
                        ::testing::Values(ov::test::utils::DEVICE_CPU),
                        ::testing::Values(CPUTestUtils::cpu_bf16_plugin_config)),
     MHA::getTestCaseName);
@@ -324,8 +324,8 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(ov::element::bf16),
                        ::testing::ValuesIn({true}),  // Need to support False for graph builder in tests
                        ::testing::Values(MHA::default_thread_count),
-                       ::testing::Values(5),  // MHA + 4 extra Converts on inputs and output
-                       ::testing::Values(5),  // MHA + 4 extra Converts on inputs and output
+                       ::testing::Values(1),  // MHA converts are eliminated by ConverPrecision(BF16)
+                       ::testing::Values(1),  // MHA converts are eliminated by ConverPrecision(BF16)
                        ::testing::Values(ov::test::utils::DEVICE_CPU),
                        ::testing::Values(CPUTestUtils::cpu_bf16_plugin_config)),
     MHA::getTestCaseName);
