@@ -1214,7 +1214,6 @@ std::shared_ptr<MemoryDesc> RNN::getDstMemDesc(const dnnl::primitive_desc& prim_
 }
 
 void RNN::execute(dnnl::stream strm) {
-    std::cout << getName() << "execute" << std::endl;
     if (!execPtr)
         THROW_ERROR("does not have initialized primitive to execute.");
 

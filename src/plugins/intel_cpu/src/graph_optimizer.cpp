@@ -1524,7 +1524,7 @@ void GraphOptimizer::FuseConvolutionAndSimpleOperation(Graph &graph) {
             parent++;
             continue;
         }
-        DEBUG_LOG("node|", childNode->originalLayers, "is fused into|", parentNode->getName());
+
         childNode->fuseInto(parentNode);
 
         if (childNode->getType() == Type::FakeQuantize || childNode->getType() == Type::Eltwise) {
@@ -2050,7 +2050,6 @@ void GraphOptimizer::FuseReduceAndSimpleOperation(Graph &graph) {
             parent++;
             continue;
         }
-        std::cout << "Reduce|fused|" << childNode->getName() << std::endl;
         childNode->fuseInto(parentNode);
 
         if (childNode->getType() == Type::FakeQuantize || childNode->getType() == Type::Eltwise) {
