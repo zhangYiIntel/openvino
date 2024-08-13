@@ -12,6 +12,9 @@
 #include "utils/general_utils.h"
 #include "openvino/core/graph_util.hpp"
 #include "openvino/op/util/precision_sensitive_attribute.hpp"
+#include "transformations/common_optimizations/mark_precision_sensitive_shapeof_subgraphs.hpp"
+#include "openvino/pass/pass.hpp"
+#include "openvino/pass/manager.hpp"
 
 namespace ov {
 namespace intel_cpu {
@@ -107,6 +110,9 @@ bool MarkInferencePrecision::run_on_model(const std::shared_ptr<ov::Model>& mode
             }
         }
     }
+    ov::pass::Manager manager(get_pass_config(), "MarkInferencePrecision");
+    REGISTER_PASS(manager, ov::pass::MarkPrecisionSensitiveShapeOfSubgraphs);
+    manager.run_passes(model);
     return true;
 }
 
