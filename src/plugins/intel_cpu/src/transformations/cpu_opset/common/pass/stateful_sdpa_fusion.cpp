@@ -197,13 +197,36 @@ StatefulSDPAFusion::StatefulSDPAFusion() {
             }
             return true;
         };
-        if (!is_optional_one_child({convert_past_k, convert_past_v, transpose_q, transpose_k, transpose_v,
+        auto check_past_convert = [&pattern_map](const std::vector<std::shared_ptr<Node>>& nodes) {
+            for (auto&& node : nodes) {
+                if (pattern_map.count(node)) {
+                    auto p = pattern_map.at(node).get_node_shared_ptr();
+                    if (p->get_output_target_inputs(0).size() == 1) {
+                        continue;
+                    } else if (p->get_output_target_inputs(0).size() == 2) {
+                        auto&& children = p->get_output_target_inputs(0);
+                        if (!std::any_of(children.begin(), children.end(), [](const ov::Input<ov::Node>& child) {
+                                return ov::is_type<ov::op::util::ShapeOfBase>(child.get_node()) ||
+                                       ov::is_type<ov::op::v6::Assign>(child.get_node());
+                            })) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        };
+        if (!is_optional_one_child({transpose_q, transpose_k, transpose_v,
                                     reshape_k, unsqueeze_k, computed_bcst_k, multiply_k,
                                     reshape_v, unsqueeze_v, computed_bcst_v, multiply_v,
                                     mq_reshape_k, mq_reshape_v})) {
             return false;
         }
-
+        if (!check_past_convert({convert_past_k, convert_past_v})) {
+            return false;
+        }
         // past_k & past_v must be reordered by same beam_idx
         const auto gather_k_node =
             ov::as_type_ptr<opset8::Gather>(pattern_map.at(gather_input_k).get_node_shared_ptr());

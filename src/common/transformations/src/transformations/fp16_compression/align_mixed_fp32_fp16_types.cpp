@@ -8,6 +8,7 @@
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/result.hpp"
+#include "openvino/op/util/shape_of_base.hpp"
 #include "openvino/op/util/precision_sensitive_attribute.hpp"
 #include "openvino/pass/constant_folding.hpp"
 #include "transformations/rt_info/disable_fp16_compression.hpp"
@@ -31,6 +32,8 @@ bool ov::pass::AlignMixedFP32FP16Types::run_on_model(const std::shared_ptr<ov::M
     std::function<bool(const std::shared_ptr<Node>&)> insert_converts_before_if_needed =
         [&](const std::shared_ptr<Node>& node) {
             bool is_changed = false;
+            if (ov::is_type<ov::op::util::ShapeOfBase>(node))
+                return is_changed;
             for (const auto& input : node->inputs()) {
                 const auto& incoming_output = input.get_source_output();
                 const auto& incoming_node = incoming_output.get_node_shared_ptr();
@@ -43,7 +46,7 @@ bool ov::pass::AlignMixedFP32FP16Types::run_on_model(const std::shared_ptr<ov::M
 
                 auto convert =
                     std::make_shared<ov::op::v0::Convert>(incoming_output, incoming_output.get_element_type());
-                auto init_name = incoming_node->get_friendly_name() + "_decompressed_to_f32";
+                auto init_name = incoming_node->get_friendly_name() + "_before_decompressed_to_f32";
                 convert->set_friendly_name(generate_uniq_name(init_name));
                 copy_runtime_info(incoming_node, convert);
                 input.replace_source_output(convert);
@@ -69,11 +72,13 @@ bool ov::pass::AlignMixedFP32FP16Types::run_on_model(const std::shared_ptr<ov::M
                     if (std::dynamic_pointer_cast<ov::op::v0::Result>(out_node))
                         continue;
 
+                    if (ov::is_type<ov::op::util::ShapeOfBase>(out_node))
+                        continue;
                     // element_type of this convert will be changed automatically to f16 after
                     // ConvertPrecision(f32 -> f16). It's kept here f32 to keep ov::Model validatable
                     auto convert = std::make_shared<ov::op::v0::Convert>(output, out_inputs.get_element_type());
                     copy_runtime_info(node, convert);
-                    auto init_name = node->get_friendly_name() + "_compressed_to_f16";
+                    auto init_name = node->get_friendly_name() + "_after_compressed_to_f16";
                     convert->set_friendly_name(generate_uniq_name(init_name));
                     out_inputs.replace_source_output(convert);
                     pass::disable_constant_folding(convert);
