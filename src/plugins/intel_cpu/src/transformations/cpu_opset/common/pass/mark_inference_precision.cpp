@@ -83,7 +83,9 @@ bool MarkInferencePrecision::run_on_model(const std::shared_ptr<ov::Model>& mode
         // mark node's input
         for (size_t i = 0; i < node->input_values().size(); i++) {
             const auto& parent_node = node->input_values()[i].get_node_shared_ptr();
-            if (ov::is_type<ov::op::v0::Constant>(parent_node) && ov::is_type<ov::op::util::BroadcastBase>(node)) {
+            if (ov::is_type<ov::op::v0::Constant>(parent_node) && ov::is_type<ov::op::v1::Select>(node)) {
+                continue;
+            } else if (ov::is_type<ov::op::v0::Constant>(parent_node) && ov::is_type<ov::op::util::BroadcastBase>(node)) {
                 continue;
             } else if (node->input_values()[i].get_element_type() != ov::element::f32) {
                 ov::disable_fp16_compression(parent_node);
