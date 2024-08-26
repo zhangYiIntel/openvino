@@ -29,7 +29,8 @@ ConvolutionTransformation::ConvolutionTransformation(const Params& params) : Wei
         ov::pass::pattern::wrap_type<ov::opset1::Multiply>(),
         std::make_shared<pass::pattern::op::Or>(OutputVector {
             pattern::wrap_type<ov::opset1::Multiply>(),
-            pattern::wrap_type<ov::opset1::FakeQuantize>()
+            pattern::wrap_type<ov::opset1::FakeQuantize>(),
+            pattern::wrap_type<ov::opset1::Convert>()
         })
     });
 
@@ -230,9 +231,9 @@ bool ConvolutionTransformation::transform(TransformationContext &context, ov::pa
             NetworkHelper::copyInfo(fq, newFQ);
             replace_node(fq, newFQ);
         }
-
+        bool isConvert = ov::is_type<ov::opset1::Convert>(convolution->get_input_node_shared_ptr(1));
         std::shared_ptr<ov::opset1::Multiply> multiplyFromWeights = ov::as_type_ptr<ov::opset1::Multiply>(
-            reshapeFromWeights == nullptr ?
+            reshapeFromWeights == nullptr && !isConvert ?
             convolution->get_input_node_shared_ptr(1) :
             convolution->get_input_node_ptr(1)->get_input_node_shared_ptr(0));
         std::shared_ptr<ov::opset1::Subtract> subtractFromWeights = ov::as_type_ptr<ov::opset1::Subtract>(multiplyFromWeights->get_input_node_shared_ptr(0));

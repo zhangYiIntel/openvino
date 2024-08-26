@@ -32,6 +32,18 @@ void SetNodeFusingType(const std::shared_ptr<Node> &node, NodeFusingType nodeTyp
     auto &rt = node->get_rt_info();
     rt["MayBeFusedInPlugin"] = nodeType;
 }
+bool isConstant(const std::shared_ptr<Node> &node) {
+    if (ov::is_type<ov::op::v0::Constant>(node))
+        return true;
+    bool convertConst = false;
+    if (ov::is_type<ov::op::v0::Convert>(node)) {
+        convertConst = ov::is_type<ov::op::v0::Constant>(node->get_input_node_ptr(0));
+        auto inPrc = node->get_input_element_type(0);
+        auto outPrc = node->get_output_element_type(0);
+        convertConst = convertConst && (inPrc == element::f32 && outPrc == element::bf16);
+    }
+    return convertConst;
+}
 std::vector<NodeFusingType> getContinuableChains(const std::shared_ptr<const Node> &node) {
     std::vector<NodeFusingType> result;
     for (const auto& input : node->inputs()) {
@@ -50,10 +62,11 @@ int getNumNonConstInputs(const std::shared_ptr<const Node> &node) {
         if (ov::is_type<ov::op::v1::Reshape>(parent)) {
             for (const auto &grandparent_out : parent->input_values()) {
                 const auto grandparent = grandparent_out.get_node_shared_ptr();
-                if (!ov::is_type<ov::op::v0::Constant>(grandparent))
+                if (!ov::is_type<ov::op::v0::Constant>(grandparent)) {
                     num_non_const_inputs++;
+                }
             }
-        } else if (!ov::is_type<ov::op::v0::Constant>(parent)) {
+        } else if (!isConstant(parent)) {
             num_non_const_inputs++;
         }
     }
@@ -86,19 +99,19 @@ bool SupportsFusingWithConvolution_SumActivation(const std::shared_ptr<const Nod
             ov::is_type<ov::op::v4::Mish>(node) ||
             ov::is_type<ov::op::v5::Round>(node);
 }
-
 bool canBePerformedAsScaleShift(const std::shared_ptr<const Node> &node, const int channelAxis) {
     size_t fusingPort = 0;
     size_t numNonConstInputs = 0;
     ov::PartialShape dataShape;
     for (size_t i = 0; i < node->get_input_size(); i++) {
         const auto parent = node->get_input_node_shared_ptr(i);
-        if (!ov::is_type<ov::op::v0::Constant>(parent)) {
+        if (!isConstant(parent)) {
             fusingPort = i;
             dataShape = node->get_input_partial_shape(i);
             // only one non-const parent is allowed
-            if (++numNonConstInputs != 1)
+            if (++numNonConstInputs != 1) {
                 return false;
+            }
         } else {
             // every const parent must have exactly one child
             const auto out = parent->outputs();
@@ -107,7 +120,6 @@ bool canBePerformedAsScaleShift(const std::shared_ptr<const Node> &node, const i
                 return false;
         }
     }
-
     const auto isBroadcastableToDataInput = [&]() {
         for (size_t i = 0; i < node->get_input_size(); i++) {
             if (i == fusingPort)
@@ -118,7 +130,6 @@ bool canBePerformedAsScaleShift(const std::shared_ptr<const Node> &node, const i
         }
         return true;
     };
-
     // Prelu and MulAdd are still ignored
     // isConvertablePowerStatic() is ignored
     return (ov::is_type<ov::opset1::Add>(node) ||
@@ -127,11 +138,9 @@ bool canBePerformedAsScaleShift(const std::shared_ptr<const Node> &node, const i
             ov::is_type<ov::opset1::Divide>(node)) &&
            isBroadcastableToDataInput();
 }
-
 inline bool canBeMatMulExecutedInInt8(const ov::element::Type& firstType, const ov::element::Type& secondType) {
     return one_of(firstType, ov::element::i8, ov::element::u8) && secondType == ov::element::i8;
 }
-
 bool SupportsFusingWithConvolution_Simple(const std::shared_ptr<const Node> &node, const int channelAxis = DEFAULT_AXIS) {
     return SupportsFusingWithConvolution_SumActivation(node) ||
            ov::is_type<ov::op::v0::Tanh>(node) ||
@@ -147,6 +156,7 @@ bool isFusableConvert(const std::shared_ptr<const Node>& node) {
     bool is_suitable_convert = ov::is_type<ov::op::v0::Convert>(node) &&
                                (ov::is_type<ov::op::v1::Convolution>(node->get_input_node_ptr(0)) ||
                                 ov::is_type<ov::op::v1::GroupConvolution>(node->get_input_node_ptr(0)) ||
+                                ov::is_type<ov::op::util::ConvolutionBackPropBase>(node->get_input_node_ptr(0)) ||
                                 ov::is_type<ov::op::util::ArithmeticReductionKeepDims>(node->get_input_node_ptr(0)));
     // only has one child
     if (is_suitable_convert) {
@@ -376,7 +386,7 @@ bool isSuitableParentForFusingSumActivation(const std::shared_ptr<const Node> &n
             return false;
         const auto conv = n->get_input_source_output(0);
         const auto bias = n->get_input_source_output(1);
-        if (!(ov::is_type<ov::op::v0::Constant>(bias.get_node_shared_ptr()) && isSuitableConvolutionParent(conv.get_node_shared_ptr())))
+        if (!(isConstant(bias.get_node_shared_ptr()) && isSuitableConvolutionParent(conv.get_node_shared_ptr())))
             return false;
         const auto& conv_shape = conv.get_partial_shape();
         const auto& bias_shape = bias.get_partial_shape();

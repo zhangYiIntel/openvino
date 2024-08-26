@@ -82,13 +82,18 @@ std::shared_ptr<opset1::Constant> getConstant(const std::shared_ptr<Node>& eltwi
     if (eltwise->get_input_size() != 2) {
         return nullptr;
     }
-
-    std::shared_ptr<opset1::Constant> constant = ov::as_type_ptr<opset1::Constant>(eltwise->get_input_node_shared_ptr(1));
+    bool isConvert = ov::is_type<opset1::Convert>(eltwise->get_input_node_shared_ptr(1));
+    std::shared_ptr<opset1::Constant> constant = ov::as_type_ptr<opset1::Constant>(
+        isConvert ? eltwise->get_input_node_shared_ptr(1)->get_input_node_shared_ptr(0)
+                  : eltwise->get_input_node_shared_ptr(1));
     if (constant != nullptr) {
         return constant;
     }
-
-    return ov::as_type_ptr<opset1::Constant>(eltwise->get_input_node_shared_ptr(0));
+    isConvert = ov::is_type<opset1::Convert>(eltwise->get_input_node_shared_ptr(0));
+    constant = ov::as_type_ptr<opset1::Constant>(
+        isConvert ? eltwise->get_input_node_shared_ptr(0)->get_input_node_shared_ptr(0)
+                  : eltwise->get_input_node_shared_ptr(0));
+    return constant;
 }
 
 bool all_precisions_equal(const std::shared_ptr<Node>& node) {

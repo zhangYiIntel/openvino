@@ -1179,8 +1179,11 @@ FakeQuantizeDequantization NetworkHelper::getDequantization(const std::shared_pt
             return FakeQuantizeDequantization();
         dataNode = node->input_value(parentIndex);
     }
-
-    const std::shared_ptr<ov::opset1::Multiply> multiply = ov::as_type_ptr<ov::opset1::Multiply>(dataNode.get_node_shared_ptr());
+    const auto dataNodePtr = dataNode.get_node_shared_ptr();
+    bool isConvert = ov::is_type<ov::opset1::Convert>(dataNodePtr);
+    const std::shared_ptr<ov::opset1::Multiply> multiply =
+        isConvert ? ov::as_type_ptr<ov::opset1::Multiply>(dataNodePtr->get_input_node_shared_ptr(0))
+                  : ov::as_type_ptr<ov::opset1::Multiply>(dataNodePtr);
     std::shared_ptr<ov::opset1::Constant> multiplyConstant;
     if (multiply != nullptr) {
         if (!FakeQuantizeDequantization::checkShape(multiply)) {

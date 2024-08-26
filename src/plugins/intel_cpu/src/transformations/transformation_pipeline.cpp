@@ -165,6 +165,9 @@
 #include "cpu/x64/cpu_isa_traits.hpp"
 #endif
 #include "openvino/core/validation_util.hpp"
+#include "openvino/pass/visualize_tree.hpp"
+#include "transformations/rt_info/dequantization_node.hpp"
+#include "low_precision/network_helper.hpp"
 
 namespace ov {
 namespace intel_cpu {
@@ -402,8 +405,97 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     } else if (inferencePrecision == ov::element::bf16) {
         CPU_REGISTER_PASS_COMMON(manager, MarkInferencePrecision)
         precisions_map fp_convert_precision_map = {{ov::element::f32, ov::element::bf16}};
-        type_to_fuse_map fuse_map = {};
         const bool keep_precision_sensitive_in_fp32 = true;
+        auto fuse_convert = [](const std::shared_ptr<ov::Node>& node, const precisions_map& precisions) {
+            auto it = precisions.find(node->get_output_element_type(0));
+            bool ok = false;
+            if (it == precisions.end())
+                return false;
+            const auto& to = it->second;
+            auto convert = ov::as_type_ptr<ov::op::v0::Convert>(node);
+            if (convert) {
+                convert->set_convert_element_type(to);
+                ok = true;
+            }
+            auto parent_node = convert->get_input_node_shared_ptr(0);
+            if (is_dequantization_node(parent_node) || is_decompression(parent_node)) {
+                auto consumers = parent_node->output(0).get_target_inputs();
+                if (consumers.size() != 1)
+                    return ok;
+                auto child = consumers.begin()->get_node();
+                if (!ov::is_type<ov::op::v1::Multiply>(parent_node))
+                    return ok;
+                auto newMultiplpy = std::make_shared<ov::op::TypeRelaxed<ov::opset1::Multiply>>(
+                    std::vector<ov::element::Type>{parent_node->get_input_element_type(0) , parent_node->get_input_element_type(1)},
+                    std::vector<ov::element::Type>{to},
+                    parent_node->input_value(0),
+                    parent_node->input_value(1));
+                ov::replace_node(node, newMultiplpy);
+                newMultiplpy->set_friendly_name(parent_node->get_friendly_name());
+                ov::copy_runtime_info(parent_node, newMultiplpy);
+                return true;
+            }
+
+            if (ov::is_type<ov::op::v1::Multiply>(parent_node)) {
+                auto newMultiplpy = std::make_shared<ov::op::TypeRelaxed<ov::opset1::Multiply>>(
+                    std::vector<ov::element::Type>{parent_node->get_input_element_type(0) , parent_node->get_input_element_type(1)},
+                    std::vector<ov::element::Type>{to},
+                    parent_node->input_value(0),
+                    parent_node->input_value(1));
+                ov::replace_node(node, newMultiplpy);
+                newMultiplpy->set_friendly_name(parent_node->get_friendly_name());
+                ov::copy_runtime_info(parent_node, newMultiplpy);
+                return true;
+            } else if (ov::is_type<ov::op::v1::Add>(parent_node)) {
+                auto newAdd = std::make_shared<ov::op::TypeRelaxed<ov::opset1::Add>>(
+                    std::vector<ov::element::Type>{parent_node->get_input_element_type(0) , parent_node->get_input_element_type(1)},
+                    std::vector<ov::element::Type>{to},
+                    parent_node->input_value(0),
+                    parent_node->input_value(1));
+                ov::replace_node(node, newAdd);
+                newAdd->set_friendly_name(parent_node->get_friendly_name());
+                ov::copy_runtime_info(parent_node, newAdd);
+                return true;
+            }
+            return ok;
+        };
+        auto fuse_fq = [](const std::shared_ptr<ov::Node>& node, const precisions_map& precisions) -> bool {
+            auto fakeQuantize = ov::as_type_ptr<ov::op::v0::FakeQuantize>(node);
+            auto input_0_precision = fakeQuantize->get_input_element_type(0);
+            auto input_1_precision = fakeQuantize->get_input_element_type(1);
+            auto input_2_precision = fakeQuantize->get_input_element_type(2);
+            auto input_3_precision = fakeQuantize->get_input_element_type(3);
+            auto input_4_precision = fakeQuantize->get_input_element_type(4);
+            std::shared_ptr<ov::op::v0::FakeQuantize> newFakeQuantize =
+                std::make_shared<ov::op::TypeRelaxed<ov::op::v0::FakeQuantize>>(
+                    std::vector<ov::element::Type>{input_0_precision,
+                                                   input_1_precision,
+                                                   input_2_precision,
+                                                   input_3_precision,
+                                                   input_4_precision},
+                    std::vector<ov::element::Type>{input_0_precision},
+                    ov::op::TemporaryReplaceOutputType(fakeQuantize->input_value(0), input_0_precision).get(),
+                    ov::op::TemporaryReplaceOutputType(fakeQuantize->get_input_node_ptr(1)->input_value(0),
+                                                       input_1_precision)
+                        .get(),
+                    ov::op::TemporaryReplaceOutputType(fakeQuantize->get_input_node_ptr(2)->input_value(0),
+                                                       input_2_precision)
+                        .get(),
+                    ov::op::TemporaryReplaceOutputType(fakeQuantize->get_input_node_ptr(3)->input_value(0),
+                                                       input_3_precision)
+                        .get(),
+                    ov::op::TemporaryReplaceOutputType(fakeQuantize->get_input_node_ptr(4)->input_value(0),
+                                                       input_4_precision)
+                        .get(),
+                    fakeQuantize->get_levels());
+            newFakeQuantize->set_friendly_name(fakeQuantize->get_friendly_name());
+            ov::copy_runtime_info(fakeQuantize, newFakeQuantize);
+            replace_node(fakeQuantize, newFakeQuantize);
+            return true;
+        };
+        type_to_fuse_map fuse_map = {{ov::op::v0::Convert::get_type_info_static(), fuse_convert},
+                                     {ov::op::v0::FakeQuantize::get_type_info_static(), fuse_fq}};
+        // type_to_fuse_map fuse_map = {};
         CPU_REGISTER_PASS_COMMON(manager,
                                  ov::pass::ConvertPrecision,
                                  fp_convert_precision_map,
@@ -422,6 +514,7 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
         ov::pass::KeepConstAndDecompression);
 
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::AUGRUCellFusion);
+    CPU_REGISTER_PASS_COMMON(manager, ov::pass::VisualizeTree, "yi_before_common.svg");
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::CommonOptimizations);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::WrapInterpolateIntoTransposes);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::TransposeSinking);
@@ -458,6 +551,7 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     // Do not insert pass::Validate between pass::InsertConvertAfterExtension and pass::ConvertPrecision.
     // This may result in the loss of the original Element type of the Output .
     // element type convert is disabled.
+    CPU_REGISTER_PASS_COMMON(manager, ov::pass::VisualizeTree, "before_2nd_Convert.svg");
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ConvertPrecision, precisions, type_to_fuse, false, convert_input_output_precision);
 
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::EliminateConvert);
@@ -687,6 +781,7 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::EnableDecompressionConvertConstantFolding);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::KeepConstAndDecompression);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ConstantFolding);
+    CPU_REGISTER_PASS_COMMON(manager, ov::pass::VisualizeTree, "yi_after_lpt.svg");
 
     manager.run_passes(model);
 }
