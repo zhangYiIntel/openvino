@@ -204,25 +204,36 @@ static void paged_attn_quant_mt(const ov::intel_cpu::PlainTensor& k_src,
                                 const ov::intel_cpu::PlainTensor& v_dst,
                                 const ov::intel_cpu::PlainTensor& slot_mapping) {
     size_t B = k_src.m_dims[0], H = k_src.m_dims[1], L1 = k_src.m_dims[2], S = k_src.m_dims[3];
-    size_t block_size = k_dst.m_dims[2];
-    parallel_for3d(B, L1, H, [&](size_t b, size_t m, size_t h) {
-        auto slot = slot_mapping.ptr<int32_t>(b)[m];
+    std::cout << "going to quantize on k_src shape|" << k_src.m_dims[0] << "," << k_src.m_dims[1] << "," << k_src.m_dims[2]
+              << "," << k_src.m_dims[3] << std::endl;
+    std::cout << "going to quantize on k_dst shape|" << k_dst.m_dims[0] << "," << k_dst.m_dims[1] << "," << k_dst.m_dims[2]
+              << "," << k_dst.m_dims[3] << "," << k_dst.m_dims[4] << std::endl;
+    auto dst_rank = k_dst.m_rank;
+    bool is_group_quantize = dst_rank > 4;
+    size_t group_size = (k_dst.m_dims[dst_rank - 1] - 4) * k_dst.m_dims[dst_rank - 2];
+    size_t groups = is_group_quantize ? k_dst.m_dims[dst_rank - 3] : H;
+    size_t block_size = k_dst.m_dims[1];
+    printf("quantzie groups %ld group_size %ld block_size %ld\n", groups, group_size, block_size);
+    k_src.reshape({B, groups, group_size});
+    v_src.reshape({B, groups, group_size});
+    parallel_for2d(B, groups, [&](size_t b, size_t group) {
+        auto slot = slot_mapping.ptr<int32_t>(b)[0];
         if (slot < 0) return;
         auto block_number = slot / block_size;
         auto block_offset = slot % block_size;
 
-        auto p_k = reinterpret_cast<float*>(k_dst.ptr<T2>(block_number, h, block_offset));
-        auto p_v = reinterpret_cast<float*>(v_dst.ptr<T2>(block_number, h, block_offset));
+        auto p_k = reinterpret_cast<float*>(k_dst.ptr<T2>(block_number, block_offset, group));
+        auto p_v = reinterpret_cast<float*>(v_dst.ptr<T2>(block_number, block_offset, group));
         // The layout for per token per head:
         // |scale(f32)|zeropoint(f32)|quantized feature(u8,idx_1)|quantized feature(u8,idx_2)|...|quantized feature(u8,idx_S)|
-        quant_u8(k_src.ptr<T>(b, h, m),
-                 k_dst.ptr<T2>(block_number, h, block_offset) + sizeof(float) + sizeof(float),
-                 S,
+        quant_u8(k_src.ptr<T>(b, group),
+                 k_dst.ptr<T2>(block_number, block_offset, group) + sizeof(float) + sizeof(float),
+                 group_size,
                  p_k[0],
                  p_k[1]);
-        quant_u8(v_src.ptr<T>(b, h, m),
-                 v_dst.ptr<T2>(block_number, h, block_offset) + sizeof(float) + sizeof(float),
-                 S,
+        quant_u8(v_src.ptr<T>(b, group),
+                 v_dst.ptr<T2>(block_number, block_offset, group) + sizeof(float) + sizeof(float),
+                 group_size,
                  p_v[0],
                  p_v[1]);
     });

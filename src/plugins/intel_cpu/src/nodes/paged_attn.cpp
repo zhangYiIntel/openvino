@@ -129,7 +129,8 @@ void PagedAttention::createPrimitive() {
     auto builder = [&](const PagedAttentionKey& key) -> std::shared_ptr<PagedAttentionExecutor> {
 #ifdef OPENVINO_ARCH_X86_64
         auto kvCachePrecision = getOriginalInputPrecisionAtPort(PagedAttentionExecutor::ID_KCACHE);
-        return make_pa_executor(rtPrecision, kvCachePrecision);
+        std::cout << "PagedAttn|KVCachePrec|" << kvCachePrecision << std::endl;
+        return make_pa_executor(rtPrecision, kvCachePrecision, kvCachePrecision);
 #else
         return nullptr;
 #endif
