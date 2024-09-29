@@ -1123,6 +1123,7 @@ struct MHAHelper {
 
         parallel_for3d_dynamic(B, kv_len_in_blocks, _Hk, [&](size_t b, size_t pk_in_blocks, size_t hk) {
             auto context_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
+            auto ithr = parallel_get_thread_num();
             // kv_len must be valid
             auto pk = pk_in_blocks * _block_size;
             if (pk < context_len) {
@@ -1137,9 +1138,21 @@ struct MHAHelper {
                     }
                     _gemv->tile_release();
                 } else {
+                    auto* decomp_buffer = _output.template ptr<DATA_TYPE>(ithr);
+                    size_t group_index = hk  / present_key.m_dims[3];
+                    size_t sub_group_index = hk  % present_key.m_dims[3];
+                    for (size_t n = 0; n < std::min(_block_size, context_len - pk); n++) {
+                        auto* params = present_key.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0);
+                        auto* k_ptr = present_key.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                        size_t offset = sub_group_index * (present_key.m_dims[4] - sizeof(float));
+                        float scale = reinterpret_cast<float*>(params)[0];
+                        float zp = reinterpret_cast<float*>(params)[1];
+                        // scale(float)|zp(float)|data_0|data_1|data_2|...
+                        attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(k_ptr) + offset, decomp_buffer + n * _S , _S, scale, zp);
+                    }
                     for (size_t pq = 0; pq < q_len; pq++) {
                         for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
-                            dot_product_block(query.ptr<DATA_TYPE>(b, h, pq), present_key.ptr<KEY_CACHE_TYPE>(block_number, hk),
+                            dot_product_block(query.ptr<DATA_TYPE>(b, h, pq), decomp_buffer,
                                 _weight_bhl.ptr<float>(b, h, pq) + pk, _S, std::min(_block_size, context_len - pk));
                         }
                     }
@@ -1196,11 +1209,23 @@ struct MHAHelper {
             if (pv < context_len) {
                 auto block_number = block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[b] + pv_in_blocks];
                 auto* v = present_value.ptr<KEY_CACHE_TYPE>(block_number, hk);
+                auto* decomp_buffer = _output.template ptr<DATA_TYPE>(ithr);;
+                size_t group_index = hk  / present_value.m_dims[3];
+                size_t sub_group_index = hk  % present_value.m_dims[3];
+                for (size_t n = 0; n < std::min(_block_size, context_len - pv); n++) {
+                    auto* params = present_value.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0);
+                    auto* v_ptr = present_value.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                    size_t offset = sub_group_index * (present_value.m_dims[4] - sizeof(float));
+                    float scale = reinterpret_cast<float*>(params)[0];
+                    float zp = reinterpret_cast<float*>(params)[1];
+                    // scale(float)|zp(float)|data_0|data_1|data_2|...
+                    attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _S, _S, scale, zp);
+                }
                 for (size_t pq = 0; pq < q_len; pq++) {
                     for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
                         attn_acc_value_block(_output_bhl.ptr<float>(ithr, b, pq, h),
                                              _weight_bhl.ptr<float>(b, h, pq) + pv,
-                                             v,
+                                             decomp_buffer,
                                              _S,
                                              std::min(_block_size, context_len - pv));
                     }
@@ -1358,16 +1383,16 @@ struct MHA {
             auto* v_ptr = v_cache.ptr<KEY_CACHE_TYPE>(block_number, hk);
             if (is_grouped) {
                 auto* decomp_buffer = _helper._output.template ptr<DATA_TYPE>(ithr);
-                size_t group_index = hk  / v_cache.m_dims[4];
-                size_t sub_group_index = hk  % v_cache.m_dims[4];
+                size_t group_index = hk  / k_cache.m_dims[3];
+                size_t sub_group_index = hk  % k_cache.m_dims[3];
                 for (size_t n = 0; n < _helper._block_size; n++) {
-                    auto* params = k_cache.ptr<KEY_CACHE_TYPE>(block_number, group_index, 0);
-                    auto* k_ptr = k_cache.ptr<KEY_CACHE_TYPE>(block_number, group_index, sub_group_index);
-                    size_t offset = sub_group_index > 0 ? 0 : sizeof(float) * 2;
+                    auto* params = k_cache.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0);
+                    auto* k_ptr = k_cache.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                    size_t offset = sub_group_index * (k_cache.m_dims[4] - sizeof(float));
                     float scale = reinterpret_cast<float*>(params)[0];
                     float zp = reinterpret_cast<float*>(params)[1];
                     // scale(float)|zp(float)|data_0|data_1|data_2|...
-                    attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(k_ptr) + offset, decomp_buffer, _helper._S, scale, zp);
+                    attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(k_ptr) + offset, decomp_buffer + n * _helper._S , _helper._S, scale, zp);
                 }
                 transpose_16NxK(_helper._qk_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
                     decomp_buffer,
@@ -1384,16 +1409,16 @@ struct MHA {
             if (q_is_bf16) {
                 if (is_grouped) {
                     auto* decomp_buffer = _helper._output.template ptr<DATA_TYPE>(ithr);;
-                    size_t group_index = hk  / v_cache.m_dims[4];
-                    size_t sub_group_index = hk  % v_cache.m_dims[4];
+                    size_t group_index = hk  / v_cache.m_dims[3];
+                    size_t sub_group_index = hk  % v_cache.m_dims[3];
                     for (size_t n = 0; n < _helper._block_size; n++) {
-                        auto* params = v_cache.ptr<KEY_CACHE_TYPE>(block_number, group_index, 0);
-                        auto* v_ptr = v_cache.ptr<KEY_CACHE_TYPE>(block_number, group_index, sub_group_index);
-                        size_t offset = sub_group_index > 0 ? 0 : sizeof(float) * 2;
+                        auto* params = v_cache.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0);
+                        auto* v_ptr = v_cache.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                        size_t offset = sub_group_index * (v_cache.m_dims[4] - sizeof(float));
                         float scale = reinterpret_cast<float*>(params)[0];
                         float zp = reinterpret_cast<float*>(params)[1];
                         // scale(float)|zp(float)|data_0|data_1|data_2|...
-                        attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer, _helper._S, scale, zp);
+                        attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _helper._S, _helper._S, scale, zp);
                     }
                     pack_32Nx16K(_helper._wv_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
                         decomp_buffer,
@@ -1427,6 +1452,7 @@ struct MHA {
             size_t ithr = parallel_get_thread_num();
 
             if (q_len == 1) {
+                std::cout << "qlen 1|" << k_cache << std::endl;
                 const auto cur_kv_len = static_cast<size_t>(past_lens.ptr<int32_t>()[batch_in_seq]) + 1;
                 float* score_output = nullptr;
                 if (output_score) {
@@ -1440,6 +1466,7 @@ struct MHA {
                     ithr, hk, 1ul, cur_kv_len, alibi_slopes,
                     score_output);
             } else {
+                std::cout << "exec_kernel_multiple" << std::endl;
                 const auto batch_in_reorder = item.batch_in_reorder;
                 const auto q_blk = item.q_block_id;
                 const auto q_cnt = std::min(_helper._block_size, q_len - q_blk * _helper._block_size);
@@ -1576,7 +1603,7 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                       << k_cache.m_dims[2] << "," << k_cache.m_dims[3] << std::endl;
             if (kv_rank > 5) {
                 k_cache.assert_dims({v_cache.m_dims[0], block_size, v_cache.m_dims[2], v_cache.m_dims[3], S + 4}, true);
-                std::cout << "PagedAttn|Done KVCache" << std::endl;
+                std::cout << "PagedAttn|Done KVCache" << "grouped|" << block_size << std::endl;
             }
             std::cout << "PagedAttn|Done KVCache" << std::endl;
         } else {

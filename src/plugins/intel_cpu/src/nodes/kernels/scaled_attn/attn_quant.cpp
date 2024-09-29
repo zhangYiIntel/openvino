@@ -205,7 +205,7 @@ static void paged_attn_quant_mt(const ov::intel_cpu::PlainTensor& k_src,
                                 const ov::intel_cpu::PlainTensor& slot_mapping) {
     size_t B = k_src.m_dims[0], H = k_src.m_dims[1], L1 = k_src.m_dims[2], S = k_src.m_dims[3];
     std::cout << "going to quantize on k_src shape|" << k_src.m_dims[0] << "," << k_src.m_dims[1] << "," << k_src.m_dims[2]
-              << "," << k_src.m_dims[3] << std::endl;
+              << "," << k_src.m_dims[3]  << "|is_dense|" << k_src.is_dense() << std::endl;
     std::cout << "going to quantize on k_dst shape|" << k_dst.m_dims[0] << "," << k_dst.m_dims[1] << "," << k_dst.m_dims[2]
               << "," << k_dst.m_dims[3] << "," << k_dst.m_dims[4] << std::endl;
     auto dst_rank = k_dst.m_rank;
@@ -226,12 +226,12 @@ static void paged_attn_quant_mt(const ov::intel_cpu::PlainTensor& k_src,
         auto p_v = reinterpret_cast<float*>(v_dst.ptr<T2>(block_number, block_offset, group));
         // The layout for per token per head:
         // |scale(f32)|zeropoint(f32)|quantized feature(u8,idx_1)|quantized feature(u8,idx_2)|...|quantized feature(u8,idx_S)|
-        quant_u8(k_src.ptr<T>(b, group),
+        quant_u8(k_src.ptr<T>(b, group * k_dst.m_dims[3]),
                  k_dst.ptr<T2>(block_number, block_offset, group) + sizeof(float) + sizeof(float),
                  group_size,
                  p_k[0],
                  p_k[1]);
-        quant_u8(v_src.ptr<T>(b, group),
+        quant_u8(v_src.ptr<T>(b, group * v_dst.m_dims[3]),
                  v_dst.ptr<T2>(block_number, block_offset, group) + sizeof(float) + sizeof(float),
                  group_size,
                  p_v[0],
