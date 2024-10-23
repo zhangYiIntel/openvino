@@ -769,7 +769,7 @@ static void pack_32NxK(float* dst, T* src, float* tmp, size_t N, size_t K, size_
     OPENVINO_THROW("pack_32NxK: should not be called.");
 }
 
-template <typename DATA_TYPE, typename KVCACHE_TYPE>
+template <typename DATA_TYPE, typename KEY_CACHE_TYPE, typename VALUE_CACHE_TYPE>
 struct MHAHelper {
     // initialize once
     size_t _H;
@@ -838,6 +838,7 @@ struct MHAHelper {
         // resize temporary buffers, weight.size(3) will be aligned to block_size
         _weight.resize<float>({static_cast<size_t>(_nthr), H, _block_size, new_score_stride});
         _output.resize<float>({static_cast<size_t>(_nthr), _block_size, H, SV});
+        _output_bhl.resize<float>({static_cast<size_t>(_nthr), _block_size, H, SV});
 
         // TODO: kernel supports stride
         if (_qk_gemm.empty() || prev_score_stride < new_score_stride) {
@@ -885,11 +886,11 @@ struct MHAHelper {
             if ((S % 32 == 0) && (block_size % 16 == 0) && (S <= 32 * 6)) {
                 if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::amx_bf16) &&
                     precision_of<DATA_TYPE>::value == ov::element::bf16 &&
-                    precision_of<KVCACHE_TYPE>::value == ov::element::bf16) {
+                    precision_of<KEY_CACHE_TYPE>::value == ov::element::bf16) {
                     _fastpath_valid_prec = ov::element::bf16;
                 } else if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::amx_fp16) &&
                            precision_of<DATA_TYPE>::value == ov::element::f16 &&
-                           precision_of<KVCACHE_TYPE>::value == ov::element::f16) {
+                           precision_of<KEY_CACHE_TYPE>::value == ov::element::f16) {
                     _fastpath_valid_prec = ov::element::f16;
                 }
             }
@@ -944,7 +945,7 @@ struct MHAHelper {
         auto q_end = std::min(q_start + _block_size, q_len);
         auto q_cnt = q_end - q_start;
         constexpr bool q_is_xf16 = one_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
-        constexpr bool q_cache_is_same = precision_of<DATA_TYPE>::value == precision_of<KVCACHE_TYPE>::value;
+        constexpr bool q_cache_is_same = precision_of<DATA_TYPE>::value == precision_of<KEY_CACHE_TYPE>::value;
         auto cur_kv_len_blocks = div_up(cur_kv_len, _block_size);
         for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
             auto* q_ptr = query.ptr<DATA_TYPE>(h, q_start, 0);
@@ -1026,6 +1027,7 @@ struct MHAHelper {
                 if (q_is_xf16 || !q_cache_is_same) {
                     v_ptr = wv_scratch_b.ptr<DATA_TYPE>(v_blk, hk);
                 } else {
+                    abort();
                     v_ptr = present_value.ptr<DATA_TYPE>(block_table[v_blk], hk);
                 }
                 if (v_blk == 0) {
@@ -1066,13 +1068,14 @@ struct MHAHelper {
     //  output: [nthr, 32, H, S]
     void exec_kernel_one_bh(const PlainTensor& query, const PlainTensor& present_key, const PlainTensor& present_value, const PlainTensor& output_emb,
         const int32_t* block_table, size_t ithr, size_t hk, size_t q_len, size_t cur_kv_len, const PlainTensor& alibi_slopes, float* score_output) {
+        std::cout << "YITEST|exec_kernel_one_bh" << "|cur_kv_len|" << cur_kv_len << std::endl;
         if (one_of(_fastpath_valid_prec, ov::element::bf16, ov::element::f16)) {
             _gemv->tile_config();
             for (size_t pk = 0, i = 0; pk < cur_kv_len; pk += _block_size, i++) {
                 auto block_number = block_table[i];
                 for (size_t pq = 0; pq < q_len; pq++) {
                     for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
-                        (*_gemv)(query.ptr<DATA_TYPE>(h, pq), present_key.ptr<KVCACHE_TYPE>(block_number, hk),
+                        (*_gemv)(query.ptr<DATA_TYPE>(h, pq), present_key.ptr<KEY_CACHE_TYPE>(block_number, hk),
                             _weight.ptr<float>(ithr, h, pq) + pk);
                     }
                 }
@@ -1081,9 +1084,21 @@ struct MHAHelper {
         } else {
             for (size_t pk = 0, i = 0; pk < cur_kv_len; pk += _block_size, i++) {
                 auto block_number = block_table[i];
+                auto* decomp_buffer = _output_bhl.template ptr<DATA_TYPE>(ithr);
+                size_t group_index = hk  / present_key.m_dims[3];
+                size_t sub_group_index = hk  % present_key.m_dims[3];
+                for (size_t n = 0; n < std::min(_block_size, cur_kv_len - pk); n++) {
+                    auto* params = present_key.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0);
+                    auto* k_ptr = present_key.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                    size_t offset = sub_group_index * (present_key.m_dims[4] - sizeof(float));
+                    float scale = reinterpret_cast<float*>(params)[0];
+                    float zp = reinterpret_cast<float*>(params)[1];
+                    // scale(float)|zp(float)|data_0|data_1|data_2|...
+                    attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(k_ptr) + offset, decomp_buffer + n * _S , _S, scale, zp);
+                }
                 for (size_t pq = 0; pq < q_len; pq++) {
                     for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
-                        dot_product_block(query.ptr<DATA_TYPE>(h, pq), present_key.ptr<KVCACHE_TYPE>(block_number, hk),
+                        dot_product_block(query.ptr<DATA_TYPE>(h, pq), decomp_buffer,
                             _weight.ptr<float>(ithr, h, pq) + pk, _S, std::min(_block_size, cur_kv_len - pk));
                     }
                 }
@@ -1120,12 +1135,36 @@ struct MHAHelper {
         memset(_output.ptr<float>(ithr), 0, q_len * _H * _SV * sizeof(float));
         for (size_t pv = 0, i = 0; pv < cur_kv_len; pv += _block_size, i++) {
             auto block_number = block_table[i];
-            auto* v = present_value.ptr<KVCACHE_TYPE>(block_number, hk);
+            auto* v = present_value.ptr<KEY_CACHE_TYPE>(block_number, hk);
+            auto* decomp_buffer = _output_bhl.template ptr<DATA_TYPE>(ithr);
+            size_t group_index = hk  / present_value.m_dims[3];
+            size_t sub_group_index = hk  % present_value.m_dims[3];
+            for (size_t n = 0; n < std::min(_block_size, cur_kv_len - pv); n++) {
+                auto* params = present_value.ptr<VALUE_CACHE_TYPE>(block_number, n, group_index, 0);
+                auto* v_ptr = present_value.ptr<VALUE_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                size_t offset = sub_group_index * (present_value.m_dims[4] - sizeof(float));
+                float scale = reinterpret_cast<float*>(params)[0];
+                float zp = reinterpret_cast<float*>(params)[1];
+                // scale(float)|zp(float)|data_0|data_1|data_2|...
+                if (present_value.get_precision() == ov::element::u8) {
+                    printf("YITEST|dequant u8 kernel n %ld sub_group_index %ld offset %ld scale %f zeropoint %f\n", n, sub_group_index, offset, scale, zp);
+                    attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _SV, _SV, scale, zp);
+                } else {
+                    auto sub_byte_multipyer = 8 / present_value.get_precision().bitwidth();
+                    auto* params = present_value.m_ptr.get() + (block_number * present_value.m_strides[0] + n * present_value.m_strides[1] + group_index * present_value.m_strides[2]) / sub_byte_multipyer;
+                    auto* v_ptr = present_value.m_ptr.get() + (block_number * present_value.m_strides[0] + n * present_value.m_strides[1] + group_index * present_value.m_strides[2]) / sub_byte_multipyer + sizeof(float) * 2;
+                    size_t offset = sub_group_index * (present_value.m_dims[4] - sizeof(float) * sub_byte_multipyer) / sub_byte_multipyer;
+                    float scale = reinterpret_cast<float*>(params)[0];
+                    float zp = reinterpret_cast<float*>(params)[1];
+                    printf("YITEST|dequant u4 kernel n %ld sub_group_index %ld offset %ld scale %f zeropoint %f\n", n, sub_group_index, offset, scale, zp);
+                    attn_dequant_u4_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _SV, _SV, scale, zp);
+                }
+            }
             for (size_t pq = 0; pq < q_len; pq++) {
                 for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
                     attn_acc_value_block(_output.ptr<float>(ithr, pq, h),
                                          _weight.ptr<float>(ithr, h, pq) + pv,
-                                         v,
+                                         decomp_buffer,
                                          _SV,
                                          std::min(_block_size, cur_kv_len - pv));
                 }
@@ -1161,9 +1200,10 @@ struct MHAHelper {
 
         // aligned to cache line (64bytes=16*sizeof(float)) to avoid false sharing
         _weight_bhl.resize<float>({B, _H, q_len, rnd_up(max_context_len, std::max(_block_size, size_t{16}))});
-
+        printf("PagedAttn|exec_loop_bhl|k_cache %s v_cache %s\n", present_key.get_precision().to_string().c_str(), present_value.get_precision().to_string().c_str());
         parallel_for3d_dynamic(B, kv_len_in_blocks, _Hk, [&](size_t b, size_t pk_in_blocks, size_t hk) {
             auto context_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
+            auto ithr = parallel_get_thread_num();
             // kv_len must be valid
             auto pk = pk_in_blocks * _block_size;
             if (pk < context_len) {
@@ -1172,15 +1212,27 @@ struct MHAHelper {
                     _gemv->tile_config();
                     for (size_t pq = 0; pq < q_len; pq++) {
                         for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
-                            (*_gemv)(query.ptr<DATA_TYPE>(b, h, pq), present_key.ptr<KVCACHE_TYPE>(block_number, hk),
+                            (*_gemv)(query.ptr<DATA_TYPE>(b, h, pq), present_key.ptr<KEY_CACHE_TYPE>(block_number, hk),
                                 _weight_bhl.ptr<float>(b, h, pq) + pk);
                         }
                     }
                     _gemv->tile_release();
                 } else {
+                    auto* decomp_buffer = _output.template ptr<DATA_TYPE>(ithr);
+                    size_t group_index = hk  / present_key.m_dims[3];
+                    size_t sub_group_index = hk  % present_key.m_dims[3];
+                    for (size_t n = 0; n < std::min(_block_size, context_len - pk); n++) {
+                        auto* params = present_key.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0);
+                        auto* k_ptr = present_key.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                        size_t offset = sub_group_index * (present_key.m_dims[4] - sizeof(float));
+                        float scale = reinterpret_cast<float*>(params)[0];
+                        float zp = reinterpret_cast<float*>(params)[1];
+                        // scale(float)|zp(float)|data_0|data_1|data_2|...
+                        attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(k_ptr) + offset, decomp_buffer + n * _S , _S, scale, zp);
+                    }
                     for (size_t pq = 0; pq < q_len; pq++) {
                         for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
-                            dot_product_block(query.ptr<DATA_TYPE>(b, h, pq), present_key.ptr<KVCACHE_TYPE>(block_number, hk),
+                            dot_product_block(query.ptr<DATA_TYPE>(b, h, pq), decomp_buffer,
                                 _weight_bhl.ptr<float>(b, h, pq) + pk, _S, std::min(_block_size, context_len - pk));
                         }
                     }
@@ -1236,12 +1288,34 @@ struct MHAHelper {
             // kv_len must be valid
             if (pv < context_len) {
                 auto block_number = block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[b] + pv_in_blocks];
-                auto* v = present_value.ptr<KVCACHE_TYPE>(block_number, hk);
+                auto* v = present_value.ptr<VALUE_CACHE_TYPE>(block_number, hk);
+                auto* decomp_buffer = _output.template ptr<DATA_TYPE>(ithr);
+                size_t group_index = hk  / present_value.m_dims[3];
+                size_t sub_group_index = hk  % present_value.m_dims[3];
+                for (size_t n = 0; n < std::min(_block_size, context_len - pv); n++) {
+                    auto* params = present_value.ptr<VALUE_CACHE_TYPE>(block_number, n, group_index, 0);
+                    auto* v_ptr = present_value.ptr<VALUE_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                    size_t offset = sub_group_index * (present_value.m_dims[4] - sizeof(float));
+                    float scale = reinterpret_cast<float*>(params)[0];
+                    float zp = reinterpret_cast<float*>(params)[1];
+                    // scale(float)|zp(float)|data_0|data_1|data_2|...
+                    if (present_value.get_precision() == ov::element::u8) {
+                        attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _SV, _SV, scale, zp);
+                    } else {
+                        auto sub_byte_multipyer = 8 / present_value.get_precision().bitwidth();
+                        auto* params = present_value.m_ptr.get() + (block_number * present_value.m_strides[0] + n * present_value.m_strides[1] + group_index * present_value.m_strides[2]) / sub_byte_multipyer;
+                        auto* v_ptr = present_value.m_ptr.get() + (block_number * present_value.m_strides[0] + n * present_value.m_strides[1] + group_index * present_value.m_strides[2]) / sub_byte_multipyer + sizeof(float) * 2;
+                        size_t offset = sub_group_index * (present_value.m_dims[4] - sizeof(float) * sub_byte_multipyer) / sub_byte_multipyer;
+                        float scale = reinterpret_cast<float*>(params)[0];
+                        float zp = reinterpret_cast<float*>(params)[1];
+                        attn_dequant_u4_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _SV, _SV, scale, zp);
+                    }
+                }
                 for (size_t pq = 0; pq < q_len; pq++) {
                     for (size_t h = hk * _h_each_group_len; h < (hk + 1) * _h_each_group_len; h++) {
                         attn_acc_value_block(_output_bhl.ptr<float>(ithr, b, pq, h),
                                              _weight_bhl.ptr<float>(b, h, pq) + pv,
-                                             v,
+                                             decomp_buffer,
                                              _SV,
                                              std::min(_block_size, context_len - pv));
                     }
@@ -1258,9 +1332,9 @@ struct MHAHelper {
     }
 };
 
-template <typename DATA_TYPE, typename KVCACHE_TYPE>
+template <typename DATA_TYPE, typename KEY_CACHE_TYPE, typename VALUE_CACHE_TYPE>
 struct MHA {
-    MHAHelper<DATA_TYPE, KVCACHE_TYPE>& _helper;
+    MHAHelper<DATA_TYPE, KEY_CACHE_TYPE, VALUE_CACHE_TYPE>& _helper;
     struct AttnWorkItem {
         int32_t batch_in_reorder;                   // which batch in reorder buffer will be used
         int32_t batch_in_seq;                       // batch idx in sequence
@@ -1358,7 +1432,7 @@ struct MHA {
 
     WorkItems _workitems;
 
-    MHA(MHAHelper<DATA_TYPE, KVCACHE_TYPE>& helper) : _helper(helper) {}
+    MHA(MHAHelper<DATA_TYPE, KEY_CACHE_TYPE, VALUE_CACHE_TYPE>& helper) : _helper(helper) {}
 
     // one loop to handle first and second tokens
     void exec_loop_mixed(const PlainTensor& q,
@@ -1372,10 +1446,14 @@ struct MHA {
                          const PlainTensor& block_indices,
                          const PlainTensor& block_indices_begins,
                          const PlainTensor& alibi_slopes) {
-        auto Hk = v_cache.m_dims[1];
-
+        auto v_rank = v_cache.m_rank;
+        bool is_grouped = v_rank > 4;
+        auto Hk = is_grouped ? v_cache.m_dims[2] * v_cache.m_dims[3] : v_cache.m_dims[1];
+        printf("PagedAttn|is grouped %d Hk %ld k_cache %s v_cache %s\n", is_grouped, Hk, k_cache.get_precision().to_string().c_str(), v_cache.get_precision().to_string().c_str());
+        printf("PagedAttn|v_cache shape %ld %ld %ld %ld\n", v_cache.m_dims[0], v_cache.m_dims[1], v_cache.m_dims[2], v_cache.m_dims[3]);
+        printf("PagedAttn|v_cache stride %ld %ld %ld %ld\n", v_cache.m_strides[0], v_cache.m_strides[1], v_cache.m_strides[2], v_cache.m_strides[3]);
         constexpr bool q_is_xf16 = one_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
-        constexpr bool q_cache_is_same = precision_of<DATA_TYPE>::value == precision_of<KVCACHE_TYPE>::value;
+        constexpr bool q_cache_is_same = precision_of<DATA_TYPE>::value == precision_of<KEY_CACHE_TYPE>::value;
         auto attn_work_count = _workitems.attn_work_size();
         auto reorder_work_count = _workitems.reorder_work_size();
 
@@ -1393,21 +1471,77 @@ struct MHA {
                 return;
 
             auto ithr = parallel_get_thread_num();
-            auto* k_ptr = k_cache.ptr<KVCACHE_TYPE>(block_number, hk);
-            auto* v_ptr = v_cache.ptr<KVCACHE_TYPE>(block_number, hk);
-            transpose_16NxK(_helper._qk_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
-                k_ptr,
-                _helper._output.template ptr<DATA_TYPE>(ithr),
-                _helper._block_size,
-                _helper._S, _helper._block_size, _helper._S);
+            auto* k_ptr = k_cache.ptr<KEY_CACHE_TYPE>(block_number, hk);
+            auto* v_ptr = v_cache.ptr<KEY_CACHE_TYPE>(block_number, hk);
+            if (is_grouped) {
+                auto* decomp_buffer = _helper._output.template ptr<DATA_TYPE>(ithr);
+                size_t group_index = hk  / k_cache.m_dims[3];
+                size_t sub_group_index = hk  % k_cache.m_dims[3];
+                for (size_t n = 0; n < _helper._block_size; n++) {
+                    auto* params = k_cache.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0);
+                    auto* k_ptr = k_cache.ptr<KEY_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                    size_t offset = sub_group_index * (k_cache.m_dims[4] - sizeof(float));
+                    float scale = reinterpret_cast<float*>(params)[0];
+                    float zp = reinterpret_cast<float*>(params)[1];
+                    // scale(float)|zp(float)|data_0|data_1|data_2|...
+                    attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(k_ptr) + offset, decomp_buffer + n * _helper._S , _helper._S, scale, zp);
+                }
+                transpose_16NxK(_helper._qk_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
+                    decomp_buffer,
+                    _helper._output.template ptr<DATA_TYPE>(ithr),
+                    _helper._block_size,
+                    _helper._S, _helper._block_size, _helper._S);
+            } else {
+                transpose_16NxK(_helper._qk_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
+                    k_ptr,
+                    _helper._output.template ptr<DATA_TYPE>(ithr),
+                    _helper._block_size,
+                    _helper._S, _helper._block_size, _helper._S);
+            }
             if (q_is_xf16) {
-                pack_32NxK(_helper._wv_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
-                           v_ptr,
-                           _helper._output.template ptr<DATA_TYPE>(ithr),
-                           _helper._block_size,
-                           _helper._SV,
-                           rnd_up(_helper._SV, _helper._block_size),
-                           _helper._SV);
+                if (is_grouped) {
+                    auto* decomp_buffer = _helper._output.template ptr<DATA_TYPE>(ithr);
+                    size_t group_index = hk  / v_cache.m_dims[2];
+                    size_t sub_group_index = hk  % v_cache.m_dims[2];
+                    for (size_t n = 0; n < _helper._block_size; n++) {
+                        if (v_cache.get_precision() == ov::element::u8) {
+                            auto* params = v_cache.ptr<VALUE_CACHE_TYPE>(block_number, n, group_index, 0);
+                            auto* v_ptr = v_cache.ptr<VALUE_CACHE_TYPE>(block_number, n, group_index, 0) + sizeof(float) * 2;
+                            size_t offset = sub_group_index * (v_cache.m_dims[4] - sizeof(float));
+                            float scale = reinterpret_cast<float*>(params)[0];
+                            float zp = reinterpret_cast<float*>(params)[1];
+                            // scale(float)|zp(float)|data_0|data_1|data_2|...
+                            printf("YITEST|dequant u8 kernel n %ld sub_group_index %ld offset %ld scale %f zeropoint %f\n", n, sub_group_index, offset, scale, zp);
+                            attn_dequant_u8_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _helper._SV, _helper._SV, scale, zp);
+                        } else if (v_cache.get_precision() == ov::element::u4) {
+                            auto sub_byte_multiplyer = 8 / v_cache.get_precision().bitwidth();
+                            size_t stride = (block_number * v_cache.m_strides[0] + n * v_cache.m_strides[1] + group_index * v_cache.m_strides[2]) / sub_byte_multiplyer;
+                            auto* params = v_cache.m_ptr.get() + stride;
+                            auto* v_ptr = v_cache.m_ptr.get() + stride + sizeof(float) * 2;
+                            size_t offset = sub_group_index * (v_cache.m_dims[4] - sizeof(float) * sub_byte_multiplyer) / sub_byte_multiplyer;
+                            float scale = reinterpret_cast<float*>(params)[0];
+                            float zp = reinterpret_cast<float*>(params)[1];
+                            printf("YITEST|dequant u4 kernel n %ld sub_group_index %ld offset %ld scale %f zeropoint %f\n", n, sub_group_index, offset, scale, zp);
+                            attn_dequant_u4_kernel(reinterpret_cast<uint8_t*>(v_ptr) + offset, decomp_buffer + n * _helper._SV, _helper._SV, scale, zp);
+                        }
+                        
+                    }
+                    pack_32NxK(_helper._wv_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
+                        decomp_buffer,
+                        _helper._output.template ptr<DATA_TYPE>(ithr),
+                        _helper._block_size,
+                        _helper._SV,
+                        rnd_up(_helper._SV, _helper._block_size),
+                        _helper._SV);
+                } else {
+                    pack_32NxK(_helper._wv_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
+                            v_ptr,
+                            _helper._output.template ptr<DATA_TYPE>(ithr),
+                            _helper._block_size,
+                            _helper._SV,
+                            rnd_up(_helper._SV, _helper._block_size),
+                            _helper._SV);
+                }
             } else {
                 // need to decompress
                 if (!q_cache_is_same) {
@@ -1437,6 +1571,7 @@ struct MHA {
                     ithr, hk, 1ul, cur_kv_len, alibi_slopes,
                     score_output);
             } else {
+                std::cout << "YITEST|q_len|exec_kernel_multiple" << std::endl;
                 const auto batch_in_reorder = item.batch_in_reorder;
                 const auto q_blk = item.q_block_id;
                 const auto q_cnt = std::min(_helper._block_size, q_len - q_blk * _helper._block_size);
@@ -1510,10 +1645,10 @@ struct MHA {
     }
 };
 
-template <typename DATA_TYPE, typename KVCACHE_TYPE>
+template <typename DATA_TYPE, typename KEY_CACHE_TYPE, typename VALUE_CACHE_TYPE>
 struct AttentionExecutor : public PagedAttentionExecutor {
-    MHAHelper<DATA_TYPE, KVCACHE_TYPE> _helper;
-    MHA<DATA_TYPE, KVCACHE_TYPE> _kernel;
+    MHAHelper<DATA_TYPE, KEY_CACHE_TYPE, VALUE_CACHE_TYPE> _helper;
+    MHA<DATA_TYPE, KEY_CACHE_TYPE, VALUE_CACHE_TYPE> _kernel;
     PlainTensor _slot_mapping;
 
     AttentionExecutor() : _kernel(_helper) {}
@@ -1544,16 +1679,26 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         // The layout for per token per head for u8 kv cache:
         // |scale(f32)|zeropoint(f32)|quantized feature(u8,idx_1)|quantized feature(u8,idx_2)|...|quantized feature(u8,idx_S)|
         // The actual size needs to deduct scale and zeropoint.
-        auto S = k_cache.size(3) - (k_cache.m_dt == ov::element::Type_t::u8 ? sizeof(float) * 2 : 0);
-        auto SV = v_cache.size(3) - (k_cache.m_dt == ov::element::Type_t::u8 ? sizeof(float) * 2 : 0);
-        auto block_size = k_cache.size(2);
+        size_t group_size = 128;
+        auto kv_rank = v_cache.m_rank;
+
+        auto S = k_cache.size(kv_rank - 1) - (k_cache.get_precision().is_integral() ? (sizeof(float) * 8 / k_cache.get_precision().bitwidth()) : 0);
+        auto SV = v_cache.size(kv_rank - 1) - (v_cache.get_precision().is_integral() ? (sizeof(float) * 8 / v_cache.get_precision().bitwidth()) : 0);
+        std::cout << "vCache|" << v_cache.get_precision() << "|size|" << v_cache.get_precision().size() << "|bitwidth|" << v_cache.get_precision().bitwidth() << std::endl;
+        if (kv_rank > 4) {
+            if (S < group_size) {
+                Hk = v_cache.size(kv_rank - 2) * k_cache.size(kv_rank - 3);
+            }
+        }
+        size_t block_idx = kv_rank > 4 ? 1 : 2;
+        auto block_size = k_cache.size(block_idx);
         auto H = q.size(1) / S;
         auto h_each_group_len = 1;
         if (Hk != H) {
             h_each_group_len = H / Hk;
         }
         auto B_seq = past_lens.size(0);
-
+        std::cout << "PagedAttn|S|" << S << "|SV|" << SV << "|Hk|" << Hk << "|H|" << H << std::endl;
         q.assert_dims({B_token, H * S});
         k.assert_dims({B_token, Hk * S});
         v.assert_dims({B_token, Hk * SV});
@@ -1561,8 +1706,15 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         k = k.reshape({B_token, Hk, 1, S});
         v = v.reshape({B_token, Hk, 1, SV});
         if (k_cache.m_dt == ov::element::Type_t::u8) {
-            k_cache.assert_dims({0, Hk, block_size, S + sizeof(float) * 2}, true);
-            v_cache.assert_dims({k_cache.m_dims[0], Hk, block_size, SV + sizeof(float) * 2});
+            std::cout << "PagedAttn|Check KVCacheShape|" << k_cache.m_dims[0] << "," << k_cache.m_dims[1] << ","
+                      << k_cache.m_dims[2] << "," << k_cache.m_dims[3] << std::endl;
+            std::cout << "PagedAttn|Check VCacheShape|" << v_cache.m_dims[0] << "," << v_cache.m_dims[1] << ","
+                      << v_cache.m_dims[2] << "," << v_cache.m_dims[3] << std::endl;
+            if (kv_rank > 5) {
+                k_cache.assert_dims({v_cache.m_dims[0], block_size, v_cache.m_dims[2], v_cache.m_dims[3], S + 4}, true);
+                std::cout << "PagedAttn|Done KVCache" << std::endl;
+            }
+            std::cout << "PagedAttn|Done KVCache" << std::endl;
         } else {
             k_cache.assert_dims({0, Hk, block_size, S}, true);
             v_cache.assert_dims({k_cache.m_dims[0], Hk, block_size, SV});
@@ -1619,7 +1771,6 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         size_t max_context_len;
         PlainTensor output_emb;
         PlainTensor output_score;
-
         init(inputs, outputs, q, k, v, k_cache, v_cache, past_lens, subsequence_begins, block_indices, block_indices_begins,
             scale, sliding_window, alibi_slopes, max_context_len, output_emb, output_score);
         concat_pastkv(k, v, k_cache, v_cache, past_lens, subsequence_begins, block_indices, block_indices_begins);
@@ -1630,40 +1781,42 @@ struct AttentionExecutor : public PagedAttentionExecutor {
 };
 #endif
 
-std::shared_ptr<PagedAttentionExecutor> make_pa_executor(ov::element::Type data_type, ov::element::Type kvcache_type) {
+std::shared_ptr<PagedAttentionExecutor> make_pa_executor(ov::element::Type data_type,
+                                                         ov::element::Type key_cache_type,
+                                                         ov::element::Type value_cache_type) {
     std::shared_ptr<PagedAttentionExecutor> executor;
 
 #ifdef OPENVINO_ARCH_X86_64
     if (data_type == ov::element::bf16) {
 #if defined(HAVE_AVX512F)
-        if (kvcache_type == ov::element::u8) {
-            executor = std::make_shared<AttentionExecutor<ov::bfloat16, uint8_t>>();
+        if (key_cache_type  == ov::element::u8) {
+            executor = std::make_shared<AttentionExecutor<ov::bfloat16, uint8_t, uint8_t>>();
         } else {
-            OPENVINO_ASSERT(kvcache_type == ov::element::bf16, "expect kvcache type bf16, current: ", kvcache_type);
-            executor = std::make_shared<AttentionExecutor<ov::bfloat16, ov::bfloat16>>();
+            OPENVINO_ASSERT(key_cache_type == ov::element::bf16, "expect kvcache type bf16, current: ", key_cache_type);
+            executor = std::make_shared<AttentionExecutor<ov::bfloat16, ov::bfloat16, ov::bfloat16>>();
         }
 #else
         OPENVINO_THROW("make_pa_executor: bf16 needs avx512+ hardware.");
 #endif
     } else if (data_type == ov::element::f16) {
 #if defined(HAVE_AVX512F)
-        if (kvcache_type == ov::element::u8) {
-            executor = std::make_shared<AttentionExecutor<ov::float16, uint8_t>>();
+        if (key_cache_type == ov::element::u8) {
+            executor = std::make_shared<AttentionExecutor<ov::float16, uint8_t, uint8_t>>();
         } else {
-            OPENVINO_ASSERT(kvcache_type == ov::element::f16, "expect kvcache type f16, current: ", kvcache_type);
-            executor = std::make_shared<AttentionExecutor<ov::float16, ov::float16>>();
+            OPENVINO_ASSERT(key_cache_type == ov::element::f16, "expect kvcache type f16, current: ", key_cache_type);
+            executor = std::make_shared<AttentionExecutor<ov::float16, ov::float16, ov::bfloat16>>();
         }
 #else
      OPENVINO_THROW("make_pa_executor: f16 needs avx512+ hardware.");
 #endif
     } else if (data_type == ov::element::f32) {
-        if (kvcache_type == ov::element::u8) {
-            executor = std::make_shared<AttentionExecutor<float, uint8_t>>();
-        } else if (kvcache_type == ov::element::f16) {
-            executor = std::make_shared<AttentionExecutor<float, ov::float16>>();
+        if (key_cache_type == ov::element::u8) {
+            executor = std::make_shared<AttentionExecutor<float, uint8_t, uint8_t>>();
+        } else if (key_cache_type == ov::element::f16) {
+            executor = std::make_shared<AttentionExecutor<float, ov::float16, ov::float16>>();
         } else {
-            OPENVINO_ASSERT(kvcache_type == ov::element::f32, "expect kvcache type f32, current: ", kvcache_type);
-            executor = std::make_shared<AttentionExecutor<float, float>>();
+            OPENVINO_ASSERT(key_cache_type == ov::element::f32, "expect kvcache type f32, current: ", key_cache_type);
+            executor = std::make_shared<AttentionExecutor<float, float, float>>();
         }
     } else {
         OPENVINO_THROW("make_pa_executor: unsupported precision: ", data_type);

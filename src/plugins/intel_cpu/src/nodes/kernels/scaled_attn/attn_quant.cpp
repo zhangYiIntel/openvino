@@ -170,6 +170,38 @@ static void quant_u8(const T* src, uint8_t* dst, size_t n, float& scale, float& 
     }
 }
 
+template<typename T>
+static void quant_u4(const T* src, uint8_t* dst, size_t n, float& scale, float& zp) {
+    auto insert_half_byte = [](uint8_t dst, uint8_t val, bool high_half) -> uint8_t {
+        uint8_t shift = high_half ? 0 : 4;
+        return dst | (uint8_t) (val << shift);
+    };
+    size_t i = 0;
+    float max = -FLT_MAX;
+    float min = FLT_MAX;
+    for (; i < n; i++) {
+        float tmp = src[i];
+        max = std::max(max, tmp);
+        min = std::min(min, tmp);
+    }
+    scale = (max - min) / ((1 << 4) - 1);
+    if (scale == 0)
+        scale = 0.0001f;
+    zp = -min / scale;
+    i = 0;
+    for (; i < n; i++) {
+        float tmp = src[i];
+        #define MIN(a, b) ((a) < (b) ? (a) : (b))
+        uint8_t src_val = MIN(15, (uint8_t)(std::round(tmp / scale + zp)));
+        uint8_t dst_val = i % 2 == 0 ? 0 : dst[i / 2];
+        dst_val = insert_half_byte(dst_val, src_val, (uint8_t)(i % 2));
+        if (i < 4)
+            printf("index %ld float %f src %d hex %x", i, tmp, src_val, dst_val);
+        dst[i / 2] = dst_val;
+    }
+    printf("quant scale %f zp %f\n", scale, zp);
+}
+
 template <typename T, typename T2>
 static void attn_quant_mt(const ov::intel_cpu::PlainTensor& k_src,
                           const ov::intel_cpu::PlainTensor& v_src,
@@ -196,6 +228,73 @@ static void attn_quant_mt(const ov::intel_cpu::PlainTensor& k_src,
 }
 
 template <typename T, typename T2>
+static void paged_attn_quant(const ov::intel_cpu::PlainTensor& src,
+                             const ov::intel_cpu::PlainTensor& dst,
+                             const ov::intel_cpu::PlainTensor& slot_mapping) {
+    size_t B = src.m_dims[0], H = src.m_dims[1], L1 = src.m_dims[2], S = src.m_dims[3];
+    size_t block_size = dst.m_dims[2];
+    auto dst_rank = dst.m_rank;
+    bool is_group_quantize = dst_rank > 4;
+    if (is_group_quantize) {
+        size_t sub_byte_multiplyer = 8 / dst.get_precision().bitwidth();
+        size_t group_size = (dst.m_dims[dst_rank - 1] - sizeof(float) * sub_byte_multiplyer) * dst.m_dims[dst_rank - 2];
+        size_t groups = is_group_quantize ? dst.m_dims[dst_rank - 3] : H;
+        size_t block_size = dst.m_dims[1];
+        auto reshaped_src = src.reshape({B, groups, group_size});
+        if (L1 != 1)
+            abort();
+        if (dst.get_precision() == ov::element::u4) {
+            parallel_for2d(B, groups, [&](size_t b, size_t group) {
+                auto slot = slot_mapping.ptr<int32_t>(b)[0];
+                if (slot < 0) return;
+                auto block_number = slot / block_size;
+                auto block_offset = slot % block_size;
+                auto* dst_ptr = dst.m_ptr.get() + (block_number * dst.m_strides[0] + block_offset * dst.m_strides[1] + group * dst.m_strides[2]) / sub_byte_multiplyer;
+                auto quantize_param = reinterpret_cast<float*>(dst_ptr);
+                // The layout for per token per head:
+                // |scale(f32)|zeropoint(f32)|quantized feature(u4,idx_1)|quantized feature(u4,idx_2)|...|quantized feature(u4,idx_S)|
+                quant_u4(reshaped_src.ptr<T>(b, group),
+                         dst_ptr + sizeof(float) + sizeof(float),
+                         group_size,
+                         quantize_param[0],
+                         quantize_param[1]);
+                printf("YITEST|quantzie groups %ld group_size %ld block_size %ld prec %s scale %f zp %f\n",
+                       groups,
+                       group_size,
+                       block_size,
+                       dst.get_precision().to_string().c_str(),
+                       quantize_param[0],
+                       quantize_param[1]);
+            });
+        } else {
+            parallel_for2d(B, groups, [&](size_t b, size_t group) {
+                auto slot = slot_mapping.ptr<int32_t>(b)[0];
+                if (slot < 0) return;
+                auto block_number = slot / block_size;
+                auto block_offset = slot % block_size;
+                auto quantize_param = reinterpret_cast<float*>(dst.ptr<T2>(block_number, block_offset, group));
+                // The layout for per token per head:
+                // |scale(f32)|zeropoint(f32)|quantized feature(u8,idx_1)|quantized feature(u8,idx_2)|...|quantized feature(u8,idx_S)|
+                quant_u8(reshaped_src.ptr<T>(b, group),
+                         dst.ptr<T2>(block_number, block_offset, group) + sizeof(float) + sizeof(float),
+                         group_size,
+                         quantize_param[0],
+                         quantize_param[1]);
+                printf("YITEST|quantzie groups %ld group_size %ld block_size %ld prec %s scale %f zp %f\n",
+                       groups,
+                       group_size,
+                       block_size,
+                       dst.get_precision().to_string().c_str(),
+                       quantize_param[0],
+                       quantize_param[1]);
+            });
+        }
+
+        return;
+    }
+}
+
+template <typename T, typename T2>
 static void paged_attn_quant_mt(const ov::intel_cpu::PlainTensor& k_src,
                                 const ov::intel_cpu::PlainTensor& v_src,
                                 const ov::intel_cpu::PlainTensor& k_dst,
@@ -203,6 +302,38 @@ static void paged_attn_quant_mt(const ov::intel_cpu::PlainTensor& k_src,
                                 const ov::intel_cpu::PlainTensor& slot_mapping) {
     size_t B = k_src.m_dims[0], H = k_src.m_dims[1], L1 = k_src.m_dims[2], S = k_src.m_dims[3], SV = v_src.m_dims[3];
     size_t block_size = k_dst.m_dims[2];
+    auto dst_rank = k_dst.m_rank;
+    bool is_group_quantize = dst_rank > 4;
+    if (is_group_quantize) {
+        size_t group_size = (k_dst.m_dims[dst_rank - 1] - 4) * k_dst.m_dims[dst_rank - 2];
+        size_t groups = is_group_quantize ? k_dst.m_dims[dst_rank - 3] : H;
+        size_t block_size = k_dst.m_dims[1];
+        printf("quantzie groups %ld group_size %ld block_size %ld\n", groups, group_size, block_size);
+        k_src.reshape({B, groups, group_size});
+        v_src.reshape({B, groups, group_size});
+        parallel_for2d(B, groups, [&](size_t b, size_t group) {
+            auto slot = slot_mapping.ptr<int32_t>(b)[0];
+            if (slot < 0) return;
+            auto block_number = slot / block_size;
+            auto block_offset = slot % block_size;
+
+            auto p_k = reinterpret_cast<float*>(k_dst.ptr<T2>(block_number, block_offset, group));
+            auto p_v = reinterpret_cast<float*>(v_dst.ptr<T2>(block_number, block_offset, group));
+            // The layout for per token per head:
+            // |scale(f32)|zeropoint(f32)|quantized feature(u8,idx_1)|quantized feature(u8,idx_2)|...|quantized feature(u8,idx_S)|
+            quant_u8(k_src.ptr<T>(b, group * k_dst.m_dims[3]),
+                    k_dst.ptr<T2>(block_number, block_offset, group) + sizeof(float) + sizeof(float),
+                    group_size,
+                    p_k[0],
+                    p_k[1]);
+            quant_u8(v_src.ptr<T>(b, group * v_dst.m_dims[3]),
+                    v_dst.ptr<T2>(block_number, block_offset, group) + sizeof(float) + sizeof(float),
+                    group_size,
+                    p_v[0],
+                    p_v[1]);
+        });
+        return;
+    }
     parallel_for3d(B, L1, H, [&](size_t b, size_t m, size_t h) {
         auto slot = slot_mapping.ptr<int32_t>(b)[m];
         if (slot < 0) return;
@@ -248,7 +379,11 @@ void paged_attn_quantkv(const ov::intel_cpu::PlainTensor& k_src,
                         const ov::intel_cpu::PlainTensor& k_dst,
                         const ov::intel_cpu::PlainTensor& v_dst,
                         const ov::intel_cpu::PlainTensor& slot_mapping) {
-    if (k_src.get_precision() == ov::element::f32 && k_dst.get_precision() == ov::element::u8) {
+    bool is_group_quantize = v_dst.m_rank > 4;
+    if (is_group_quantize) {
+        paged_attn_quant<ov::bfloat16, uint8_t>(k_src, k_dst, slot_mapping);
+        paged_attn_quant<ov::bfloat16, uint8_t>(v_src, v_dst, slot_mapping);
+    } else if (k_src.get_precision() == ov::element::f32 && k_dst.get_precision() == ov::element::u8) {
         paged_attn_quant_mt<float, uint8_t>(k_src, v_src, k_dst, v_dst, slot_mapping);
     } else if (k_src.get_precision() == ov::element::bf16 && k_dst.get_precision() == ov::element::u8) {
         paged_attn_quant_mt<ov::bfloat16, uint8_t>(k_src, v_src, k_dst, v_dst, slot_mapping);
