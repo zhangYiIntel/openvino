@@ -59,6 +59,9 @@ private:
     friend struct PagedAttentionKey;
 
     bool m_hasScore = false;
+    bool m_fuseRope = false;
+    op::internal::RoPE::Config m_rope_config;
+
 };
 
 }  // namespace node
