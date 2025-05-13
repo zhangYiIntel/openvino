@@ -75,11 +75,18 @@ PagedAttentionExtension::PagedAttentionExtension(const ov::OutputVector& args) :
     constructor_validate_and_infer_types();
 }
 
+PagedAttentionExtension::PagedAttentionExtension(const ov::OutputVector& args, bool fuse_rope) : ov::op::Op(args), m_fuse_rope(fuse_rope) {
+    constructor_validate_and_infer_types();
+}
+
 void PagedAttentionExtension::validate_and_infer_types() {
     OV_OP_SCOPE(PagedAttentionExtension_validate_and_infer_types);
-
+    size_t extra_inputs = 0;
+    if (m_fuse_rope) {
+        extra_inputs = 2;
+    }
     NODE_VALIDATION_CHECK(this,
-                          get_input_size() == 14 || get_input_size() == 17,
+                          get_input_size() == 14 + extra_inputs || get_input_size() == 17 + extra_inputs,
                           "PagedAttensionExtension expects 14 or 17 inputs, but it has ",
                           get_input_size());
 
@@ -102,6 +109,17 @@ void PagedAttentionExtension::validate_and_infer_types() {
         input_check(this, 14, "rotated_block_indices", {1}, {element::i32});
         input_check(this, 15, "rotation_deltas", {2}, {element::i32});
         input_check(this, 16, "rotation_trig_lut", {2}, {element::f16, element::f32});
+    }
+
+    if (m_fuse_rope) {
+        const auto& cos_table_shape = get_input_partial_shape(get_input_size() - 2);
+        const auto& sin_table_shape = get_input_partial_shape(get_input_size() - 1);
+        if (cos_table_shape.rank().is_static()) {
+            std::cout << "cos_table|" << cos_table_shape << "|sin_table|" << sin_table_shape << std::endl;
+            for (size_t i = 0; i < cos_table_shape.rank().get_length(); i++) {
+                cos_table_shape[i].compatible(sin_table_shape[i]);
+            }
+        }
     }
 
     // value head_size may be not same with key

@@ -12,6 +12,7 @@
 #include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu_memory.h"
+#include "ov_ops/rotary_positional_embeddings.hpp"
 
 namespace ov::Extensions::Cpu {
 
@@ -39,6 +40,16 @@ struct PagedAttentionExecutor {
     virtual void execute(const std::vector<ov::intel_cpu::MemoryPtr>& inputs,
                          const std::vector<ov::intel_cpu::MemoryPtr> outputs) = 0;
     virtual ~PagedAttentionExecutor() = default;
+};
+
+struct PagedAttnExecutorParams {
+    size_t key_group_size;
+    size_t value_group_size;
+    bool quant_key_bychannel;
+    bool quant_value_bychannel;
+    bool fuse_rope;
+    bool is_sage_attn;
+    op::internal::RoPE::Config m_config;
 };
 
 #ifdef OPENVINO_ARCH_X86_64
