@@ -1,0 +1,280 @@
+// Copyright (C) 2018-2025 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+#pragma once
+
+#include "nodes/kernels/scaled_attn/common.hpp"
+#include "openvino/core/type/element_type.hpp"
+#include "page_attn_kernel.hpp"
+#include "softmax_kernel.hpp"
+#include "utils/general_utils.h"
+#include "utils/plain_tensor.hpp"
+#if defined(HAVE_SSE) || defined(HAVE_AVX2) || defined(HAVE_AVX512F)
+#    include <immintrin.h>
+#endif
+
+#include <cstddef>
+#include <cstdint>
+
+namespace ov::Extensions::Cpu::XARCH {
+
+void dot_product_block_s8s8_f32(int8_t* a, int8_t* b, float* c, float c_scale, size_t n, size_t block_size) {
+    const size_t b_stride = n + sizeof(float);
+    for (size_t j = 0; j < block_size; j++) {
+        const size_t params_offset = sizeof(float);
+        float* scale_a = reinterpret_cast<float*>(a);
+        float* scale_b = reinterpret_cast<float*>(b);
+        int8_t* a_src = a + params_offset;
+        int32_t sum = 0;
+        for (size_t i = 0; i < n; i++) {
+            int8_t* b_src = b + params_offset;
+            sum += a_src[i] * b_src[i];
+        }
+        float f32_sum = static_cast<float>(sum) * scale_a[0] * scale_b[0];
+        b += b_stride;
+        *c++ = f32_sum * c_scale;
+    }
+}
+
+template <typename DATA_TYPE, ov::element::Type_t KEY_PREC, ov::element::Type_t VALUE_PREC>
+void sage_attn_ref(const ov::intel_cpu::PlainTensor& q,
+                   ov::intel_cpu::PlainTensor& k_cache,
+                   const ov::intel_cpu::PlainTensor& v_cache,
+                   const ov::intel_cpu::PlainTensor& output_emb,
+                   const ov::intel_cpu::PlainTensor& output_score,
+                   [[maybe_unused]] size_t max_context_len,
+                   const ov::intel_cpu::PlainTensor& past_lens,
+                   const ov::intel_cpu::PlainTensor& subsequence_begins,
+                   const ov::intel_cpu::PlainTensor& block_indices,
+                   const ov::intel_cpu::PlainTensor& block_indices_begins,
+                   const ov::intel_cpu::PlainTensor& alibi_slopes,
+                   ov::intel_cpu::PlainTensor& temp_weight,
+                   ov::intel_cpu::PlainTensor& temp_output) {
+    // printf("Going to Do SageAttn\n");
+    auto seq_cout = static_cast<int32_t>(past_lens.m_dims[0]);
+    int32_t block_size = 32;
+    size_t B = q.m_dims[0], H = q.m_dims[1], S = q.m_dims[2], SV = v_cache.m_dims[3] - sizeof(float) * 2;
+    size_t Hk = k_cache.m_dims[1];
+    size_t h_each_group_len = H / Hk;
+    const size_t param_size = sizeof(float);
+    const float _d_scale = 1 / sqrt(S - param_size);
+    temp_output.resize<float>({B, H, SV});
+    memset(temp_output.ptr<float>(), 0, B * H * SV * sizeof(float));
+    temp_weight.resize<float>({H, B, ov::intel_cpu::rnd_up(max_context_len, std::max(block_size, int32_t{16}))});
+    for (int32_t seq_id = 0; seq_id < seq_cout; seq_id++) {
+        auto q_len = subsequence_begins.ptr<int32_t>()[seq_id + 1] - subsequence_begins.ptr<int32_t>()[seq_id];
+        auto q_block_num = static_cast<int32_t>(ov::intel_cpu::div_up(q_len, block_size));
+        const auto past_len = past_lens.ptr<int32_t>()[seq_id];
+        auto kv_len = past_lens.ptr<int32_t>()[seq_id] + q_len;
+        auto kv_block_num = static_cast<int32_t>(ov::intel_cpu::div_up(kv_len, block_size));
+        const auto batch_in_token = subsequence_begins.ptr<int32_t>()[seq_id];
+        ov::intel_cpu::PlainTensor sub_query;
+        sub_query.resize({static_cast<size_t>(q_len), H, S}, q.ptr<int8_t>(batch_in_token));
+        for (int32_t block_id = 0; block_id < q_block_num; block_id++) {
+            // compute q_block * k_block
+            auto q_start = block_id * block_size;
+            auto q_end = std::min(q_start + block_size, q_len);
+            auto q_cnt = q_end - q_start;
+            for (size_t h = 0; h < H; h++) {
+                for (size_t pq = 0; pq < q_cnt; pq++) {
+                    // compute q * k
+                    auto* q_ptr = sub_query.template ptr<int8_t>(q_start + pq, h, 0);
+                    size_t hk = h / h_each_group_len;
+                    for (int32_t k_block_id = 0; k_block_id < kv_block_num; k_block_id++) {
+                        auto k_start = k_block_id * block_size;
+                        auto k_end = std::min(k_start + block_size, kv_len);
+                        auto k_cnt = k_end - k_start;
+                        if (k_start < kv_len) {
+                            auto block_number =
+                                block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[seq_id] + k_block_id];
+                            auto* k_ptr = k_cache.ptr<int8_t, KEY_PREC>(block_number, hk);
+                            dot_product_block_s8s8_f32(
+                                q_ptr,
+                                k_ptr,
+                                temp_weight.template ptr<float>(h, batch_in_token + q_start + pq) + k_start,
+                                _d_scale,
+                                S - param_size,
+                                k_cnt);
+                        }
+                    }
+                    auto score = temp_weight.ptr<float>(h, batch_in_token + q_start + pq);
+                    auto ncausal = (past_len + q_start + pq + 1);
+                    float* alibi_lookup = nullptr;
+                    float alibi_slope = 0.f;
+                    // if (alibi_slopes) {
+                    //     alibi_slope = alibi_slopes.ptr<float>()[h];
+                    //     alibi_lookup = _alibi_lookup.ptr<float>() + _alibi_lookup.m_dims[0] - ncausal;
+                    // }
+                    attn_softmax_kernel<float>(score,
+                                               score,
+                                               1.0f,
+                                               alibi_lookup,
+                                               nullptr,
+                                               nullptr,
+                                               false,
+                                               ncausal,
+                                               kv_len,
+                                               ov::element::f32,
+                                               ov::element::f32,
+                                               alibi_slope);
+                    for (int32_t v_block_id = 0; v_block_id < kv_block_num; v_block_id++) {
+                        auto v_start = v_block_id * block_size;
+                        auto v_end = std::min(v_start + block_size, kv_len);
+                        auto v_cnt = v_end - v_start;
+                        auto block_number =
+                            block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[seq_id] + v_block_id];
+                        if (v_start < kv_len) {
+                            attn_acc_value_block_by_dim<uint8_t, ov::element::u8>(
+                                temp_output.template ptr<float>(batch_in_token + q_start + pq, h, 0),
+                                temp_weight.template ptr<float>(h, batch_in_token + q_start + pq) + v_start,
+                                v_cache.ptr<uint8_t, ov::element::u8>(block_number, hk),
+                                SV,
+                                v_cnt,
+                                SV);
+                        }
+                    }
+                }
+                attn_memcpy2d_kernel(temp_output.ptr<float>(batch_in_token + q_start, h, 0),
+                                     output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
+                                     ov::element::f32,
+                                     ov::element::bf16,
+                                     temp_output.stride(0),
+                                     output_emb.stride(0),
+                                     SV,
+                                     q_cnt);
+            }
+        }
+    }
+}
+
+template <typename DATA_TYPE, ov::element::Type_t KEY_PREC, ov::element::Type_t VALUE_PREC>
+void sage_attn(const ov::intel_cpu::PlainTensor& q,
+               ov::intel_cpu::PlainTensor& k_cache,
+               const ov::intel_cpu::PlainTensor& v_cache,
+               const ov::intel_cpu::PlainTensor& output_emb,
+               const ov::intel_cpu::PlainTensor& output_score,
+               [[maybe_unused]] size_t max_context_len,
+               const ov::intel_cpu::PlainTensor& past_lens,
+               const ov::intel_cpu::PlainTensor& subsequence_begins,
+               const ov::intel_cpu::PlainTensor& block_indices,
+               const ov::intel_cpu::PlainTensor& block_indices_begins,
+               const ov::intel_cpu::PlainTensor& alibi_slopes,
+               ov::intel_cpu::PlainTensor& temp_weight,
+               ov::intel_cpu::PlainTensor& temp_output) {
+    // printf("Going to Do SageAttn\n");
+    auto seq_cout = static_cast<int32_t>(past_lens.m_dims[0]);
+    int32_t block_size = 32;
+    size_t B = q.m_dims[0], H = q.m_dims[1], S = q.m_dims[2], SV = v_cache.m_dims[3] - sizeof(float) * 2;
+    size_t Hk = k_cache.m_dims[1];
+    size_t h_each_group_len = H / Hk;
+    const size_t param_size = sizeof(float);
+    const float _d_scale = 1 / sqrt(S - param_size);
+    temp_output.resize<float>({B, H, SV});
+    memset(temp_output.ptr<float>(), 0, B * H * SV * sizeof(float));
+    temp_weight.resize<float>({H, B, ov::intel_cpu::rnd_up(max_context_len, std::max(block_size, int32_t{16}))});
+    for (int32_t seq_id = 0; seq_id < seq_cout; seq_id++) {
+        auto q_len = subsequence_begins.ptr<int32_t>()[seq_id + 1] - subsequence_begins.ptr<int32_t>()[seq_id];
+        auto q_block_num = static_cast<int32_t>(ov::intel_cpu::div_up(q_len, block_size));
+        const auto past_len = past_lens.ptr<int32_t>()[seq_id];
+        auto kv_len = past_lens.ptr<int32_t>()[seq_id] + q_len;
+        auto kv_block_num = static_cast<int32_t>(ov::intel_cpu::div_up(kv_len, block_size));
+        const auto batch_in_token = subsequence_begins.ptr<int32_t>()[seq_id];
+        ov::intel_cpu::PlainTensor sub_query;
+        sub_query.resize({static_cast<size_t>(q_len), H, S}, q.ptr<int8_t>(batch_in_token));
+        for (int32_t block_id = 0; block_id < q_block_num; block_id++) {
+            // compute q_block * k_block
+            auto q_start = block_id * block_size;
+            auto q_end = std::min(q_start + block_size, q_len);
+            auto q_cnt = q_end - q_start;
+            for (size_t h = 0; h < H; h++) {
+                for (size_t pq = 0; pq < q_cnt; pq++) {
+                    // compute q * k
+                    auto* q_ptr = sub_query.template ptr<int8_t>(q_start + pq, h, 0);
+                    size_t hk = h / h_each_group_len;
+                    float M = -INFINITY; // maximum KQ value
+                    float sum = 0.0f;
+                    auto ncausal = (past_len + q_start + pq + 1);
+
+                    for (int32_t k_block_id = 0; k_block_id < kv_block_num; k_block_id++) {
+                        auto k_start = k_block_id * block_size;
+                        auto k_end = std::min(k_start + block_size, kv_len);
+                        k_end = std::min(k_end, static_cast<int32_t>(ncausal));
+                        auto k_cnt = k_end - k_start;
+                        if (k_start < kv_len && k_start < ncausal) {
+                            auto block_number =
+                                block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[seq_id] + k_block_id];
+                            auto* k_ptr = k_cache.ptr<int8_t, KEY_PREC>(block_number, hk);
+                            dot_product_block_s8s8_f32(
+                                q_ptr,
+                                k_ptr,
+                                temp_weight.template ptr<float>(h, batch_in_token + q_start + pq) + k_start,
+                                _d_scale,
+                                S - param_size,
+                                k_cnt);
+                            const float Mold = M;
+                            float block_max = -INFINITY;
+                            for (size_t i = 0; i < k_cnt; i++) {
+                                block_max = std::max(block_max, temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i}));
+                            }
+                            M = std::max(block_max, M);
+
+                            for(size_t i = 0; i < k_cnt; i++) {
+                                temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i}) = expf(temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i}) - M);
+                            }
+
+                            float local_sum = 0.0f;
+                            for(size_t i = 0; i < k_cnt; i++) {
+                                local_sum += temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i});
+                            }
+                            float qk_scale = expf(Mold - M);
+
+                            for (size_t i = 0; i < SV; i++) {
+                                temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= qk_scale;
+                            }
+
+                            auto* v_ptr = v_cache.ptr<uint8_t, ov::element::u8>(block_number, hk);
+                            attn_acc_value_block_by_dim<uint8_t, ov::element::u8>(
+                                temp_output.template ptr<float>(batch_in_token + q_start + pq, h, 0),
+                                temp_weight.template ptr<float>(h, batch_in_token + q_start + pq) + k_start,
+                                v_ptr,
+                                SV,
+                                k_cnt,
+                                SV);
+                            sum = sum * qk_scale + local_sum;
+
+                        }
+                    }
+                    float inv_sum = 1.0f / sum;
+                    for (size_t i = 0; i < SV; i++) {
+                        temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= inv_sum;
+                    }
+                }
+                attn_memcpy2d_kernel(temp_output.ptr<float>(batch_in_token + q_start, h, 0),
+                                     output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
+                                     ov::element::f32,
+                                     ov::element::bf16,
+                                     temp_output.stride(0),
+                                     output_emb.stride(0),
+                                     SV,
+                                     q_cnt);
+            }
+        }
+    }
+}
+
+template <typename DATA_TYPE, ov::element::Type_t KEY_PREC, ov::element::Type_t VALUE_PREC>
+void gemm_s8s8_s32(const ov::intel_cpu::PlainTensor& q,
+                   ov::intel_cpu::PlainTensor& k_cache,
+                   const ov::intel_cpu::PlainTensor& v_cache,
+                   const ov::intel_cpu::PlainTensor& output_emb,
+                   const ov::intel_cpu::PlainTensor& output_score,
+                   [[maybe_unused]] size_t max_context_len,
+                   const ov::intel_cpu::PlainTensor& past_lens,
+                   const ov::intel_cpu::PlainTensor& subsequence_begins,
+                   const ov::intel_cpu::PlainTensor& block_indices,
+                   const ov::intel_cpu::PlainTensor& block_indices_begins,
+                   const ov::intel_cpu::PlainTensor& alibi_slopes) {
+    printf("Going to Do SageAttn\n");
+}
+
+}  // namespace ov::Extensions::Cpu::XARCH

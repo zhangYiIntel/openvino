@@ -74,7 +74,7 @@ struct ov::intel_cpu::paged_attn::RoPEExecutorRotateHalf : public ov::intel_cpu:
         m_rotaryKernel = createJitKernel(jcp);
     }
 
-    virtual void execute(std::vector<PlainTensor> inputs, std::vector<PlainTensor>& outputs) override {
+    void execute(std::vector<PlainTensor> inputs, std::vector<PlainTensor>& outputs) override {
         ov::intel_cpu::PlainTensor& t_src = inputs[0];
         ov::intel_cpu::PlainTensor& t_cos = inputs[1];
         ov::intel_cpu::PlainTensor& t_sin = inputs[2];
@@ -83,14 +83,11 @@ struct ov::intel_cpu::paged_attn::RoPEExecutorRotateHalf : public ov::intel_cpu:
         auto rotary_dims = m_config.rotary_ndims;
         bool can_inplace = true;
         if (m_config.slice_stop - m_config.slice_start > 0) {
-            std::cout << "transpose slice|" << std::endl;
             t_src = t_src.slice(3, m_config.slice_start, m_config.slice_stop);
             can_inplace = false;
         }
         if (m_config.input_trans0213) {
-            std::cout << "transpose rope|" << t_src.m_rank << std::endl;
             t_src = t_src.permute({0, 2, 1, 3});
-            std::cout << "finish transpose" << std::endl;
             can_inplace = false;
         }
         if (m_config.gather_position_arg_id > 0) {

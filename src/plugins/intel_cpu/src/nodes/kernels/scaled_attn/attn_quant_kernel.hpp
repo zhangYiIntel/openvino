@@ -522,7 +522,7 @@ static void quantize_q_by_dims(const ov::intel_cpu::PlainTensor& src,
     size_t m = 0;
     for (size_t src_offset = 0, dst_offset = 0; src_offset < S;
          src_offset += groupe_size, dst_offset += groupe_size / sub_byte_multiplier + param_size) {
-        auto base = dst.ptr<uint8_t, DST_PREC>(h, b, 0);
+        auto base = dst.ptr<uint8_t, DST_PREC>(b, h, 0);
         base += dst_offset;
         auto p = reinterpret_cast<float*>(base);
         uint8_t* ptr = base + param_size;
