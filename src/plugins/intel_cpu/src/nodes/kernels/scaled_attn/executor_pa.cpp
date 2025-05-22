@@ -1822,18 +1822,18 @@ struct MHA {
 
         if (_helper._params.is_sage_attn) {
             sage_attn_ref<DATA_TYPE, KEY_PREC, VALUE_PREC>(_helper._quantized_q,
-                                                           present_key,
-                                                           present_value,
-                                                           output_emb,
-                                                           output_score,
-                                                           max_context_len,
-                                                           past_lens,
-                                                           subsequence_begins,
-                                                           block_indices,
-                                                           block_indices_begins,
-                                                           alibi_slopes,
-                                                           _helper._weight_bhl,
-                                                           _helper._output_bhl);
+                                                       present_key,
+                                                       present_value,
+                                                       output_emb,
+                                                       output_score,
+                                                       max_context_len,
+                                                       past_lens,
+                                                       subsequence_begins,
+                                                       block_indices,
+                                                       block_indices_begins,
+                                                       alibi_slopes,
+                                                       _helper._weight_bhl,
+                                                       _helper._output_bhl);
             if (getenv("ENABLE_RETURN"))
                 return;
         }
