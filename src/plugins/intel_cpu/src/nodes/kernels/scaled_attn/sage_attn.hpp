@@ -18,6 +18,36 @@
 
 namespace ov::Extensions::Cpu::XARCH {
 
+#if defined(HAVE_AVX2)
+int32_t hsum_epi32_avx(__m128i x)
+{
+    __m128i hi64  = _mm_unpackhi_epi64(x, x);           // 3-operand non-destructive AVX lets us save a byte without needing a movdqa
+    __m128i sum64 = _mm_add_epi32(hi64, x);
+    __m128i hi32  = _mm_shuffle_epi32(sum64, _MM_SHUFFLE(2, 3, 0, 1));    // Swap the low two elements
+    __m128i sum32 = _mm_add_epi32(sum64, hi32);
+    return _mm_cvtsi128_si32(sum32);       // movd
+}
+
+// only needs AVX2
+int32_t hsum_8x32(__m256i v)
+{
+    __m128i sum128 = _mm_add_epi32( 
+                 _mm256_castsi256_si128(v),
+                 _mm256_extracti128_si256(v, 1)); // silly GCC uses a longer AXV512VL instruction if AVX512 is enabled :/
+    return hsum_epi32_avx(sum128);
+}
+#endif
+#if defined(HAVE_AVX512F)
+// AVX512
+int32_t hsum_16x32(__m512i v)
+{
+    __m256i sum256 = _mm256_add_epi32( 
+                 _mm512_castsi512_si256(v),  // low half
+                 _mm512_extracti64x4_epi64(v, 1));  // high half.  AVX512F.  32x8 version is AVX512DQ
+    return hsum_8x32(sum256);
+}
+#endif
+
 void dot_product_block_s8s8_f32(int8_t* a, int8_t* b, float* c, float c_scale, size_t n, size_t block_size) {
     const size_t b_stride = n + sizeof(float);
     for (size_t j = 0; j < block_size; j++) {
@@ -25,9 +55,33 @@ void dot_product_block_s8s8_f32(int8_t* a, int8_t* b, float* c, float c_scale, s
         float* scale_a = reinterpret_cast<float*>(a);
         float* scale_b = reinterpret_cast<float*>(b);
         int8_t* a_src = a + params_offset;
+        int8_t* b_src = b + params_offset;
         int32_t sum = 0;
-        for (size_t i = 0; i < n; i++) {
-            int8_t* b_src = b + params_offset;
+        size_t i = 0;
+#if defined(HAVE_AVX512F)
+        __m512i sum_v512 = _mm512_setzero_epi32();
+        for (; i + vec_len_epi8_avx2 <= n; i += vec_len_epi8_avx2) {
+            auto a_0 = _mm256_loadu_si256((__m256i*)(a_src + i));
+            auto b_0 = _mm256_loadu_si256((__m256i*)(b_src + i));
+            auto a_0_i = _mm512_cvtepi8_epi16(a_0);
+            auto b_0_i = _mm512_cvtepi8_epi16(b_0);
+            auto temp = _mm512_madd_epi16(a_0_i, b_0_i);
+            sum_v512 = _mm512_add_epi32(sum_v512, temp);
+        }
+        sum += _mm512_reduce_add_epi32(sum_v512);
+#elif defined(HAVE_AVX2)
+        __m256i sum_v256 = _mm256_setzero_si256();
+        for (; i + vec_len_epi8_avx2 / 2 <= n; i += vec_len_epi8_avx2 / 2) {
+            auto a_0 = _mm_loadu_si128((__m128i*)(a_src + i));
+            auto b_0 = _mm_loadu_si128((__m128i*)(b_src + i));
+            auto a_0_i = _mm256_cvtepi8_epi16(a_0);
+            auto b_0_i = _mm256_cvtepi8_epi16(b_0);
+            auto temp = _mm256_madd_epi16(a_0_i, b_0_i);
+            sum_v256 = _mm256_add_epi32(sum_v256, temp);
+        }
+        sum += hsum_8x32(sum_v256);
+#endif
+        for (; i < n; i++) {
             sum += a_src[i] * b_src[i];
         }
         float f32_sum = static_cast<float>(sum) * scale_a[0] * scale_b[0];
