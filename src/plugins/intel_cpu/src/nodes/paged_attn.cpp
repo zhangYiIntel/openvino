@@ -210,6 +210,7 @@ void PagedAttention::createPrimitive() {
         params.quant_value_bychannel = quantValuebyChannel;
         params.fuse_rope = m_fuseRope;
         params.m_config = m_rope_config;
+        params.is_sage_attn = getenv("ENABLE_SAGE_ATTN") != nullptr;
         return make_pa_executor(rtPrecision,
                                 kCachePrecision,
                                 vCachePrecision,
