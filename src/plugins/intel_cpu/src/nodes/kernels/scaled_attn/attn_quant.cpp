@@ -493,7 +493,6 @@ void paged_attn_quantkv(const ov::intel_cpu::PlainTensor& k_src,
         saged_attn_quant_mt<ov::float16, ov::element::i8, ov::element::u8>,
         saged_attn_quant_mt<ov::float16, ov::element::u8, ov::element::u8>};
     if (quant_param.is_sage_attn) {
-        std::cout << "is_sage_attn|key_prec|" << k_dst.get_precision() << std::endl;
         size_t dispatch = k_dst.get_precision() == ov::element::u8 ? 1 : 0;
         if (k_src.get_precision() == ov::element::f32) {
             saged_attn_fp32[dispatch](k_src,

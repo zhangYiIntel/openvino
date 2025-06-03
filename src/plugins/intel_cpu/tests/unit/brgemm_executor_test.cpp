@@ -68,6 +68,59 @@ void run_test(ov::element::Type rtPrec) {
     });
 }
 
+template <>
+void run_test<int8_t>(ov::element::Type rtPrec) {
+    size_t M = 32;
+    size_t N = 32;
+    size_t K = 32;
+    ov::intel_cpu::BrgemmKernel gemm(M, N, K, K + 4, K + 4, N, true, rtPrec);
+    size_t nthr = 1;
+    bool is_f32 = (rtPrec == ov::element::f32);
+    std::vector<int8_t> a_data(M * (K + 4));
+    std::vector<int8_t> b_data(N * (K + 4), 0);
+    std::vector<int32_t> c_data(nthr * M * N, 0.0f);
+    std::vector<size_t> wsp(nthr * 4 * 1024, 0.0f);
+    std::vector<uint8_t> a_scratch(gemm.get_scratch_a_size(), 0.0f);
+    std::vector<uint8_t> b_scratch(gemm.get_scratch_b_size(), 0.0f);
+    for (size_t i = 0; i < M; i++) {
+        std::fill_n(a_data.begin() + i * (K + 4), 4, 4096);
+        std::iota(a_data.begin() + 4 + i * (K + 4), a_data.begin() + 4 + i * (K + 4) + K, 1);
+    }
+    for (size_t i = 0; i < N; i++) {
+        std::fill_n(a_data.begin() + i * (K + 4), 4, 4096);
+        std::fill_n(b_data.begin() + 4 + i * (K + 4), K, i + 1);
+    }
+    if (!is_f32) {
+        gemm.copy_buffer_b(b_data.data() + 4, b_scratch.data());
+    }
+    auto m_block_size = gemm.get_mblk_size();
+    auto m_blocks = (M + gemm.get_mblk_size() - 1) / m_block_size;
+    void* b_ptr = !is_f32 ? static_cast<void*>(b_scratch.data()) : static_cast<void*>(b_data.data());
+    ov::parallel_for2d(nthr, m_blocks, [&](size_t i, size_t m_blk) {
+        auto m_start = m_blk * m_block_size;
+        auto m_end = std::min(m_start + m_block_size, M);
+        auto m_cnt = m_end - m_start;
+        gemm.executeGemm(m_cnt < m_block_size,
+                         a_data.data() + 4 + m_start * K,
+                         b_ptr,
+                         c_data.data() + i * M * N + m_start * N,
+                         wsp.data() + i * 4 * 1024,
+                         a_scratch.data());
+    });
+    ov::parallel_for(nthr, [&](size_t i) {
+        for (size_t m = 0; m < M; m++) {
+            for (size_t n = 0; n < N; n++) {
+                int32_t expected_value = 528 * (n + 1);
+                if (expected_value != c_data[i * M * N + m * N + n]) {
+                    std::ostringstream out_stream;
+                    out_stream << m << "|" << n << "|actual " << c_data[m * N + n] << "|expected|" << expected_value << std::endl;
+                    throw std::runtime_error(out_stream.str());
+                }
+            }
+        }
+    });
+}
+
 TEST_P(BrgemmKernelTest, simpleGemmTest) {
     ov::element::Type rtPrec = this->GetParam();
     if (rtPrec == ov::element::bf16 && !ov::with_cpu_x86_bfloat16())
@@ -81,13 +134,16 @@ TEST_P(BrgemmKernelTest, simpleGemmTest) {
         run_test<ov::bfloat16>(rtPrec);
     } else if (rtPrec == ov::element::f16) {
         run_test<ov::float16>(rtPrec);
-    } else {
+    } else if (rtPrec == ov::element::f16) {
         run_test<float>(rtPrec);
+    } else {
+        std::cout << "Going to run i8|" << std::endl;
+        run_test<int8_t>(rtPrec);
     }
 }
 
 INSTANTIATE_TEST_SUITE_P(BrgemmKernelUnitTest,
                          BrgemmKernelTest,
-                         ::testing::Values(ov::element::f32, ov::element::bf16, ov::element::f16),
+                         ::testing::Values(ov::element::i8),
                          BrgemmKernelTest::getTestCaseName);
 } // namespace brgemmUnitTest

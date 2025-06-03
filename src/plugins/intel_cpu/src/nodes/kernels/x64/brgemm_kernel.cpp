@@ -38,9 +38,14 @@ BrgemmKernel::BrgemmKernel(size_t M,
       b_transposed(b_transposed),
       inType(inType),
       b_accumulate(b_accumulate) {
-    if (!one_of(inType, ov::element::bf16, ov::element::f16, ov::element::f32)) {
+    if (!one_of(inType, ov::element::i8, ov::element::bf16, ov::element::f16, ov::element::f32)) {
         THROW_ERROR("brgemm kernel only supports f16, bf16, f32");
     }
+
+    if (inType == ov::element::i8) {
+
+    }
+
     bool is_f32 = inType == ov::element::f32;
 
     bool is_bf16 = inType == ov::element::bf16;
@@ -52,6 +57,8 @@ BrgemmKernel::BrgemmKernel(size_t M,
     if (is_f16 && !mayiuse(avx512_core_fp16)) {
         THROW_ERROR("brgemm f16 kernel could only be used above avx512_f16");
     }
+    
+    bool is_s8 = inType == ov::element::i8;
 
     srcType = weiType = inType;
     // If isa is avx512_core_fp16, f16 is supported by upconverted to f32
@@ -67,8 +74,9 @@ BrgemmKernel::BrgemmKernel(size_t M,
         fp32     Y      N
         bf16     Y      Y
         fp16     Y      Y
+        s8s8     Y      Y
     */
-    bool isAMXSupported = (is_bf16 && mayiuse(avx512_core_amx)) || (is_f16 && mayiuse(avx512_core_amx_fp16));
+    bool isAMXSupported = (is_bf16 && mayiuse(avx512_core_amx)) || (is_f16 && mayiuse(avx512_core_amx_fp16)) || (is_s8 && mayiuse(avx512_core_amx));
     bool isBrgWithAMX = isAMXSupported && !is_avx_f16_only;
 
     size_t vlen;
@@ -85,7 +93,7 @@ BrgemmKernel::BrgemmKernel(size_t M,
     K_blk = isBrgWithAMX ? 32 : K;
     K_tail = K % K_blk;
     if (isBrgWithAMX && K_tail) {
-        K_tail = rnd_up(K_tail, 2);
+        K_tail = rnd_up(K_tail, brgVnniFactor);
     }
     // copied K must be round up by vlen / inType.size(), otherwise copy B kernel may access wrong memory
     packedBSize = rnd_up(K, vlen / weiType.size()) * rnd_up(N, N_blk) * weiType.size();

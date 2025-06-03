@@ -5,6 +5,7 @@
 
 #include <cpu/x64/amx_tile_configure.hpp>
 #include <cpu/x64/brgemm/brgemm.hpp>
+#include <oneapi/dnnl/dnnl_ukernel.h>
 #include <cpu/x64/matmul/brgemm_matmul_copy_utils.hpp>
 #include <cpu/x64/matmul/brgemm_matmul_utils.hpp>
 #include <cstddef>
@@ -16,6 +17,7 @@ class BrgemmKernel {
 public:
     // Construct brgemm kernel for matmul (M, K) * (K, N)/(N, K)^T
     // BF16 * BF16 -> FP32
+    // S8 * S8 -> S32
     // lda is the leading dimension for A matrix
     // ldb is the leading dimension for B matrix
     // ldc is the leading dimension for C matrix

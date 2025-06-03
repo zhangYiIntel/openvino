@@ -22,9 +22,9 @@
 #include "openvino/core/parallel.hpp"
 #include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/float16.hpp"
+#include "page_attn_kernel.hpp"
 #include "rope_executor.hpp"
 #include "sage_attn.hpp"
-#include "page_attn_kernel.hpp"
 #include "softmax_kernel.hpp"
 #include "transpose_kernel.hpp"
 #include "utils/plain_tensor.hpp"
@@ -561,6 +561,7 @@ struct MHAHelper {
     size_t _wsp_size_per_thread = 0;
 
     std::vector<std::shared_ptr<BrgemmKernel>> _qk_gemm;
+    std::vector<std::shared_ptr<BrgemmKernel>> _qk_s8s8_gemm;
     std::vector<std::shared_ptr<BrgemmKernel>> _wv_gemm;
     // will accumulate C buffer
     std::vector<std::shared_ptr<BrgemmKernel>> _wv_gemm_acc;
@@ -648,6 +649,7 @@ struct MHAHelper {
             _qk_gemm.resize(_block_size);
             _wv_gemm.resize(_block_size);
             _wv_gemm_acc.resize(_block_size);
+            _qk_s8s8_gemm.resize(_block_size);
             size_t wv_stride = q_is_xf16 ? _output.stride(1) : H * SV;
             for (size_t i = 0; i < _block_size; i++) {
                 _qk_gemm[i] = std::make_shared<BrgemmKernel>(i + 1,
@@ -658,6 +660,18 @@ struct MHAHelper {
                                                              _new_score_stride,
                                                              false,
                                                              in_type);
+                if (_params.is_sage_attn) {
+                    // [M, K] x [N, K]^T
+                    // LDB consider the offset of scale(f32)
+                    _qk_s8s8_gemm[i] = std::make_shared<BrgemmKernel>(i + 1,
+                                                                      _block_size,
+                                                                      S,
+                                                                      H * (S + sizeof(float)),
+                                                                      S + sizeof(float),
+                                                                      _block_size,
+                                                                      true,
+                                                                      ov::element::i8);
+                }
                 _wv_gemm[i] =
                     std::make_shared<BrgemmKernel>(i + 1,
                                                    SV,
@@ -724,7 +738,14 @@ struct MHAHelper {
     }
 
     void init_reorder_buffers(size_t batch, size_t kv_len_in_blocks) {
-        _qk_scratch_b.resize<DATA_TYPE>({batch, kv_len_in_blocks, Hk, _block_size * S});
+        //appedn the scale after the tokens
+        size_t padded_S = _params.is_sage_attn ? (S + sizeof(float) / sizeof(int8_t)) : S;
+        if (_params.is_sage_attn) {
+            size_t padded_S = (S + sizeof(float) / sizeof(int8_t));
+            _qk_scratch_b.resize<int8_t>({batch, kv_len_in_blocks, Hk, _block_size * padded_S});
+        } else {
+            _qk_scratch_b.resize<DATA_TYPE>({batch, kv_len_in_blocks, Hk, _block_size * S});
+        }
         if (AarchF16) {
             // It is required to keep kv_cache continuous in mem, as kleidi do not support accumulation
             _wv_scratch_b.resize<DATA_TYPE>({batch, Hk, kv_len_in_blocks, _block_size * rnd_up(SV, _block_size)});
@@ -808,13 +829,37 @@ struct MHAHelper {
             // 1 1 1 0 ...
             // just computing the positions of 1 should be enough
             for (size_t k_blk = 0; k_blk < cur_kv_len_blocks; k_blk++) {
-                auto* k_ptr = qk_scratch_b.ptr<DATA_TYPE>(k_blk, hk);
-                _qk_gemm[q_cnt - 1]->executeGemm(q_cnt < _block_size,
-                                                 q_ptr,
-                                                 k_ptr,
-                                                 c_ptr + k_blk * _block_size,
-                                                 _wsp.data() + ithr * _wsp_size_per_thread,
-                                                 _qk_scratch_a ? _qk_scratch_a.ptr<DATA_TYPE>(ithr, 0) : nullptr);
+                if (_params.is_sage_attn && query.get_precision() == ov::element::i8) {
+                    auto* q_ptr = query.template ptr<int8_t>(h, q_start, 0);
+                    auto* k_ptr = qk_scratch_b.ptr<int8_t>(k_blk, hk);
+                    int32_t* temp_C = reinterpret_cast<int32_t*>(_output.ptr<float>(ithr, 0, h, 0));
+                    _qk_s8s8_gemm[q_cnt - 1]->executeGemm(q_cnt < _block_size,
+                                                          q_ptr + sizeof(float),
+                                                          k_ptr,
+                                                          temp_C,
+                                                          _wsp.data() + ithr * _wsp_size_per_thread,
+                                                          nullptr);
+                    float* dst_f32 = c_ptr + k_blk * _block_size;
+                    for (size_t i = 0; i < q_cnt; i++) {
+                        float* scale_a = reinterpret_cast<float*>(query.ptr<int8_t>(h, q_start + i, 0));
+                        for (size_t j = 0; j < _block_size; j++) {
+                            float* scale_b = reinterpret_cast<float*>(
+                                qk_scratch_b.ptr<int8_t>(k_blk, hk, _block_size * S));
+                            dst_f32[i * _new_score_stride + j] =
+                                temp_C[i * _block_size + j] * scale_a[0] * scale_b[j];
+                            // printf(" %d ", temp_c[i * _block_size + j]);
+                        }
+                        // printf("\n");
+                    }
+                } else {
+                    auto* k_ptr = qk_scratch_b.ptr<DATA_TYPE>(k_blk, hk);
+                    _qk_gemm[q_cnt - 1]->executeGemm(q_cnt < _block_size,
+                                                     q_ptr,
+                                                     k_ptr,
+                                                     c_ptr + k_blk * _block_size,
+                                                     _wsp.data() + ithr * _wsp_size_per_thread,
+                                                     _qk_scratch_a ? _qk_scratch_a.ptr<DATA_TYPE>(ithr, 0) : nullptr);
+                }
             }
 
             for (size_t m = q_start; m < q_end; m++) {
@@ -1415,105 +1460,6 @@ struct MHAHelper {
 template <typename DATA_TYPE, ov::element::Type_t KEY_PREC, ov::element::Type_t VALUE_PREC>
 struct MHA {
     MHAHelper<DATA_TYPE, KEY_PREC, VALUE_PREC>& _helper;
-    struct AttnWorkItem {
-        int32_t batch_in_reorder;  // which batch in reorder buffer will be used
-        int32_t batch_in_seq;      // batch idx in sequence
-        int32_t q_len;             // current sequence length, 1 for second token, 2+ for first token
-        int32_t q_block_id;        // block id in this seq, valid at first token
-    };
-    struct ReorderWorkItem {
-        int32_t batch_in_seq;      // batch idx in sequence
-        int32_t batch_in_reorder;  // which batch in reorder buffer will be used
-        int32_t kv_block_id;       // block id in this kv cache seq
-        int32_t valid_block_len;
-    };
-    struct WorkItems {
-    private:
-        std::vector<AttnWorkItem> attn_items;
-        std::vector<ReorderWorkItem> reorder_items;
-        int32_t max_kv_len_in_reorder;  // max kv len between first tokens
-        int32_t max_batch_in_reorder;
-        int32_t total_kv_len;
-
-    public:
-        void reset([[maybe_unused]] const PlainTensor& query,
-                   const PlainTensor& past_lens,
-                   const PlainTensor& subsequence_begins,
-                   size_t block_size) {
-            attn_items.clear();
-            reorder_items.clear();
-            max_kv_len_in_reorder = 0;
-            max_batch_in_reorder = 0;
-            total_kv_len = 0;
-
-            auto seq_cout = static_cast<int32_t>(past_lens.m_dims[0]);
-            for (int32_t i = 0; i < seq_cout; i++) {
-                auto q_len = subsequence_begins.ptr<int32_t>()[i + 1] - subsequence_begins.ptr<int32_t>()[i];
-                auto kv_len = past_lens.ptr<int32_t>()[i] + q_len;
-                auto kv_len_in_block = static_cast<int32_t>(div_up(kv_len, block_size));
-                if (q_len == 1) {
-                    attn_items.emplace_back(AttnWorkItem{0,     // batch_in_reorder
-                                                         i,     // batch_in_seq
-                                                         1ull,  // q_len
-                                                         // kv_len in blocks, used in the sort function
-                                                         kv_len_in_block - 1});
-                } else {
-                    auto reorder_sub_work_count = kv_len_in_block;
-                    max_kv_len_in_reorder = std::max(max_kv_len_in_reorder, kv_len);
-                    for (int32_t block_id = 0; block_id < reorder_sub_work_count; block_id++) {
-                        int32_t valid_block_size =
-                            block_id == (reorder_sub_work_count - 1) ? kv_len - block_id * block_size : block_size;
-                        reorder_items.emplace_back(ReorderWorkItem{i,                     // batch_in_seq
-                                                                   max_batch_in_reorder,  // batch_in_reorder
-                                                                   block_id,              // kv_block_id
-                                                                   valid_block_size});    // valid_block_len
-                    }
-
-                    // workitems for attention
-                    auto attn_sub_work_count = static_cast<int32_t>(div_up(q_len, block_size));
-                    for (int32_t block_id = 0; block_id < attn_sub_work_count; block_id++) {
-                        attn_items.emplace_back(AttnWorkItem{
-                            max_batch_in_reorder,  // batch_in_reorder
-                            i,                     // batch_in_seq
-                            q_len,                 // q_len
-                            block_id               // q_block_id
-                        });
-                    }
-                    max_batch_in_reorder++;
-                }
-                total_kv_len += kv_len;
-            }
-            // std::sort(attn_items.begin(), attn_items.end(), [] (const AttnWorkItem& left, const AttnWorkItem& right)
-            // {
-            //     // kv block number which will be acessed later
-            //     auto left_kv_blocks = left.q_block_id;
-            //     auto right_kv_blocks = right.q_block_id;
-            //     return left_kv_blocks > right_kv_blocks;
-            // });
-        }
-        [[nodiscard]] const AttnWorkItem& get_attn_work_item(size_t idx) const {
-            return attn_items[idx];
-        }
-        [[nodiscard]] size_t attn_work_size() const {
-            return attn_items.size();
-        }
-        [[nodiscard]] const ReorderWorkItem& get_reorder_work_item(size_t idx) const {
-            return reorder_items[idx];
-        }
-        [[nodiscard]] size_t reorder_work_size() const {
-            return reorder_items.size();
-        }
-        [[nodiscard]] size_t get_reorder_max_batch_size() const {
-            return static_cast<size_t>(max_batch_in_reorder);
-        }
-        [[nodiscard]] size_t get_reorder_max_kv_len() const {
-            return static_cast<size_t>(max_kv_len_in_reorder);
-        }
-        [[nodiscard]] size_t get_total_kv_len() const {
-            return static_cast<size_t>(total_kv_len);
-        }
-    };
-
     WorkItems _workitems;
 
     MHA(MHAHelper<DATA_TYPE, KEY_PREC, VALUE_PREC>& helper) : _helper(helper) {}
@@ -1564,20 +1510,28 @@ struct MHA {
 
             auto ithr = parallel_get_thread_num();
             const size_t valid_len = item.valid_block_len;
-            auto* k_ptr =
-                k_cache.ptr<typename ov::element_type_traits<KEY_PREC>::value_type, KEY_PREC>(block_number, hk);
-            transpose_16NxK<DATA_TYPE, KEY_PREC>(
-                _helper._qk_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
-                k_ptr,
-                _helper._output.template ptr<DATA_TYPE>(ithr),
-                valid_len,  // N
-                _helper.S,  // K
-                _helper._block_size,
-                _helper._block_size,            // dst_stride
-                _helper.S,                      // src_stride
-                _helper._key_group_size,        // group_size
-                _helper._quant_key_bychannel);  // quant_by_channel
-
+            if (_helper._params.is_sage_attn) {
+                sage_attn_transpose_k(item,
+                                      hk,
+                                      _helper._block_size,
+                                      _helper._qk_s8s8_gemm[31],
+                                      k_cache,
+                                      _helper._qk_scratch_b);
+            } else {
+                auto* k_ptr =
+                    k_cache.ptr<typename ov::element_type_traits<KEY_PREC>::value_type, KEY_PREC>(block_number, hk);
+                transpose_16NxK<DATA_TYPE, KEY_PREC>(
+                    _helper._qk_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
+                    k_ptr,
+                    _helper._output.template ptr<DATA_TYPE>(ithr),
+                    valid_len,  // N
+                    _helper.S,  // K
+                    _helper._block_size,
+                    _helper._block_size,            // dst_stride
+                    _helper.S,                      // src_stride
+                    _helper._key_group_size,        // group_size
+                    _helper._quant_key_bychannel);  // quant_by_channel
+            }
             if (q_is_xf16) {
                 auto* v_ptr =
                     v_cache.ptr<typename element_type_traits<VALUE_PREC>::value_type, VALUE_PREC>(block_number, hk);
@@ -1671,7 +1625,7 @@ struct MHA {
                         score_output = _helper._score_output.template ptr<float>() + score_offset * _helper.H;
                     }
                 }
-
+                printf("exec_kernel_one_bh\n");
                 _helper.exec_kernel_one_bh(
                     q.slice(0, batch_in_token, batch_in_token),
                     k_cache,
@@ -1711,7 +1665,12 @@ struct MHA {
                 }
 
                 PlainTensor sub_query;
-                sub_query.resize({q_len, _helper.H, _helper.S}, q.ptr<DATA_TYPE>(batch_in_token));
+                if (_helper._params.is_sage_attn) {
+                    sub_query.resize({q_len, _helper.H, _helper._quantized_q.m_dims[2]}, _helper._quantized_q.template ptr<int8_t>(batch_in_token));
+                } else {
+                    sub_query.resize({q_len, _helper.H, _helper.S}, q.ptr<DATA_TYPE>(batch_in_token));
+                }
+
                 // physical layout (B_in_tokens, H, S)
                 sub_query = sub_query.permute({1, 0, 2});
 #    if defined(OPENVINO_ARCH_ARM64)
@@ -1813,7 +1772,9 @@ struct MHA {
                     const PlainTensor& block_indices_begins,
                     const PlainTensor& alibi_slopes,
                     const PlainTensor& score_aggregation_window) {
-        _workitems.reset(query, past_lens, subsequence_begins, _helper._block_size);
+        _workitems
+            .reset(query, past_lens, subsequence_begins, block_indices, block_indices_begins, _helper._block_size);
+        std::cout << "query|size|" << query.m_dims[0] << std::endl;
         if (output_score) {
             _helper.init_score_buffers(past_lens, subsequence_begins, score_aggregation_window);
         }
@@ -1821,21 +1782,40 @@ struct MHA {
         auto nthr = static_cast<size_t>(parallel_get_max_threads());
 
         if (_helper._params.is_sage_attn) {
-            sage_attn_ref<DATA_TYPE, KEY_PREC, VALUE_PREC>(_helper._quantized_q,
-                                                       present_key,
-                                                       present_value,
-                                                       output_emb,
-                                                       output_score,
-                                                       max_context_len,
-                                                       past_lens,
-                                                       subsequence_begins,
-                                                       block_indices,
-                                                       block_indices_begins,
-                                                       alibi_slopes,
-                                                       _helper._weight_bhl,
-                                                       _helper._output_bhl);
-            if (getenv("ENABLE_RETURN"))
+            if (getenv("ENABLE_SAGE_RETURN")) {
+                _helper.init_reorder_buffers(_workitems.get_reorder_max_batch_size(),
+                                            div_up(_workitems.get_reorder_max_kv_len(), _helper._block_size));
+                auto reorder_work_count = _workitems.reorder_work_size();
+                parallel_for2d_dynamic(reorder_work_count, _helper.Hk, [&](size_t w, size_t hk) {
+                    const auto& item = _workitems.get_reorder_work_item(w);
+                    sage_attn_transpose_k(item,
+                                        hk,
+                                        _helper._block_size,
+                                        _helper._qk_s8s8_gemm[31],
+                                        present_key,
+                                        _helper._qk_scratch_b);
+                });
+                _helper.resize_temporary_weight_buffer(_helper.H);
+                sage_attn_ref<DATA_TYPE, KEY_PREC, VALUE_PREC>(_helper._quantized_q,
+                                                            present_key,
+                                                            present_value,
+                                                            output_emb,
+                                                            output_score,
+                                                            max_context_len,
+                                                            past_lens,
+                                                            subsequence_begins,
+                                                            block_indices,
+                                                            block_indices_begins,
+                                                            alibi_slopes,
+                                                            _workitems,
+                                                            _helper._qk_s8s8_gemm,
+                                                            _helper._qk_scratch_b,
+                                                            _helper._wsp,
+                                                            _helper._weight,
+                                                            _helper._weight_bhl,
+                                                            _helper._output_bhl);
                 return;
+            }
         }
 
         if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
@@ -2244,12 +2224,13 @@ std::shared_ptr<PagedAttentionExecutor> make_pa_executor(ov::element::Type data_
                                                          ov::element::Type value_cache_type,
                                                          ov::Extensions::Cpu::PagedAttnExecutorParams params) {
     std::shared_ptr<PagedAttentionExecutor> executor;
-    std::cout << "make_pa_executor|key|" << key_cache_type << "|value|" << value_cache_type << std::endl;
+    std::cout << "make_pa_executor|key|" << key_cache_type << "|value|" << value_cache_type << "|is_sage|"
+              << params.is_sage_attn << std::endl;
 #if defined(OPENVINO_ARCH_X86_64)
     if (data_type == ov::element::bf16) {
 #    if defined(HAVE_AVX512F)
         if (key_cache_type == ov::element::i8) {
-            printf("make PagedAttn Executor\n");
+            printf("make PagedAttn Executor i8\n");
             executor = std::make_shared<AttentionExecutor<ov::bfloat16, ov::element::i8, ov::element::u8>>(params);
         } else if (key_cache_type == ov::element::u8) {
             if (value_cache_type == ov::element::u4) {
@@ -2317,7 +2298,10 @@ std::shared_ptr<PagedAttentionExecutor> make_pa_executor(ov::element::Type data_
         OPENVINO_THROW("make_pa_executor: f16 needs avx512+ hardware.");
 #    endif
     } else if (data_type == ov::element::f32) {
-        if (key_cache_type == ov::element::u8) {
+        if (key_cache_type == ov::element::i8) {
+            printf("make PagedAttn Executorf32 + i8\n");
+            executor = std::make_shared<AttentionExecutor<float, ov::element::i8, ov::element::u8>>(params);
+        } else if (key_cache_type == ov::element::u8) {
             if (value_cache_type == ov::element::u4) {
                 executor = std::make_shared<AttentionExecutor<float, ov::element::u8, ov::element::u4>>(params);
             } else if (value_cache_type == ov::element::u8) {
