@@ -15,6 +15,11 @@ namespace ov::intel_cpu {
 
 class BrgemmKernel {
 public:
+    enum ScaleType {
+        NONE,
+        PER_CHANNEL,
+        PER_TENSOR
+    };
     // Construct brgemm kernel for matmul (M, K) * (K, N)/(N, K)^T
     // BF16 * BF16 -> FP32
     // S8 * S8 -> S32
@@ -31,10 +36,34 @@ public:
                  bool b_transposed = false,
                  ov::element::Type inType = ov::element::bf16,
                  bool b_accumulate = false);
+    // Construct brgemm kernel for matmul (M, K) * (K, N)/(N, K)^T
+    // BF16 * BF16 -> FP32
+    // S8 * S8 -> S32
+    // lda is the leading dimension for A matrix
+    // ldb is the leading dimension for B matrix
+    // ldc is the leading dimension for C matrix
+    // b_transpose indicates wheter B matrix is transposed.
+    // post_scales
+    BrgemmKernel(size_t M,
+                 size_t N,
+                 size_t K,
+                 size_t lda,
+                 size_t ldb,
+                 size_t ldc,
+                 size_t ldd,
+                 bool b_transposed,
+                 ov::element::Type inType,
+                 ov::element::Type DType,
+                 ScaleType aScaleType,
+                 ScaleType bScaleType,
+                 bool b_accumulate);
     // execute all M
     void executeGemm(void* a, void* b, void* c, void* wsp, void* scratch_a, void* scratch_b);
     // execute by m_blk
     void executeGemm(bool is_M_tail, void* a, void* b, void* c, void* wsp, void* scratch_a);
+
+    // execute by m_blk + scale
+    void executeGemmWithScale(bool is_M_tail, void* a, void* b, void* c, void* d, float* scale_b, void* wsp, void* scratch_a);
 
     void copy_buffer_b(void* b, void* scratch_b);
     // bytes needed to place scratch buffer a
@@ -54,12 +83,15 @@ public:
 private:
     size_t M = 0, M_blk = 0, M_tail = 0;
     size_t K = 0, K_blk = 0, K_tail = 0, N = 0, N_blk = 0, N_tail = 0;
-    size_t lda = 0, ldb = 0, ldc = 0;
+    size_t lda = 0, ldb = 0, ldc = 0, ldd = 0;
+    ScaleType aScaleType = ScaleType::NONE;
+    ScaleType bScaleType = ScaleType::NONE; 
     bool b_transposed = false;
     size_t brgVnniFactor = 0;
     size_t packedBSize = 0;
     size_t packedASize = 0;
     ov::element::Type inType;
+    ov::element::Type DType;
     ov::element::Type weiType;
     ov::element::Type srcType;
     bool is_avx_f16_only = false;
@@ -72,7 +104,7 @@ private:
         dnnl_data_type_t dt_in1 = dnnl_data_type_undef;
         char palette[64];
         bool is_with_amx = false;
-        bool is_with_comp = false;
+        bool has_post_ops = false;
         bool transpose_a = false;
         bool transpose_b = false;
         float beta = 0.0f;
@@ -111,7 +143,9 @@ private:
                     std::unique_ptr<dnnl::impl::cpu::x64::brgemm_kernel_t>& brgKernel,
                     const void* pin0,
                     const void* pin1,
-                    void* pout,
+                    void* Cout,
+                    void* Dout,
+                    float* bScale,
                     void* wsp);
 };
 }  // namespace ov::intel_cpu
