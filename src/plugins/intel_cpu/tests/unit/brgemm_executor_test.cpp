@@ -110,7 +110,7 @@ void run_test<int8_t>(ov::element::Type rtPrec) {
     ov::parallel_for(nthr, [&](size_t i) {
         for (size_t m = 0; m < M; m++) {
             for (size_t n = 0; n < N; n++) {
-                int32_t expected_value = 528 * (n + 1);
+                int32_t expected_value = (1 + K) * K / 2 * (n + 1);
                 if (expected_value != c_data[i * M * N + m * N + n]) {
                     std::ostringstream out_stream;
                     out_stream << m << "|" << n << "|actual " << c_data[m * N + n] << "|expected|" << expected_value << std::endl;
@@ -137,7 +137,6 @@ TEST_P(BrgemmKernelTest, simpleGemmTest) {
     } else if (rtPrec == ov::element::f16) {
         run_test<float>(rtPrec);
     } else {
-        std::cout << "Going to run i8|" << std::endl;
         run_test<int8_t>(rtPrec);
     }
 }

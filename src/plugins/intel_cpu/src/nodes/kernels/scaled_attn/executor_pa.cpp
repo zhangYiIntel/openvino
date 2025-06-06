@@ -838,7 +838,7 @@ struct MHAHelper {
                                                           k_ptr,
                                                           temp_C,
                                                           _wsp.data() + ithr * _wsp_size_per_thread,
-                                                          nullptr);
+                                                          _qk_scratch_a ? _qk_scratch_a.ptr<DATA_TYPE>(ithr, 0) : nullptr);
                     float* dst_f32 = c_ptr + k_blk * _block_size;
                     for (size_t i = 0; i < q_cnt; i++) {
                         float* scale_a = reinterpret_cast<float*>(query.ptr<int8_t>(h, q_start + i, 0));
@@ -1478,15 +1478,6 @@ struct MHA {
                          const PlainTensor& alibi_slopes,
                          const PlainTensor& score_aggregation_window) {
         auto Hk = v_cache.m_dims[1];
-        printf("k_cache shape %ld %ld %ld %ld stride %ld %ld %ld %ld\n",
-               k_cache.m_dims[0],
-               k_cache.m_dims[1],
-               k_cache.m_dims[2],
-               k_cache.m_dims[3],
-               k_cache.m_strides[0],
-               k_cache.m_strides[1],
-               k_cache.m_strides[2],
-               k_cache.m_strides[3]);
         constexpr bool q_is_xf16 = one_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
         auto attn_work_count = _workitems.attn_work_size();
         auto reorder_work_count = _workitems.reorder_work_size();
@@ -1625,7 +1616,6 @@ struct MHA {
                         score_output = _helper._score_output.template ptr<float>() + score_offset * _helper.H;
                     }
                 }
-                printf("exec_kernel_one_bh\n");
                 _helper.exec_kernel_one_bh(
                     q.slice(0, batch_in_token, batch_in_token),
                     k_cache,
@@ -1774,7 +1764,6 @@ struct MHA {
                     const PlainTensor& score_aggregation_window) {
         _workitems
             .reset(query, past_lens, subsequence_begins, block_indices, block_indices_begins, _helper._block_size);
-        std::cout << "query|size|" << query.m_dims[0] << std::endl;
         if (output_score) {
             _helper.init_score_buffers(past_lens, subsequence_begins, score_aggregation_window);
         }
@@ -1819,7 +1808,6 @@ struct MHA {
         }
 
         if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
-            printf("exec_loop_mixed\n");
             exec_loop_mixed(query,
                             present_key,
                             present_value,
@@ -1833,7 +1821,6 @@ struct MHA {
                             alibi_slopes,
                             score_aggregation_window);
         } else {
-            printf("exec_loop_bhl\n");
             _helper.exec_loop_bhl(query,
                                   present_key,
                                   present_value,

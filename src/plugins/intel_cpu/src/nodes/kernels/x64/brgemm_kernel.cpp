@@ -58,7 +58,10 @@ BrgemmKernel::BrgemmKernel(size_t M,
         THROW_ERROR("brgemm f16 kernel could only be used above avx512_f16");
     }
     
-    bool is_s8 = inType == ov::element::i8;
+    bool is_int8 = inType == ov::element::i8;
+    if (is_int8 && (!mayiuse(avx512_core_amx) && !mayiuse(avx2_vnni_2))) {
+        THROW_ERROR("brgemm s8s8 kernel could only be used with avx2_vnni_2/avx512_core_amx");
+    }
 
     srcType = weiType = inType;
     // If isa is avx512_core_fp16, f16 is supported by upconverted to f32
@@ -76,7 +79,7 @@ BrgemmKernel::BrgemmKernel(size_t M,
         fp16     Y      Y
         s8s8     Y      Y
     */
-    bool isAMXSupported = (is_bf16 && mayiuse(avx512_core_amx)) || (is_f16 && mayiuse(avx512_core_amx_fp16)) || (is_s8 && mayiuse(avx512_core_amx));
+    bool isAMXSupported = (is_bf16 && mayiuse(avx512_core_amx)) || (is_f16 && mayiuse(avx512_core_amx_fp16)) || (is_int8 && mayiuse(avx512_core_amx));
     bool isBrgWithAMX = isAMXSupported && !is_avx_f16_only;
 
     size_t vlen;
@@ -90,7 +93,7 @@ BrgemmKernel::BrgemmKernel(size_t M,
     N_tail = N % N_blk;
 
     // blocking K
-    K_blk = isBrgWithAMX ? 32 : K;
+    K_blk = isBrgWithAMX ? (inType == ov::element::i8 ? 64 : 32) : K;
     K_tail = K % K_blk;
     if (isBrgWithAMX && K_tail) {
         K_tail = rnd_up(K_tail, brgVnniFactor);
@@ -193,7 +196,12 @@ void BrgemmKernel::init_brgemm(brgemmCtx& ctx,
             }
         }
     } else {
-        isa = cpu_isa_t::avx2;
+        // s8s8 is only support by avx2_vnni_2
+        if (is_int8) {
+            isa = cpu_isa_t::avx2_vnni_2;
+        } else {
+            isa = cpu_isa_t::avx2;
+        }
     }
     auto status = brgemm_desc_init(&brgDesc,
                                    isa,
@@ -236,8 +244,8 @@ void BrgemmKernel::init_brgemm(brgemmCtx& ctx,
     if (use_amx) {
         amx_tile_configure(ctx.palette);
     }
-
-    ctx.is_with_comp = ctx.dt_in0 == dnnl_data_type_t::dnnl_s8 && !ctx.is_with_amx;
+    // s8s8 kernel are only support for amx/vnni_2, s8s8 vis compensation pass is not support
+    ctx.is_with_comp = false;
 
     brgemm_kernel_t* brgKernel_ = nullptr;
     status = brgemm_kernel_create(&brgKernel_, brgDesc);
@@ -333,6 +341,12 @@ void BrgemmKernel::init_brgemm_copy_b(
     } else {
         if (inType == ov::element::f16) {
             brgCopyKernelConf.isa = mayiuse(avx512_core_fp16) ? avx512_core_fp16 : avx2_vnni_2;
+        } else if (inType == ov::element::i8) {
+            if(mayiuse(avx512_core)) {
+                brgCopyKernelConf.isa = avx512_core;
+            } else {
+                brgCopyKernelConf.isa = cpu_isa_t::avx2;
+            }
         } else {
             brgCopyKernelConf.isa = dt_in0 == dnnl_data_type_t::dnnl_bf16 ? avx512_core_bf16 : avx512_core_vnni;
         }
