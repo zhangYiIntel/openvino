@@ -663,14 +663,21 @@ struct MHAHelper {
                 if (_params.is_sage_attn) {
                     // [M, K] x [N, K]^T
                     // LDB consider the offset of scale(f32)
-                    _qk_s8s8_gemm[i] = std::make_shared<BrgemmKernel>(i + 1,
-                                                                      _block_size,
-                                                                      S,
-                                                                      H * (S + sizeof(float)),
-                                                                      S + sizeof(float),
-                                                                      _block_size,
-                                                                      true,
-                                                                      ov::element::i8);
+                    // oneDNN brgemm has limitation with a_scale, it doesn't support per-row scale
+                    // only enable b_scale here
+                    _qk_s8s8_gemm[i] =
+                        std::make_shared<BrgemmKernel>(i + 1,
+                                                       _block_size,
+                                                       S,
+                                                       H * (S + sizeof(float)),
+                                                       S + sizeof(float),
+                                                       _block_size,
+                                                       _new_score_stride,
+                                                       true,
+                                                       ov::element::i8,
+                                                       ov::element::f32,
+                                                       ov::intel_cpu::BrgemmKernel::ScaleType::PER_CHANNEL,
+                                                       false);
                 }
                 _wv_gemm[i] =
                     std::make_shared<BrgemmKernel>(i + 1,
@@ -738,7 +745,7 @@ struct MHAHelper {
     }
 
     void init_reorder_buffers(size_t batch, size_t kv_len_in_blocks) {
-        //appedn the scale after the tokens
+        // append the scale after the tokens
         size_t padded_S = _params.is_sage_attn ? (S + sizeof(float) / sizeof(int8_t)) : S;
         if (_params.is_sage_attn) {
             size_t padded_S = (S + sizeof(float) / sizeof(int8_t));
@@ -832,25 +839,19 @@ struct MHAHelper {
                 if (_params.is_sage_attn && query.get_precision() == ov::element::i8) {
                     auto* q_ptr = query.template ptr<int8_t>(h, q_start, 0);
                     auto* k_ptr = qk_scratch_b.ptr<int8_t>(k_blk, hk);
-                    int32_t* temp_C = reinterpret_cast<int32_t*>(_output.ptr<float>(ithr, 0, h, 0));
-                    _qk_s8s8_gemm[q_cnt - 1]->executeGemm(q_cnt < _block_size,
-                                                          q_ptr + sizeof(float),
-                                                          k_ptr,
-                                                          temp_C,
-                                                          _wsp.data() + ithr * _wsp_size_per_thread,
-                                                          _qk_scratch_a ? _qk_scratch_a.ptr<DATA_TYPE>(ithr, 0) : nullptr);
+                    int32_t* temp_C = reinterpret_cast<int32_t*>(_output.ptr<float>(ithr, 0, 0, 0));
+                    std::vector<float> temp_D(_block_size * _block_size, 0.0f);
+                    float* scale_b = reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(k_blk, hk, _block_size * S));
                     float* dst_f32 = c_ptr + k_blk * _block_size;
-                    for (size_t i = 0; i < q_cnt; i++) {
-                        float* scale_a = reinterpret_cast<float*>(query.ptr<int8_t>(h, q_start + i, 0));
-                        for (size_t j = 0; j < _block_size; j++) {
-                            float* scale_b = reinterpret_cast<float*>(
-                                qk_scratch_b.ptr<int8_t>(k_blk, hk, _block_size * S));
-                            dst_f32[i * _new_score_stride + j] =
-                                temp_C[i * _block_size + j] * scale_a[0] * scale_b[j];
-                            // printf(" %d ", temp_c[i * _block_size + j]);
-                        }
-                        // printf("\n");
-                    }
+                    _qk_s8s8_gemm[q_cnt - 1]->executeGemmWithScale(
+                        q_cnt < _block_size,
+                        q_ptr + sizeof(float),
+                        k_ptr,
+                        temp_C,
+                        dst_f32,
+                        scale_b,
+                        _wsp.data() + ithr * _wsp_size_per_thread,
+                        _qk_scratch_a ? _qk_scratch_a.ptr<DATA_TYPE>(ithr, 0) : nullptr);
                 } else {
                     auto* k_ptr = qk_scratch_b.ptr<DATA_TYPE>(k_blk, hk);
                     _qk_gemm[q_cnt - 1]->executeGemm(q_cnt < _block_size,
@@ -866,6 +867,9 @@ struct MHAHelper {
                 // apply attention mask & sofmax
                 auto ncausal = (cur_kv_len - q_cnt + (m - q_start) + 1);
                 auto score = _weight.ptr<float>(ithr, h - hq_beg, m - q_start);
+                // dequantization of q matrix could be fused with _d_scale since softmax is done by row
+                float* scale_a = reinterpret_cast<float*>(query.ptr<int8_t>(h, m, 0));
+                float revised_d_scale = _params.is_sage_attn ? _d_scale * scale_a[0] : _d_scale;
                 if (_sliding_window) {
                     size_t start_idx = 0;
                     auto new_causal = ncausal;
@@ -876,7 +880,7 @@ struct MHAHelper {
                     }
                     attn_softmax_kernel<float>(score + start_idx,
                                                reinterpret_cast<DATA_TYPE*>(score) + start_idx,
-                                               _d_scale,
+                                               revised_d_scale,
                                                alibi_lookup,
                                                nullptr,
                                                nullptr,
@@ -897,7 +901,7 @@ struct MHAHelper {
                     }
                     attn_softmax_kernel<float>(score,
                                                reinterpret_cast<DATA_TYPE*>(score),
-                                               _d_scale,
+                                               revised_d_scale,
                                                alibi_lookup,
                                                nullptr,
                                                nullptr,
@@ -1656,7 +1660,8 @@ struct MHA {
 
                 PlainTensor sub_query;
                 if (_helper._params.is_sage_attn) {
-                    sub_query.resize({q_len, _helper.H, _helper._quantized_q.m_dims[2]}, _helper._quantized_q.template ptr<int8_t>(batch_in_token));
+                    sub_query.resize({q_len, _helper.H, _helper._quantized_q.m_dims[2]},
+                                     _helper._quantized_q.template ptr<int8_t>(batch_in_token));
                 } else {
                     sub_query.resize({q_len, _helper.H, _helper.S}, q.ptr<DATA_TYPE>(batch_in_token));
                 }
@@ -1773,36 +1778,36 @@ struct MHA {
         if (_helper._params.is_sage_attn) {
             if (getenv("ENABLE_SAGE_RETURN")) {
                 _helper.init_reorder_buffers(_workitems.get_reorder_max_batch_size(),
-                                            div_up(_workitems.get_reorder_max_kv_len(), _helper._block_size));
+                                             div_up(_workitems.get_reorder_max_kv_len(), _helper._block_size));
                 auto reorder_work_count = _workitems.reorder_work_size();
                 parallel_for2d_dynamic(reorder_work_count, _helper.Hk, [&](size_t w, size_t hk) {
                     const auto& item = _workitems.get_reorder_work_item(w);
                     sage_attn_transpose_k(item,
-                                        hk,
-                                        _helper._block_size,
-                                        _helper._qk_s8s8_gemm[31],
-                                        present_key,
-                                        _helper._qk_scratch_b);
+                                          hk,
+                                          _helper._block_size,
+                                          _helper._qk_s8s8_gemm[31],
+                                          present_key,
+                                          _helper._qk_scratch_b);
                 });
                 _helper.resize_temporary_weight_buffer(_helper.H);
                 sage_attn_ref<DATA_TYPE, KEY_PREC, VALUE_PREC>(_helper._quantized_q,
-                                                            present_key,
-                                                            present_value,
-                                                            output_emb,
-                                                            output_score,
-                                                            max_context_len,
-                                                            past_lens,
-                                                            subsequence_begins,
-                                                            block_indices,
-                                                            block_indices_begins,
-                                                            alibi_slopes,
-                                                            _workitems,
-                                                            _helper._qk_s8s8_gemm,
-                                                            _helper._qk_scratch_b,
-                                                            _helper._wsp,
-                                                            _helper._weight,
-                                                            _helper._weight_bhl,
-                                                            _helper._output_bhl);
+                                                               present_key,
+                                                               present_value,
+                                                               output_emb,
+                                                               output_score,
+                                                               max_context_len,
+                                                               past_lens,
+                                                               subsequence_begins,
+                                                               block_indices,
+                                                               block_indices_begins,
+                                                               alibi_slopes,
+                                                               _workitems,
+                                                               _helper._qk_s8s8_gemm,
+                                                               _helper._qk_scratch_b,
+                                                               _helper._wsp,
+                                                               _helper._weight,
+                                                               _helper._weight_bhl,
+                                                               _helper._output_bhl);
                 return;
             }
         }

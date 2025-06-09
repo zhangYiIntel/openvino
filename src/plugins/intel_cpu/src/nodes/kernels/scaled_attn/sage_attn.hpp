@@ -196,15 +196,14 @@ void sage_attn_ref(const ov::intel_cpu::PlainTensor& q,
                 qk_s8s8_gemm[q_cnt - 1]
                     ->executeGemm(q_cnt < block_size, q_ptr + sizeof(float), k_ptr, temp_c.data(), wsp.data(), nullptr);
                 for (size_t i = 0; i < q_cnt; i++) {
-                    printf("brgemm|s8s8s32 row %ld k_block_id %ld\n", i, k_block_id);
                     float* scale_a = reinterpret_cast<float*>(sub_query.ptr<int8_t>(q_start + i, h, 0));
                     for (size_t j = 0; j < block_size; j++) {
                         float* scale_b =  reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(0, k_block_id, hk, block_size * (S - param_size)));
                         (temp_weight.template ptr<float>(h, batch_in_token + q_start + i) + k_start)[j] =
                             temp_c[i * block_size + j] * scale_a[0] * scale_b[j] * _d_scale;
-                        printf(" %d ", temp_c[i * block_size + j]);
+                        // printf(" %d ", temp_c[i * block_size + j]);
                     }
-                    printf("\n");
+                    // printf("\n");
                 }
             } else {
                 for (int32_t pq = 0; pq < q_cnt; pq++) {
@@ -222,7 +221,6 @@ void sage_attn_ref(const ov::intel_cpu::PlainTensor& q,
                     }
                 }
                 for (size_t i = 0; i < q_cnt; i++) {
-                    printf("dot|s8s8s32 row %ld k_block_id %ld\n", i, k_block_id);
                     float* scale_a = reinterpret_cast<float*>(sub_query.ptr<int8_t>(q_start + i, h, 0));
                     for (size_t j = 0; j < block_size; j++) {
                         printf(" %d ", temp_c[i * block_size + j]);

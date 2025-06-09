@@ -54,7 +54,6 @@ public:
                  bool b_transposed,
                  ov::element::Type inType,
                  ov::element::Type DType,
-                 ScaleType aScaleType,
                  ScaleType bScaleType,
                  bool b_accumulate);
     // execute all M
@@ -84,8 +83,6 @@ private:
     size_t M = 0, M_blk = 0, M_tail = 0;
     size_t K = 0, K_blk = 0, K_tail = 0, N = 0, N_blk = 0, N_tail = 0;
     size_t lda = 0, ldb = 0, ldc = 0, ldd = 0;
-    ScaleType aScaleType = ScaleType::NONE;
-    ScaleType bScaleType = ScaleType::NONE; 
     bool b_transposed = false;
     size_t brgVnniFactor = 0;
     size_t packedBSize = 0;
@@ -94,6 +91,7 @@ private:
     ov::element::Type DType;
     ov::element::Type weiType;
     ov::element::Type srcType;
+    ScaleType bScaleType = ScaleType::NONE; 
     bool is_avx_f16_only = false;
     bool b_accumulate = false;
     static constexpr size_t MHA_BRGEMM_KERNELS_NUM = 8;

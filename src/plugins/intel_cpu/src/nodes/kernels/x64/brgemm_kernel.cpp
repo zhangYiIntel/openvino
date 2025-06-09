@@ -38,7 +38,6 @@ BrgemmKernel::BrgemmKernel(size_t M,
                    inType,
                    ov::element::dynamic,
                    BrgemmKernel::ScaleType::NONE,
-                   BrgemmKernel::ScaleType::NONE,
                    b_accumulate) {
 }
 
@@ -52,7 +51,6 @@ BrgemmKernel::BrgemmKernel(size_t M,
                            bool b_transposed,
                            ov::element::Type inType,
                            ov::element::Type DType,
-                           BrgemmKernel::ScaleType aScaleType,
                            BrgemmKernel::ScaleType bScaleType,
                            bool b_accumulate)
     : M(M),
@@ -67,7 +65,6 @@ BrgemmKernel::BrgemmKernel(size_t M,
       b_transposed(b_transposed),
       inType(inType),
       DType(DType),
-      aScaleType(aScaleType),
       bScaleType(bScaleType),
       b_accumulate(b_accumulate) {
     if (!one_of(inType, ov::element::i8, ov::element::bf16, ov::element::f16, ov::element::f32)) {
@@ -253,8 +250,8 @@ void BrgemmKernel::init_brgemm(brgemmCtx& ctx,
         ctx.has_post_ops = true;
         dnnl::impl::primitive_attr_t attr;
         memory_desc_t Dmd;
-        dims_t dims {M, N};
-        dims_t strides {ldd, 1};
+        dims_t dims {static_cast<dnnl_dim_t>(ctx.M), static_cast<dnnl_dim_t>(ctx.N)};
+        dims_t strides {static_cast<dnnl_dim_t>(ldd), static_cast<dnnl_dim_t>(1)};
         // set scales for B
 
         auto status = memory_desc_init_by_strides(

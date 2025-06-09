@@ -141,7 +141,6 @@ static void run_test_post_scales(ov::element::Type rtPrec) {
                                      true,
                                      rtPrec,
                                      ov::element::f32,
-                                     ov::intel_cpu::BrgemmKernel::ScaleType::NONE,
                                      ov::intel_cpu::BrgemmKernel::ScaleType::PER_CHANNEL,
                                      false);
     size_t nthr = 8;
@@ -188,7 +187,7 @@ static void run_test_post_scales(ov::element::Type rtPrec) {
                 float expected_value = (1 + K) * K / 2 * (n + 1) * 2.0f;
                 if (expected_value != d_data[i * M * N + m * N + n]) {
                     std::ostringstream out_stream;
-                    out_stream << m << "|" << n << "|actual " << c_data[m * N + n] << "|expected|" << expected_value
+                    out_stream << m << "|" << n << "|actual " << d_data[m * N + n] << "|expected|" << expected_value
                                << std::endl;
                     throw std::runtime_error(out_stream.str());
                 }
