@@ -9,15 +9,15 @@
 #include <transformations/utils/gen_pattern.hpp>
 
 #include "itt.hpp"
+#include "openvino/core/graph_util.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/constant.hpp"
-#include "openvino/op/reshape.hpp"
 #include "openvino/op/paged_attention.hpp"
+#include "openvino/op/reshape.hpp"
 #include "openvino/util/log.hpp"
-#include "transformations/utils/utils.hpp"
 #include "ov_ops/rotary_positional_embeddings.hpp"
-#include "openvino/core/graph_util.hpp"
+#include "transformations/utils/utils.hpp"
 using namespace ov::gen_pattern;
 
 ov::pass::PagedAttnFuseRope::PagedAttnFuseRope() {
@@ -45,6 +45,7 @@ ov::pass::PagedAttnFuseRope::PagedAttnFuseRope() {
     auto rotated_block_indices = ov::pass::pattern::any_input(ov::pass::pattern::has_static_rank());
     auto rotation_deltas = ov::pass::pattern::any_input(ov::pass::pattern::has_static_rank());
     auto rotation_trig_lut = ov::pass::pattern::any_input(ov::pass::pattern::has_static_rank());
+    auto score_aggregation_window = ov::pass::pattern::any_input(ov::pass::pattern::has_static_rank());
 
     auto pa_1 = makePattern<op::PagedAttentionExtension>({reshaped_Q,
                                                           reshaped_K,
@@ -58,7 +59,8 @@ ov::pass::PagedAttnFuseRope::PagedAttnFuseRope() {
                                                           scale,
                                                           sliding_window,
                                                           alibi_slopes,
-                                                          max_context_len});
+                                                          max_context_len,
+                                                          score_aggregation_window});
 
     auto pa_2 = makePattern<op::PagedAttentionExtension>({reshaped_Q,
                                                           reshaped_K,
@@ -73,6 +75,7 @@ ov::pass::PagedAttnFuseRope::PagedAttnFuseRope() {
                                                           sliding_window,
                                                           alibi_slopes,
                                                           max_context_len,
+                                                          score_aggregation_window,
                                                           rotated_block_indices,
                                                           rotation_deltas,
                                                           rotation_trig_lut});
@@ -88,6 +91,15 @@ ov::pass::PagedAttnFuseRope::PagedAttnFuseRope() {
         auto Q_rope_node = pattern_map.at(Q_rope);
         auto K_rope_node = pattern_map.at(K_rope);
         auto pa_inputs = pa_op->input_values();
+        auto rope = ov::as_type_ptr<ov::op::internal::RoPE>(Q_rope_node);
+        const auto& rope_config = rope->get_config();
+        std::cout << "PagedAttnFuseRope"
+                  << "|" << rope_config.slice_start << "|" << rope_config.slice_start << "|is_qwen|"
+                  << rope_config.is_qwen << "|is_chatglm|" << rope_config.is_chatglm  << "|rotary_ndims|" << rope_config.rotary_ndims << "|is_interleaved|"
+                  << rope_config.is_interleaved << std::endl;
+        // rope in chatgm internally has a slice operation but is not compatiable with PA
+        if (rope_config.is_chatglm || rope_config.is_interleaved)
+            return false;
         ov::replace_output_update_name(Q_rope_node->output(0), Q_rope_node->input_value(0));
         ov::replace_output_update_name(K_rope_node->output(0), K_rope_node->input_value(0));
         pa_inputs.push_back(cos_table_out);
@@ -97,10 +109,7 @@ ov::pass::PagedAttnFuseRope::PagedAttnFuseRope() {
         }
         std::cout << "PagedAttnFuseRope|" << pa_op->get_friendly_name() << std::endl;
         auto pa_with_rope = std::make_shared<op::PagedAttentionExtension>(pa_inputs, true);
-        auto rope = ov::as_type_ptr<ov::op::internal::RoPE>(Q_rope_node);
-        const auto& rope_config = rope->get_config();
         pa_with_rope->m_rope_config = rope_config;
-        std::cout << "PagedAttnFuseRope" << "|" << rope_config.slice_start << "|" << rope_config.slice_start << std::endl;
 
         pa_with_rope->set_friendly_name(pa_op->get_friendly_name());
         ov::copy_runtime_info(pa_op, pa_with_rope);

@@ -23,7 +23,7 @@
 #include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/float16.hpp"
 #include "page_attn_kernel.hpp"
-#include "rope_executor.hpp"
+#include "nodes/rope.h"
 #include "sage_attn.hpp"
 #include "softmax_kernel.hpp"
 #include "transpose_kernel.hpp"
@@ -636,12 +636,16 @@ struct MHAHelper {
         _new_score_stride = std::max(prev_score_stride, want_score_stride);
         // std::max(S, SV) here is to ensure by_channel quantize has enough buffer to use
         constexpr bool q_is_xf16 = one_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
+
         if (_quant_key_bychannel || _quant_value_bychannel) {
             _output.resize<float>({static_cast<size_t>(_nthr), _block_size, H, std::max(S, SV)});
         } else {
             _output.resize<float>({static_cast<size_t>(_nthr), _block_size, H, SV});
         }
-
+        // to ensure qk s8s8 s32 has enough buffer
+        if (_params.is_sage_attn && H * std::max(S, SV) < _block_size) {
+            _output.resize<float>({static_cast<size_t>(_nthr), _block_size, H, div_up(_block_size, H)});
+        }
         _quantized_q.resize<int8_t>({B_token, H, S + sizeof(float)});
 
         // TODO: kernel supports stride
@@ -1847,16 +1851,17 @@ struct AttentionExecutor : public PagedAttentionExecutor {
     MHAHelper<DATA_TYPE, KEY_PREC, VALUE_PREC> _helper;
     MHA<DATA_TYPE, KEY_PREC, VALUE_PREC> _kernel;
     PlainTensor _slot_mapping;
-    std::shared_ptr<ov::intel_cpu::paged_attn::RopeExecutor> _rope_executor_ptr;
+    std::shared_ptr<ov::intel_cpu::node::RoPE::Executor> _rope_executor_ptr;
     AttentionExecutor() : _kernel(_helper) {}
 
     explicit AttentionExecutor(ov::Extensions::Cpu::PagedAttnExecutorParams params)
         : _helper(MHAHelper<DATA_TYPE, KEY_PREC, VALUE_PREC>(params)),
           _kernel(_helper) {
         bool can_inplace = false;
-        _rope_executor_ptr = ov::intel_cpu::paged_attn::make_rope_executor(precision_of<DATA_TYPE>::value,
-                                                                           _helper._params.m_config,
-                                                                           can_inplace);
+        ov::element::Type precision = precision_of<DATA_TYPE>::value;
+        _rope_executor_ptr = ov::intel_cpu::node::RoPE::makeRoPEExecutor(precision,
+                                                                         _helper._params.m_config,
+                                                                         can_inplace);
     }
 
     void init(const std::vector<MemoryPtr>& inputs,
@@ -2162,12 +2167,10 @@ struct AttentionExecutor : public PagedAttentionExecutor {
 
         if (_helper._params.fuse_rope) {
             // assume in place rope now.
-            PlainTensor cos_table(inputs[inputs.size() - 2]);
-            PlainTensor sin_table(inputs[inputs.size() - 1]);
-            std::vector<PlainTensor> rope_inputs = {q, cos_table, sin_table};
-            std::vector<PlainTensor> rope_outpts = {q};
-            execute_rope(rope_inputs, rope_outpts);
-            std::vector<PlainTensor> rope_inputs_k = {k, cos_table, sin_table};
+            std::vector<PlainTensor> rope_inputs = {q, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
+            std::vector<PlainTensor> rope_outputs = {q};
+            execute_rope(rope_inputs, rope_outputs);
+            std::vector<PlainTensor> rope_inputs_k = {k, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
             std::vector<PlainTensor> rope_outpts_k = {k};
             execute_rope(rope_inputs_k, rope_outpts_k);
         }

@@ -19,7 +19,7 @@ struct RoPEExecutorChatGLM;
 template <typename T>
 struct RoPEExecutorQwen;
 struct RopeExecutor {
-    virtual void execute(std::vector<PlainTensor> inputs, std::vector<PlainTensor>& outputs) = 0;
+    virtual void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) = 0;
     virtual ~RopeExecutor() = default;
 };
 std::shared_ptr<ov::intel_cpu::paged_attn::RopeExecutor> make_rope_executor(const ov::element::Type srcPrecision,

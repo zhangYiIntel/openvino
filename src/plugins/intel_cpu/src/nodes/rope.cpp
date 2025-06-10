@@ -99,14 +99,11 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
         jcp.interleave = false;
         m_rotaryKernel = createJitKernel(jcp);
     }
-
-    void execute([[maybe_unused]] const dnnl::stream& strm,
-                 const std::vector<MemoryPtr>& inputs,
-                 const std::vector<MemoryPtr>& outputs) override {
-        ov::intel_cpu::PlainTensor t_src(inputs[0]);
-        ov::intel_cpu::PlainTensor t_cos(inputs[1]);
-        ov::intel_cpu::PlainTensor t_sin(inputs[2]);
-        ov::intel_cpu::PlainTensor t_dst(outputs[0]);
+    void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) override {
+        ov::intel_cpu::PlainTensor& t_src = inputs[0];
+        ov::intel_cpu::PlainTensor& t_cos = inputs[1];
+        ov::intel_cpu::PlainTensor& t_sin = inputs[2];
+        ov::intel_cpu::PlainTensor& t_dst = outputs[0];
         ov::intel_cpu::PlainTensor gather;
         auto rotary_dims = m_config.rotary_ndims;
 
@@ -120,7 +117,7 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
             can_inplace = false;
         }
         if (m_config.gather_position_arg_id > 0) {
-            gather.reset(inputs[m_config.gather_position_arg_id]);
+            gather = inputs[inputs.size() - 1];
         }
 
         if (t_cos.m_rank == 2) {
@@ -129,7 +126,6 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
         if (t_sin.m_rank == 2) {
             t_sin = t_sin.reshape({1, 1, t_sin.size(0), t_sin.size(1)});
         }
-
         auto batch_size = t_src.size(0);
         auto head_cnt = t_src.size(1);
         auto seq_len = t_src.size(2);
@@ -149,7 +145,7 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
             auto* sin = &t_sin.at<float>({b, h, cos_pos, 0}, true);
             auto* dst = t_dst.ptr<T>(b, h, p, 0);
 
-            if (m_rotaryKernel) {
+            if (m_rotaryKernel && false) {
                 execJitKernel(m_rotaryKernel, src, dst, cos, sin);
             } else {
                 auto half_rotary_dims = rotary_dims / 2;
@@ -165,6 +161,16 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
                 memcpy(dst + rotary_dims, src + rotary_dims, (feature_size - rotary_dims) * sizeof(T));
             }
         });
+    }
+    void execute([[maybe_unused]] const dnnl::stream& strm,
+                 const std::vector<MemoryPtr>& inputs,
+                 const std::vector<MemoryPtr>& outputs) override {
+        std::vector<PlainTensor> in_tensors = {inputs[0], inputs[1], inputs[2]};
+        std::vector<PlainTensor> out_tensors = {outputs[0]};
+        if (m_config.gather_position_arg_id > 0) {
+            in_tensors.emplace_back(inputs[m_config.gather_position_arg_id]);
+        }
+        execute(in_tensors, out_tensors);
     }
 };
 
@@ -183,12 +189,10 @@ struct RoPE::RoPEExecutorInterleaved : public RoPE::Executor {
         m_rotaryKernel = createJitKernel(jcp, true);
     }
 
-    void execute([[maybe_unused]] const dnnl::stream& strm,
-                 const std::vector<MemoryPtr>& inputs,
-                 const std::vector<MemoryPtr>& outputs) override {
-        ov::intel_cpu::PlainTensor t_src(inputs[0]);
-        ov::intel_cpu::PlainTensor t_sin_cos(inputs[1]);
-        ov::intel_cpu::PlainTensor t_dst(outputs[0]);
+    void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) override {
+        const ov::intel_cpu::PlainTensor& t_src = inputs[0];
+        const ov::intel_cpu::PlainTensor& t_sin_cos = inputs[1];
+        const ov::intel_cpu::PlainTensor& t_dst = outputs[0];
 
         auto batch_size = t_src.size(0);
         auto seq_len = t_src.size(1);
@@ -216,6 +220,14 @@ struct RoPE::RoPEExecutorInterleaved : public RoPE::Executor {
             memcpy(dst + rotary_dims, x + rotary_dims, (head_dims - rotary_dims) * sizeof(T));
         });
     }
+
+    void execute([[maybe_unused]] const dnnl::stream& strm,
+                 const std::vector<MemoryPtr>& inputs,
+                 const std::vector<MemoryPtr>& outputs) override {
+        std::vector<PlainTensor> in_tensors = {inputs[0], inputs[1]};
+        std::vector<PlainTensor> out_tensors = {outputs[0]};
+        execute(in_tensors, out_tensors);
+    }
 };
 
 template <typename T>
@@ -232,15 +244,12 @@ struct RoPE::RoPEExecutorChatGLM : public RoPE::Executor {
         jcp.mix_cos_sin = true;
         m_rotaryKernel = createJitKernel(jcp, true);
     }
-
-    void execute([[maybe_unused]] const dnnl::stream& strm,
-                 const std::vector<MemoryPtr>& inputs,
-                 const std::vector<MemoryPtr>& outputs) override {
-        ov::intel_cpu::PlainTensor t_src(inputs[0]);
-        ov::intel_cpu::PlainTensor t_cos_sin(inputs[1]);
-        ov::intel_cpu::PlainTensor t_dst(outputs[0]);
-
+    void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) override {
         // [seq_len, batch_size, (hidden_states_q + hidden_states_k + hidden_states_v)]
+        ov::intel_cpu::PlainTensor& t_src = inputs[0];
+        ov::intel_cpu::PlainTensor& t_cos_sin = inputs[1];
+        ov::intel_cpu::PlainTensor& t_dst = outputs[0];
+
         if (m_config.slice_stop - m_config.slice_start > 0) {
             t_src = t_src.slice(2, m_config.slice_start, m_config.slice_stop);
         }
@@ -306,6 +315,13 @@ struct RoPE::RoPEExecutorChatGLM : public RoPE::Executor {
             });
         }
     }
+    void execute([[maybe_unused]] const dnnl::stream& strm,
+                 const std::vector<MemoryPtr>& inputs,
+                 const std::vector<MemoryPtr>& outputs) override {
+        std::vector<PlainTensor> in_tensors = {inputs[0], inputs[1]};
+        std::vector<PlainTensor> out_tensors = {outputs[0]};
+        execute(in_tensors, out_tensors);
+    }
 };
 
 template <typename T>
@@ -321,7 +337,11 @@ struct RoPE::RoPEExecutorQwen : public RoPE::Executor {
         jcp.interleave = false;
         m_rotaryKernel = createJitKernel(jcp);
     }
-
+    void execute(std::vector<PlainTensor>& inputs,std::vector<PlainTensor>& outputs) override {
+        std::vector<PlainTensor> in_tensors = {inputs[0], inputs[1], inputs[2]};
+        std::vector<PlainTensor> out_tensors = {outputs[0]};
+        execute(in_tensors, out_tensors);
+    }
     void execute([[maybe_unused]] const dnnl::stream& strm,
                  const std::vector<MemoryPtr>& inputs,
                  const std::vector<MemoryPtr>& outputs) override {
@@ -381,6 +401,58 @@ struct RoPE::RoPEExecutorQwen : public RoPE::Executor {
     }
 };
 
+std::shared_ptr<RoPE::Executor> RoPE::makeRoPEExecutor(
+    ov::element::Type& rtPrecision,
+    const op::internal::RoPE::Config& config,
+    bool& can_inplace) {
+    std::shared_ptr<RoPE::Executor> executorPtr;
+    if (config.is_qwen) {
+        if (rtPrecision == ov::element::f16) {
+            executorPtr = std::make_shared<RoPEExecutorQwen<ov::float16>>(config);
+        } else if (rtPrecision == ov::element::bf16) {
+            executorPtr = std::make_shared<RoPEExecutorQwen<ov::bfloat16>>(config);
+        } else {
+            executorPtr = std::make_shared<RoPEExecutorQwen<float>>(config);
+            rtPrecision = ov::element::f32;
+        }
+    } else if (config.is_chatglm) {
+        if (rtPrecision == ov::element::f16) {
+            executorPtr = std::make_shared<RoPEExecutorChatGLM<ov::float16>>(config);
+        } else if (rtPrecision == ov::element::bf16) {
+            executorPtr = std::make_shared<RoPEExecutorChatGLM<ov::bfloat16>>(config);
+        } else {
+            executorPtr = std::make_shared<RoPEExecutorChatGLM<float>>(config);
+            rtPrecision = ov::element::f32;
+        }
+    } else if (config.is_interleaved) {
+        OPENVINO_ASSERT(config.slice_start == 0, "[CPU][Rope]slice_start must be 0 for interleaved mode");
+        OPENVINO_ASSERT(config.slice_stop == 0, "[CPU][Rope]slice_stop must be 0 for interleaved mode");
+        OPENVINO_ASSERT(config.gather_position_arg_id == 0, "[CPU][Rope]gather_position_arg_id must be 0 for interleaved mode");
+        if (rtPrecision == ov::element::f16) {
+            executorPtr = std::make_shared<RoPEExecutorInterleaved<ov::float16>>(config);
+        } else if (rtPrecision == ov::element::bf16) {
+            executorPtr = std::make_shared<RoPEExecutorInterleaved<ov::bfloat16>>(config);
+        } else {
+            executorPtr = std::make_shared<RoPEExecutorInterleaved<float>>(config);
+            rtPrecision = ov::element::f32;
+        }
+    } else {
+        can_inplace = true;
+        if (rtPrecision == ov::element::f16) {
+            executorPtr = std::make_shared<RoPEExecutorRotateHalf<ov::float16>>(config);
+        } else if (rtPrecision == ov::element::bf16) {
+            executorPtr = std::make_shared<RoPEExecutorRotateHalf<ov::bfloat16>>(config);
+        } else {
+            executorPtr = std::make_shared<RoPEExecutorRotateHalf<float>>(config);
+            rtPrecision = ov::element::f32;
+        }
+        if (config.slice_stop - config.slice_start > 0 || config.input_trans0213) {
+            can_inplace = false;
+        }
+    }
+    return executorPtr;
+}
+
 void RoPE::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty()) {
         return;
@@ -391,50 +463,7 @@ void RoPE::initSupportedPrimitiveDescriptors() {
     auto CosSinPrecision = ov::element::f32;
     bool can_inplace = false;
 
-    if (m_config.is_qwen) {
-        if (rtPrecision == ov::element::f16) {
-            m_executor = std::make_shared<RoPEExecutorQwen<ov::float16>>(m_config);
-        } else if (rtPrecision == ov::element::bf16) {
-            m_executor = std::make_shared<RoPEExecutorQwen<ov::bfloat16>>(m_config);
-        } else {
-            m_executor = std::make_shared<RoPEExecutorQwen<float>>(m_config);
-            rtPrecision = ov::element::f32;
-        }
-    } else if (m_config.is_chatglm) {
-        if (rtPrecision == ov::element::f16) {
-            m_executor = std::make_shared<RoPEExecutorChatGLM<ov::float16>>(m_config);
-        } else if (rtPrecision == ov::element::bf16) {
-            m_executor = std::make_shared<RoPEExecutorChatGLM<ov::bfloat16>>(m_config);
-        } else {
-            m_executor = std::make_shared<RoPEExecutorChatGLM<float>>(m_config);
-            rtPrecision = ov::element::f32;
-        }
-    } else if (m_config.is_interleaved) {
-        CPU_NODE_ASSERT(m_config.slice_start == 0, "slice_start must be 0 for interleaved mode");
-        CPU_NODE_ASSERT(m_config.slice_stop == 0, "slice_stop must be 0 for interleaved mode");
-        CPU_NODE_ASSERT(m_config.gather_position_arg_id == 0, "gather_position_arg_id must be 0 for interleaved mode");
-        if (rtPrecision == ov::element::f16) {
-            m_executor = std::make_shared<RoPEExecutorInterleaved<ov::float16>>(m_config);
-        } else if (rtPrecision == ov::element::bf16) {
-            m_executor = std::make_shared<RoPEExecutorInterleaved<ov::bfloat16>>(m_config);
-        } else {
-            m_executor = std::make_shared<RoPEExecutorInterleaved<float>>(m_config);
-            rtPrecision = ov::element::f32;
-        }
-    } else {
-        can_inplace = true;
-        if (rtPrecision == ov::element::f16) {
-            m_executor = std::make_shared<RoPEExecutorRotateHalf<ov::float16>>(m_config);
-        } else if (rtPrecision == ov::element::bf16) {
-            m_executor = std::make_shared<RoPEExecutorRotateHalf<ov::bfloat16>>(m_config);
-        } else {
-            m_executor = std::make_shared<RoPEExecutorRotateHalf<float>>(m_config);
-            rtPrecision = ov::element::f32;
-        }
-        if (m_config.slice_stop - m_config.slice_start > 0 || m_config.input_trans0213) {
-            can_inplace = false;
-        }
-    }
+    m_executor = RoPE::makeRoPEExecutor(rtPrecision, m_config, can_inplace);
 
     // initialize input ports
     std::vector<PortConfigurator> inPortConfigs;

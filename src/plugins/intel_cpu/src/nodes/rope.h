@@ -6,6 +6,7 @@
 
 #include "node.h"
 #include "ov_ops/rotary_positional_embeddings.hpp"
+#include "utils/plain_tensor.hpp"
 
 namespace ov {
 namespace intel_cpu {
@@ -28,12 +29,11 @@ public:
     void initSupportedPrimitiveDescriptors() override;
     void execute(const dnnl::stream& strm) override;
     static bool isSupportedOperation(const std::shared_ptr<const ov::Node>& op, std::string& errorMessage) noexcept;
-
-private:
     struct Executor {
         virtual void execute(const dnnl::stream& strm,
                              const std::vector<MemoryPtr>& inputs,
                              const std::vector<MemoryPtr>& outputs) = 0;
+        virtual void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) = 0;
         virtual ~Executor() = default;
     };
     template <typename T>
@@ -44,6 +44,12 @@ private:
     struct RoPEExecutorChatGLM;
     template <typename T>
     struct RoPEExecutorQwen;
+    static std::shared_ptr<Executor> makeRoPEExecutor(ov::element::Type& srcPrecision,
+                                                      const op::internal::RoPE::Config& config,
+                                                      bool& can_inplace);
+
+private:
+
     op::internal::RoPE::Config m_config;
     std::shared_ptr<Executor> m_executor;
 };
