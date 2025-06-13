@@ -10,6 +10,7 @@
 #include "softmax_kernel.hpp"
 #include "utils/general_utils.h"
 #include "utils/plain_tensor.hpp"
+#include "nodes/rope.h"
 #if defined(HAVE_SSE) || defined(HAVE_AVX2) || defined(HAVE_AVX512F)
 #    include <immintrin.h>
 #endif
@@ -131,6 +132,43 @@ void sage_attn_transpose_k(const ReorderWorkItem& item,
     for(size_t i = 0; i < valid_len; i++) {
         scales[i] = reinterpret_cast<float*>(key_cache.ptr<int8_t, ov::element::i8>(block_number, hk, i, 0))[0];
     }
+}
+
+template <typename DATA_TYPE, ov::element::Type_t KEY_PREC>
+void sage_attn_quantize_q(const ov::intel_cpu::PlainTensor& q,
+                   ov::intel_cpu::PlainTensor& quantized_q,
+                   ov::intel_cpu::PlainTensor& dst,
+                   const std::shared_ptr<ov::intel_cpu::node::RoPE::Executor>& rope_executor,
+                   const ov::intel_cpu::PlainTensor& cos_table,
+                   const ov::intel_cpu::PlainTensor& sin_table,
+                   const ov::intel_cpu::PlainTensor& past_lens,
+                   const ov::intel_cpu::PlainTensor& subsequence_begins) {
+    size_t B = q.m_dims[0];
+    size_t H = q.m_dims[1];
+    size_t S = q.m_dims[3];
+    parallel_for2d(past_lens.size(0), H, [&](size_t sub_seq_id, size_t h) {
+        const auto q_len =
+            subsequence_begins.ptr<int32_t>()[sub_seq_id + 1] - subsequence_begins.ptr<int32_t>()[sub_seq_id];
+        const auto batch_in_token = subsequence_begins.ptr<int32_t>()[sub_seq_id];
+        if (q_len > 1) {
+            parallel_for(q_len, [&](int32_t l) {
+                auto* src = q.ptr<DATA_TYPE>(batch_in_token + l, h, 0);
+                auto* cos = &cos_table.at<float>({batch_in_token + l, h, 0, 0}, true);
+                auto* sin = &sin_table.at<float>({batch_in_token + l, h, 0, 0}, true);
+                auto* dst = q.ptr<DATA_TYPE>(batch_in_token + l, h, 0);
+                rope_executor->execute(src, dst, cos, sin);
+                quantize_q_by_dims<DATA_TYPE, KEY_PREC>(q, quantized_q, batch_in_token + l, h, S);
+            });
+        } else {
+            parallel_for(q_len, [&](int32_t l) {
+                auto* src = q.ptr<DATA_TYPE>(batch_in_token + l, h, 0);
+                auto* cos = &cos_table.at<float>({batch_in_token + l, h, 0, 0}, true);
+                auto* sin = &sin_table.at<float>({batch_in_token + l, h, 0, 0}, true);
+                auto* dst = q.ptr<DATA_TYPE>(batch_in_token + l, h, 0);
+                rope_executor->execute(src, dst, cos, sin);
+            });
+        }
+    });
 }
 
 template <typename DATA_TYPE, ov::element::Type_t KEY_PREC, ov::element::Type_t VALUE_PREC>

@@ -19,11 +19,11 @@
 #include "common.hpp"
 #include "executor_pa.hpp"
 #include "executor_pa_common.hpp"
+#include "nodes/rope.h"
 #include "openvino/core/parallel.hpp"
 #include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/float16.hpp"
 #include "page_attn_kernel.hpp"
-#include "nodes/rope.h"
 #include "sage_attn.hpp"
 #include "softmax_kernel.hpp"
 #include "transpose_kernel.hpp"
@@ -1859,9 +1859,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
           _kernel(_helper) {
         bool can_inplace = false;
         ov::element::Type precision = precision_of<DATA_TYPE>::value;
-        _rope_executor_ptr = ov::intel_cpu::node::RoPE::makeRoPEExecutor(precision,
-                                                                         _helper._params.m_config,
-                                                                         can_inplace);
+        _rope_executor_ptr =
+            ov::intel_cpu::node::RoPE::makeRoPEExecutor(precision, _helper._params.m_config, can_inplace);
     }
 
     void init(const std::vector<MemoryPtr>& inputs,
@@ -2167,21 +2166,29 @@ struct AttentionExecutor : public PagedAttentionExecutor {
 
         if (_helper._params.fuse_rope) {
             // assume in place rope now.
-            std::vector<PlainTensor> rope_inputs = {q, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
-            std::vector<PlainTensor> rope_outputs = {q};
-            execute_rope(rope_inputs, rope_outputs);
+            // rope of Q could be fused in quantized
+            if (!_helper._params.is_sage_attn) {
+                std::vector<PlainTensor> rope_inputs = {q, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
+                std::vector<PlainTensor> rope_outputs = {q};
+                execute_rope(rope_inputs, rope_outputs);
+            }
             std::vector<PlainTensor> rope_inputs_k = {k, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
             std::vector<PlainTensor> rope_outpts_k = {k};
             execute_rope(rope_inputs_k, rope_outpts_k);
         }
+
         if constexpr (one_of(KEY_PREC, ov::element::i8)) {
             if (_helper._params.is_sage_attn) {
-                size_t B = q.m_dims[0];
-                size_t H = q.m_dims[1];
-                size_t S = q.m_dims[3];
-                parallel_for2d(B, H, [&](size_t b, size_t h) {
-                    quantize_q_by_dims<DATA_TYPE, KEY_PREC>(q, _helper._quantized_q, b, h, S);
-                });
+                PlainTensor t_cos(inputs[inputs.size() - 2]);
+                PlainTensor t_sin(inputs[inputs.size() - 1]);
+                sage_attn_quantize_q<DATA_TYPE, KEY_PREC>(q,
+                                                          _helper._quantized_q,
+                                                          q,
+                                                          _rope_executor_ptr,
+                                                          t_cos,
+                                                          t_sin,
+                                                          past_lens,
+                                                          subsequence_begins);
             }
         }
 

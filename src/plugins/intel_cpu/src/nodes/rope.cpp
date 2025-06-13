@@ -99,14 +99,31 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
         jcp.interleave = false;
         m_rotaryKernel = createJitKernel(jcp);
     }
+
+    void execute(const void* src, void* dst, const float* cos, const float* sin) override {
+        const auto& rotary_dims = m_config.rotary_ndims;
+        const T* src_ptr = reinterpret_cast<const T*>(src);
+        T* dst_ptr = reinterpret_cast<T*>(dst);
+        if (m_rotaryKernel) {
+            execJitKernel(m_rotaryKernel, src, dst, cos, sin);
+        } else {
+            auto half_rotary_dims = rotary_dims / 2;
+            size_t i = 0;
+            for (; i < half_rotary_dims; i++) {
+                auto src0 = src_ptr[i];
+                auto src1 = src_ptr[i + half_rotary_dims];
+                dst_ptr[i] = cos[i] * src0 - sin[i] * src1;
+                dst_ptr[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
+            }
+        }  
+    }
     void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) override {
         ov::intel_cpu::PlainTensor& t_src = inputs[0];
         ov::intel_cpu::PlainTensor& t_cos = inputs[1];
         ov::intel_cpu::PlainTensor& t_sin = inputs[2];
         ov::intel_cpu::PlainTensor& t_dst = outputs[0];
         ov::intel_cpu::PlainTensor gather;
-        auto rotary_dims = m_config.rotary_ndims;
-
+        const auto& rotary_dims = m_config.rotary_ndims;
         bool can_inplace = true;
         if (m_config.slice_stop - m_config.slice_start > 0) {
             t_src = t_src.slice(3, m_config.slice_start, m_config.slice_stop);
@@ -144,19 +161,7 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
             auto* cos = &t_cos.at<float>({b, h, cos_pos, 0}, true);
             auto* sin = &t_sin.at<float>({b, h, cos_pos, 0}, true);
             auto* dst = t_dst.ptr<T>(b, h, p, 0);
-
-            if (m_rotaryKernel && false) {
-                execJitKernel(m_rotaryKernel, src, dst, cos, sin);
-            } else {
-                auto half_rotary_dims = rotary_dims / 2;
-                size_t i = 0;
-                for (; i < half_rotary_dims; i++) {
-                    auto src0 = src[i];
-                    auto src1 = src[i + half_rotary_dims];
-                    dst[i] = cos[i] * src0 - sin[i] * src1;
-                    dst[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
-                }
-            }
+            execute(src, dst, cos, sin);
             if (!can_inplace) {
                 memcpy(dst + rotary_dims, src + rotary_dims, (feature_size - rotary_dims) * sizeof(T));
             }
@@ -188,7 +193,20 @@ struct RoPE::RoPEExecutorInterleaved : public RoPE::Executor {
         jcp.mix_cos_sin = false;
         m_rotaryKernel = createJitKernel(jcp, true);
     }
-
+    void execute(const void* src, void* dst, const float* cos, const float* sin) override {
+        auto rotary_dims = m_config.rotary_ndims;
+        const T* src_ptr = reinterpret_cast<const T*>(src);
+        T* dst_ptr = reinterpret_cast<T*>(dst);
+        if (m_rotaryKernel) {
+            execJitKernel(m_rotaryKernel, src_ptr, dst, cos, sin);
+        } else {
+            size_t i = 0;
+            for (size_t j = 0; i < rotary_dims; i += 2, j++) {
+                dst_ptr[i] = cos[j] * src_ptr[i] - sin[j] * src_ptr[i + 1];
+                dst_ptr[i + 1] = cos[j] * src_ptr[i + 1] + sin[j] * src_ptr[i];
+            }
+        }
+    }
     void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) override {
         const ov::intel_cpu::PlainTensor& t_src = inputs[0];
         const ov::intel_cpu::PlainTensor& t_sin_cos = inputs[1];
@@ -243,6 +261,20 @@ struct RoPE::RoPEExecutorChatGLM : public RoPE::Executor {
         jcp.interleave = true;
         jcp.mix_cos_sin = true;
         m_rotaryKernel = createJitKernel(jcp, true);
+    }
+    void execute(const void* src, void* dst, const float* cos_sin, const float* sin) override {
+        auto rotary_dims = m_config.rotary_ndims;
+        if (m_rotaryKernel) {
+            execJitKernel(m_rotaryKernel, src, dst, cos_sin, nullptr);
+        } else {
+            size_t i = 0;
+            for (; i < rotary_dims; i += 2) {
+                auto cosv = cos_sin[i];
+                auto sinv = cos_sin[i + 1];
+                dst[i] = cosv * src[i] - sinv * src[i + 1];
+                dst[i + 1] = sinv * src[i] + cosv * src[i + 1];
+            }
+        }
     }
     void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) override {
         // [seq_len, batch_size, (hidden_states_q + hidden_states_k + hidden_states_v)]
@@ -337,11 +369,31 @@ struct RoPE::RoPEExecutorQwen : public RoPE::Executor {
         jcp.interleave = false;
         m_rotaryKernel = createJitKernel(jcp);
     }
+
+    void execute(const void* src, void* dst, const float* cos, const float* sin) override {
+        auto rotary_dims = m_config.rotary_ndims;
+        const T* src_ptr = reinterpret_cast<const T*>(src);
+        T* dst_ptr = reinterpret_cast<T*>(dst);
+        if (m_rotaryKernel) {
+            execJitKernel(m_rotaryKernel, src, dst, cos, sin);
+        } else {
+            auto half_rotary_dims = rotary_dims / 2;
+            size_t i = 0;
+            for (; i < half_rotary_dims; i++) {
+                auto s0 = src_ptr[i];
+                auto s1 = src_ptr[i + half_rotary_dims];
+                dst_ptr[i] = cos[i] * s0 - sin[i] * s1;
+                dst_ptr[i + half_rotary_dims] = cos[i + half_rotary_dims] * s1 + sin[i + half_rotary_dims] * s0;
+            }
+        }
+    }
+
     void execute(std::vector<PlainTensor>& inputs,std::vector<PlainTensor>& outputs) override {
         std::vector<PlainTensor> in_tensors = {inputs[0], inputs[1], inputs[2]};
         std::vector<PlainTensor> out_tensors = {outputs[0]};
         execute(in_tensors, out_tensors);
     }
+
     void execute([[maybe_unused]] const dnnl::stream& strm,
                  const std::vector<MemoryPtr>& inputs,
                  const std::vector<MemoryPtr>& outputs) override {
