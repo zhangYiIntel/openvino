@@ -147,6 +147,10 @@ public:
         return m_context;
     }
 
+    void SetGraphID(int id) {
+        graph_id = id;
+    }
+
     std::vector<MemStatePtr> memoryStates() const;
     void assignStates(const std::vector<MemStatePtr>& state);
 
@@ -295,7 +299,7 @@ protected:
 
     // For dumping purposes. -1 - no counting, all other positive
     // values mean increment it within each Infer() call
-    int infer_count = -1;
+    // int infer_count = -1;
 
     std::vector<NodePtr> graphNodes;
     std::vector<EdgePtr> graphEdges;
@@ -371,6 +375,8 @@ private:
 
     GraphContext::CPtr m_context;
     dnnl::stream m_stream;
+    int infer_count = 0;
+    int graph_id = -1;
 };
 
 using GraphPtr = std::shared_ptr<Graph>;

@@ -195,6 +195,7 @@ CompiledModel::GraphGuard::Lock CompiledModel::get_graph() const {
 
                 const std::shared_ptr<const ov::Model> model = m_model;
                 graphLock._graph.Init(model, ctx);
+                graphLock._graph.SetGraphID(streamId * 1000);
                 graphLock._graph.Activate();
             } catch (...) {
                 exception = std::current_exception();

@@ -52,6 +52,7 @@
 #include "utils/node_dumper.h"
 #include "utils/precision_support.h"
 #include "utils/verbose.h"
+#include "utils/profiler.hpp"
 
 #if (OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO)
 #    include <tbb/task.h>
@@ -82,7 +83,6 @@ void Graph::Init(const std::vector<NodePtr>& graphNodes,
     if (IsReady()) {
         ForgetGraphData();
     }
-
     m_context = context;
     m_stream = dnnl::stream(getEngine());
 
@@ -341,7 +341,7 @@ void Graph::Init(const std::shared_ptr<const ov::Model>& model,
     if (IsReady()) {
         ForgetGraphData();
     }
-
+    ProfilerInit();
     m_context = context;
     m_stream = dnnl::stream(getEngine());
 
@@ -1182,6 +1182,7 @@ bool Graph::ProcessDynNodes() const {
 }
 
 void Graph::PushInputData(const std::size_t& index, const ov::SoPtr<ITensor>& input) {
+    auto _prof = Profile("Graph::PushInputData");
     if (!IsReady()) {
         OPENVINO_THROW("Wrong state. Topology not ready.");
     }
@@ -1216,6 +1217,7 @@ void Graph::PushInputData(const std::size_t& index, const ov::SoPtr<ITensor>& in
 
 // suppose always being shared infer_request intel_cpu::Tensor to Graph if isDynamic.
 void Graph::PullOutputData(std::unordered_map<std::size_t, ov::SoPtr<ITensor>>& output) {
+    auto _prof = Profile("Graph::PullOutputData");
     if (!IsReady()) {
         OPENVINO_THROW("Wrong state. Topology not ready.");
     }
@@ -1601,12 +1603,18 @@ inline void Graph::ExecuteNodeWithCatch(const NodePtr& node, SyncInferRequest* r
 template <typename UpdateStrategy>
 void Graph::InferDynamic(SyncInferRequest* request, int numaId, UpdateStrategy&& update) {
     size_t inferCounter = 0;
+    auto _prof0 = Profile([&](ProfileData * p) {
+        p->name = "Graph" + std::to_string(graph_id) + "::InferDynamic_#" + std::to_string(infer_count);
+    });
     for (auto stopIndx : m_executableSyncNodesInds) {
         std::forward<UpdateStrategy>(update)(stopIndx);
 
         for (; inferCounter < stopIndx; ++inferCounter) {
             auto& node = m_executableGraphNodes[inferCounter];
-
+            auto _prof = Profile([&](ProfileData * p){
+                p->name = node->getTypeStr();
+                p->args = {{"Name", node->getName()}, {"Impl", node->getPrimitiveDescriptorType()}};
+            });
             ExecuteNodeWithCatch(node, request, numaId);
         }
     }

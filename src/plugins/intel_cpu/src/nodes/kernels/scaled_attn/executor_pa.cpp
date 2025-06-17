@@ -28,6 +28,7 @@
 #include "softmax_kernel.hpp"
 #include "transpose_kernel.hpp"
 #include "utils/plain_tensor.hpp"
+#include "utils/profiler.hpp"
 #if defined(OPENVINO_ARCH_X86_64)
 #    include "nodes/kernels/x64/brgemm_kernel.hpp"
 #elif defined(OPENVINO_ARCH_ARM64) && defined(HAVE_SVE)
@@ -1485,6 +1486,7 @@ struct MHA {
                          const PlainTensor& block_indices_begins,
                          const PlainTensor& alibi_slopes,
                          const PlainTensor& score_aggregation_window) {
+        auto _prof = Profile("PA::Mixed");
         auto Hk = v_cache.m_dims[1];
         constexpr bool q_is_xf16 = one_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
         auto attn_work_count = _workitems.attn_work_size();
@@ -2163,35 +2165,44 @@ struct AttentionExecutor : public PagedAttentionExecutor {
              rotation_trig_lut,
              output_emb,
              output_score);
-
-        if (_helper._params.fuse_rope) {
-            // assume in place rope now.
-            // rope of Q could be fused in quantized
-            if (!_helper._params.is_sage_attn) {
-                std::vector<PlainTensor> rope_inputs = {q, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
-                std::vector<PlainTensor> rope_outputs = {q};
-                execute_rope(rope_inputs, rope_outputs);
+        {
+            auto _prof = Profile("PA:Q_Quantization");
+            if (_helper._params.fuse_rope) {
+                // assume in place rope now.
+                // rope of Q could be fused in quantized
+                if (!_helper._params.is_sage_attn) {
+                    std::vector<PlainTensor> rope_inputs = {q, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
+                    std::vector<PlainTensor> rope_outputs = {q};
+                    execute_rope(rope_inputs, rope_outputs);
+                }
+                std::vector<PlainTensor> rope_inputs_k = {k, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
+                std::vector<PlainTensor> rope_outpts_k = {k};
+                execute_rope(rope_inputs_k, rope_outpts_k);
             }
-            std::vector<PlainTensor> rope_inputs_k = {k, inputs[inputs.size() - 2], inputs[inputs.size() - 1]};
-            std::vector<PlainTensor> rope_outpts_k = {k};
-            execute_rope(rope_inputs_k, rope_outpts_k);
-        }
 
-        if constexpr (one_of(KEY_PREC, ov::element::i8)) {
-            if (_helper._params.is_sage_attn) {
-                PlainTensor t_cos(inputs[inputs.size() - 2]);
-                PlainTensor t_sin(inputs[inputs.size() - 1]);
-                sage_attn_quantize_q<DATA_TYPE, KEY_PREC>(q,
-                                                          _helper._quantized_q,
-                                                          q,
-                                                          _rope_executor_ptr,
-                                                          t_cos,
-                                                          t_sin,
-                                                          past_lens,
-                                                          subsequence_begins);
+            if constexpr (one_of(KEY_PREC, ov::element::i8)) {
+                if (_helper._params.is_sage_attn) {
+                    if (_helper._params.fuse_rope) {
+                        PlainTensor t_cos(inputs[inputs.size() - 2]);
+                        PlainTensor t_sin(inputs[inputs.size() - 1]);
+                        sage_attn_quantize_q_with_rope<DATA_TYPE, KEY_PREC>(q,
+                                                                            _helper._quantized_q,
+                                                                            q,
+                                                                            _rope_executor_ptr,
+                                                                            t_cos,
+                                                                            t_sin,
+                                                                            past_lens,
+                                                                            subsequence_begins);
+                    } else {
+                        sage_attn_quantize_q<DATA_TYPE, KEY_PREC>(q,
+                                                                _helper._quantized_q,
+                                                                q,
+                                                                past_lens,
+                                                                subsequence_begins);
+                    }
+                }
             }
         }
-
         if (rotated_block_indices) {
             // Rotate kv cache currently doesn't support quantized cache.
             // for u8 it only supports compilation but throws exception in the runtime
