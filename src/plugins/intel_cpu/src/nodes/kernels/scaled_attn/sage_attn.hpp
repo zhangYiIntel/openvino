@@ -185,6 +185,29 @@ void sage_attn_quantize_q(const ov::intel_cpu::PlainTensor& q,
     });
 }
 
+template <typename DATA_TYPE, ov::element::Type_t KEY_PREC>
+void sage_attn_quantize_q(const ov::intel_cpu::PlainTensor& q,
+                   ov::intel_cpu::PlainTensor& quantized_q,
+                   ov::intel_cpu::PlainTensor& dst,
+                   const ov::intel_cpu::PlainTensor& past_lens,
+                   const ov::intel_cpu::PlainTensor& subsequence_begins) {
+    size_t B = q.m_dims[0];
+    size_t H = q.m_dims[1];
+    size_t S = q.m_dims[3];
+    parallel_for2d(past_lens.size(0), H, [&](size_t sub_seq_id, size_t h) {
+        const auto q_len =
+            subsequence_begins.ptr<int32_t>()[sub_seq_id + 1] - subsequence_begins.ptr<int32_t>()[sub_seq_id];
+        const auto batch_in_token = subsequence_begins.ptr<int32_t>()[sub_seq_id];
+        if (q_len > 1) {
+            parallel_for(q_len, [&](int32_t l) {
+                auto* src = q.ptr<DATA_TYPE>(batch_in_token + l, h, 0);
+                auto* dst = q.ptr<DATA_TYPE>(batch_in_token + l, h, 0);
+                quantize_q_by_dims<DATA_TYPE, KEY_PREC>(q, quantized_q, batch_in_token + l, h, S);
+            });
+        }
+    });
+}
+
 template <typename DATA_TYPE, ov::element::Type_t KEY_PREC, ov::element::Type_t VALUE_PREC>
 void sage_attn_ref(const ov::intel_cpu::PlainTensor& q,
                    ov::intel_cpu::PlainTensor& k_cache,
