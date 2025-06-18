@@ -71,6 +71,8 @@ struct ov::intel_cpu::paged_attn::RoPEExecutorRotateHalf : public ov::intel_cpu:
         jcp.dst_prc = precision_of<T>::value;
         jcp.rotary_ndims = config.rotary_ndims;
         jcp.interleave = false;
+        jcp.do_quantize = true;
+        jcp.head_size = config.head_size ? config.head_size : config.rotary_ndims;
         m_rotaryKernel = createJitKernel(jcp);
     }
 

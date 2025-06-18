@@ -19,6 +19,7 @@ void jit_rotary_kernel<isa>::generate() {
     mov(reg_cos, ptr[abi_param1 + GET_OFF(cos)]);
     mov(reg_sin, ptr[abi_param1 + GET_OFF(sin)]);
     mov(reg_dst, ptr[abi_param1 + GET_OFF(dst)]);
+    mov(reg_table, l_table);
     uni_vpxor(vmm_src0, vmm_src0, vmm_src0);
     uni_vpxor(vmm_src1, vmm_src1, vmm_src1);
     uni_vpxor(vmm_cos, vmm_cos, vmm_cos);
@@ -41,13 +42,49 @@ void jit_rotary_kernel<isa>::generate() {
     } else {
         auto half_rotary_ndims = m_jcp.rotary_ndims / 2;
         size_t steps = 0;
+        if (m_jcp.do_quantize) {
+            float max = -std::numeric_limits<float>::max();
+            float min = std::numeric_limits<float>::max();
+            int3();
+            uni_vmovups(vmm_max, table_val(0));
+            uni_vmovups(vmm_min, table_val(1));
+        }
+
         for (size_t i = 0; i < half_rotary_ndims / vec_size; i++) {
-            rotary_half(vec_size);
+            rotary_half(vec_size, vmm_max, vmm_min);
             steps += vec_size;
         }
+
         if (half_rotary_ndims % vec_size != 0) {
-            rotary_half(half_rotary_ndims % vec_size);
+            rotary_half(half_rotary_ndims % vec_size, vmm_max, vmm_min);
             steps += half_rotary_ndims % vec_size;
+        }
+
+        printf("can_inplace %d rotary_ndims %d head_size %d\n", m_jcp.can_inplace, m_jcp.rotary_ndims, m_jcp.head_size);
+        if (!m_jcp.can_inplace && m_jcp.rotary_ndims != m_jcp.head_size) {
+            for (size_t i = m_jcp.rotary_ndims; i < m_jcp.head_size / vec_size; i++) {
+                data_copy(vec_size);
+                steps += vec_size;
+            }
+            if (m_jcp.head_size % vec_size != 0) {
+                data_copy(m_jcp.head_size % vec_size);
+                steps += m_jcp.head_size % vec_size;
+            }
+        }
+
+        if (isa == cpu_isa_t::avx512_core && m_jcp.do_quantize) {
+            reduce_to_scalar(vmm_max, true);
+            reduce_to_scalar(vmm_min, false);
+            int3();
+            auto xmm_max = Xbyak::Xmm(vmm_max.getIdx());
+            auto xmm_min = Xbyak::Xmm(vmm_min.getIdx());
+            auto xmm_aux = Xbyak::Xmm(vmm_aux.getIdx());
+            //and with abs mask
+            uni_vandps(xmm_max, xmm_max, table_val(2));
+            uni_vandps(xmm_min, xmm_min, table_val(2));
+
+            uni_vmaxps(xmm_max, xmm_max, xmm_min);
+            uni_vdivps(xmm_max, xmm_max, table_val(3));
         }
     }
     this->postamble();
@@ -56,10 +93,11 @@ void jit_rotary_kernel<isa>::generate() {
             emitter.second->emit_data();
         }
     }
+    prepare_table();
 }
 
 template <cpu_isa_t isa>
-void jit_rotary_kernel<isa>::rotary_half(size_t step) {
+void jit_rotary_kernel<isa>::rotary_half(size_t step, const Vmm& vmm_max, const Vmm& vmm_min) {
     // for (; i < half_rotary_dims; i++) {
     //     auto src0 = src[i];
     //     auto src1 = src[i + half_rotary_dims];
@@ -79,6 +117,16 @@ void jit_rotary_kernel<isa>::rotary_half(size_t step) {
     uni_vmulps(vmm_dst0, vmm_sin, vmm_src1);
     // cos[i] * src0 - sin[i] * src1
     vfmsub231ps(vmm_dst0, vmm_cos, vmm_src0);
+    if (m_jcp.do_quantize) {
+        if (vec_size > step) {
+            fill_tail(vmm_dst0, step, -std::numeric_limits<float>::max());
+        }
+        uni_vmaxps(vmm_max, vmm_max, vmm_dst0);
+        if (vec_size > step) {
+            fill_tail(vmm_dst0, step, std::numeric_limits<float>::max());
+        }
+        uni_vminps(vmm_min, vmm_min, vmm_dst0);
+    }
     store(reg_dst, vmm_dst0, m_jcp.dst_prc, step);
 
     // cos[i + halfRotaryNdims]
@@ -89,6 +137,16 @@ void jit_rotary_kernel<isa>::rotary_half(size_t step) {
     uni_vmulps(vmm_dst0, vmm_cos, vmm_src1);
     // cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0
     vfmadd231ps(vmm_dst0, vmm_sin, vmm_src0);
+    if (m_jcp.do_quantize) {
+        if (vec_size > step) {
+            fill_tail(vmm_dst0, step, -std::numeric_limits<float>::max());
+        }
+        uni_vmaxps(vmm_max, vmm_max, vmm_dst0);
+        if (vec_size > step) {
+            fill_tail(vmm_dst0, step, std::numeric_limits<float>::max());
+        }
+        uni_vminps(vmm_min, vmm_min, vmm_dst0);
+    }
     store(reg_dst, vmm_dst0, m_jcp.dst_prc, step, half_rotary_ndims * m_jcp.dst_prc.size());
 
     add(reg_src, m_jcp.src_prc.size() * step);
@@ -222,6 +280,79 @@ void jit_rotary_kernel<isa>::store(const Xbyak::Reg64& reg_dst,
                               {static_cast<size_t>(reg_dst.getIdx()), offset},
                               pool_aux_vmm_idxs,
                               pool_aux_gpr_idxs);
+}
+
+template <cpu_isa_t isa>
+void jit_rotary_kernel<isa>::reduce_to_scalar(const Vmm& vmm_dst, bool is_max) {
+    if (isa == cpu_isa_t::avx512_core) {
+        printf("Reudce max/min\n");
+        // int3();
+        //4 group each has 4 float
+        //0|1|2|3
+        vshuff32x4(vmm_aux, vmm_dst, vmm_dst, 0x4E);
+        //data in aux
+        //2|3|1|0
+        if (is_max)
+            uni_vmaxps(vmm_dst, vmm_dst, vmm_aux);
+        else
+            uni_vminps(vmm_dst, vmm_dst, vmm_aux);
+        //|max(0,2)|max(1,3)|max(2,1)|max(3,0)
+        vshuff32x4(vmm_aux, vmm_dst, vmm_dst, 0xB1);
+        //data in aux
+        //1|0|3|2
+        //|max(1,3)|max(0,2)|max(3,0)|max(2,1)
+        if (is_max)
+            uni_vmaxps(vmm_dst, vmm_dst, vmm_aux);
+        else
+            uni_vminps(vmm_dst, vmm_dst, vmm_aux);
+        //|max(0-3)|max(0-3)|max(0-3)|max(0-3)
+        auto xmm_max = Xbyak::Xmm(vmm_dst.getIdx());
+        auto xmm_aux = Xbyak::Xmm(vmm_aux.getIdx());
+        uni_vmovshdup(xmm_aux, xmm_max); // dst:1,2,3,4; aux3:2,2,4,4
+        uni_vmaxps(xmm_max, xmm_max, xmm_aux); // dst:f(1,2),f(2,2),f(3,4),f(4,4)
+        uni_vmovhlps(xmm_aux, xmm_aux, xmm_max); // aux3:f(3,4),f(4,4),4,4
+        if (is_max)
+            uni_vmaxps(xmm_max, xmm_max, xmm_aux); // dst:f(1,2,3,4)
+        else
+            uni_vminps(xmm_max, xmm_max, xmm_aux);
+    }   
+}
+
+template <cpu_isa_t isa>
+void jit_rotary_kernel<isa>::fill_tail(const Vmm& vmm, size_t step, float val) {
+    if (isa == cpu_isa_t::avx512_core) {
+        uint64_t tail_mask = 1;
+        tail_mask = ~((tail_mask << step) - tail_mask);
+        mov(reg_tmp, tail_mask);
+        kmovq(k_mask, reg_tmp);
+        // fill tail of max with lower bound of float
+        init_vmm(vmm_aux, reg_tmp, val);
+        vblendmps(vmm_max | k_mask, vmm_max, vmm_aux);
+    } else {
+        uint8_t imm = 1;
+        imm = ~((imm << step) - imm);
+        init_vmm(vmm_aux, reg_tmp, val);
+        uni_vblendps(vmm, vmm, vmm_aux, imm);
+    }
+}
+
+template <cpu_isa_t isa>
+void jit_rotary_kernel<isa>::data_copy(size_t step) {
+    load(vmm_src0, reg_src, m_jcp.src_prc, step, false);
+    if (m_jcp.do_quantize) {
+        if (vec_size > step) {
+            fill_tail(vmm_src0, step, -std::numeric_limits<float>::max());
+        }
+        uni_vmaxps(vmm_max, vmm_max, vmm_src0);
+        if (vec_size > step) {
+            fill_tail(vmm_src0, step, std::numeric_limits<float>::max());
+        }
+        uni_vminps(vmm_min, vmm_min, vmm_src0);
+
+    }
+    store(reg_dst, vmm_dst0, m_jcp.dst_prc, step);
+    add(reg_src, m_jcp.src_prc.size() * step);
+    add(reg_dst, m_jcp.dst_prc.size() * step);
 }
 
 template struct jit_rotary_kernel<cpu_isa_t::avx512_core>;

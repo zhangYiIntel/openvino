@@ -34,7 +34,7 @@ public:
                              const std::vector<MemoryPtr>& inputs,
                              const std::vector<MemoryPtr>& outputs) = 0;
         virtual void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) = 0;
-        virtual void execute(const void* src, void* dst, const float* cos, const float* sin) = 0;
+        virtual void execute(const void* src, void* dst, const float* cos, const float* sin, bool in_place = false) = 0;
         virtual ~Executor() = default;
     };
     template <typename T>

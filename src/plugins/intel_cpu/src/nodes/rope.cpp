@@ -88,6 +88,7 @@ static void execJitKernel([[maybe_unused]] const std::shared_ptr<kernel::JitKern
 
 template <typename T>
 struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
+
     const op::internal::RoPE::Config& m_config;
     std::shared_ptr<kernel::JitKernelBase> m_rotaryKernel;
 
@@ -96,11 +97,15 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
         jcp.src_prc = precision_of<T>::value;
         jcp.dst_prc = precision_of<T>::value;
         jcp.rotary_ndims = config.rotary_ndims;
+        jcp.do_quantize = false;
         jcp.interleave = false;
+        jcp.can_inplace = ((config.slice_stop - config.slice_start) || config.input_trans0213) ? false : true;
+        jcp.head_size = m_config.head_size;
+        printf("RoPEExecutorRotateHalf|can_inplace %d rotary_ndims %d head_size %d in %d %d \n", jcp.can_inplace, jcp.rotary_ndims, jcp.head_size, (config.slice_stop - config.slice_start), config.input_trans0213);
         m_rotaryKernel = createJitKernel(jcp);
     }
 
-    void execute(const void* src, void* dst, const float* cos, const float* sin) override {
+    void execute(const void* src, void* dst, const float* cos, const float* sin, bool in_place) override {
         const auto& rotary_dims = m_config.rotary_ndims;
         const T* src_ptr = reinterpret_cast<const T*>(src);
         T* dst_ptr = reinterpret_cast<T*>(dst);
@@ -115,7 +120,9 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
                 dst_ptr[i] = cos[i] * src0 - sin[i] * src1;
                 dst_ptr[i + half_rotary_dims] = cos[i + half_rotary_dims] * src1 + sin[i + half_rotary_dims] * src0;
             }
-        }  
+            if (!in_place && m_config.head_size)
+                memcpy(dst_ptr + rotary_dims, src_ptr + rotary_dims, (m_config.head_size - rotary_dims) * sizeof(T));
+        }
     }
     void execute(std::vector<PlainTensor>& inputs, std::vector<PlainTensor>& outputs) override {
         ov::intel_cpu::PlainTensor& t_src = inputs[0];
@@ -161,10 +168,7 @@ struct RoPE::RoPEExecutorRotateHalf : public RoPE::Executor {
             auto* cos = &t_cos.at<float>({b, h, cos_pos, 0}, true);
             auto* sin = &t_sin.at<float>({b, h, cos_pos, 0}, true);
             auto* dst = t_dst.ptr<T>(b, h, p, 0);
-            execute(src, dst, cos, sin);
-            if (!can_inplace) {
-                memcpy(dst + rotary_dims, src + rotary_dims, (feature_size - rotary_dims) * sizeof(T));
-            }
+            execute(src, dst, cos, sin, can_inplace);
         });
     }
     void execute([[maybe_unused]] const dnnl::stream& strm,
@@ -193,7 +197,7 @@ struct RoPE::RoPEExecutorInterleaved : public RoPE::Executor {
         jcp.mix_cos_sin = false;
         m_rotaryKernel = createJitKernel(jcp, true);
     }
-    void execute(const void* src, void* dst, const float* cos, const float* sin) override {
+    void execute(const void* src, void* dst, const float* cos, const float* sin, bool in_place) override {
         auto rotary_dims = m_config.rotary_ndims;
         const T* src_ptr = reinterpret_cast<const T*>(src);
         T* dst_ptr = reinterpret_cast<T*>(dst);
@@ -262,8 +266,10 @@ struct RoPE::RoPEExecutorChatGLM : public RoPE::Executor {
         jcp.mix_cos_sin = true;
         m_rotaryKernel = createJitKernel(jcp, true);
     }
-    void execute(const void* src, void* dst, const float* cos_sin, const float* sin) override {
+    void execute(const void* src, void* dst, const float* cos_sin, const float* sin, bool in_place) override {
         auto rotary_dims = m_config.rotary_ndims;
+        const T* src_ptr = reinterpret_cast<const T*>(src);
+        T* dst_ptr = reinterpret_cast<T*>(dst);
         if (m_rotaryKernel) {
             execJitKernel(m_rotaryKernel, src, dst, cos_sin, nullptr);
         } else {
@@ -271,8 +277,8 @@ struct RoPE::RoPEExecutorChatGLM : public RoPE::Executor {
             for (; i < rotary_dims; i += 2) {
                 auto cosv = cos_sin[i];
                 auto sinv = cos_sin[i + 1];
-                dst[i] = cosv * src[i] - sinv * src[i + 1];
-                dst[i + 1] = sinv * src[i] + cosv * src[i + 1];
+                dst_ptr[i] = cosv * src_ptr[i] - sinv * src_ptr[i + 1];
+                dst_ptr[i + 1] = sinv * src_ptr[i] + cosv * src_ptr[i + 1];
             }
         }
     }
@@ -370,7 +376,7 @@ struct RoPE::RoPEExecutorQwen : public RoPE::Executor {
         m_rotaryKernel = createJitKernel(jcp);
     }
 
-    void execute(const void* src, void* dst, const float* cos, const float* sin) override {
+    void execute(const void* src, void* dst, const float* cos, const float* sin, bool in_place) override {
         auto rotary_dims = m_config.rotary_ndims;
         const T* src_ptr = reinterpret_cast<const T*>(src);
         T* dst_ptr = reinterpret_cast<T*>(dst);

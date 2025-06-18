@@ -301,6 +301,7 @@ ov::pass::RoPEFusionGPTNEOX::RoPEFusionGPTNEOX() {
         op::internal::RoPE::Config config;
         OutputVector new_args;
         config.rotary_ndims = 2ul * static_cast<size_t>(validator["half_ndims"]);
+        config.head_size = config.rotary_ndims;
 
         new_args.push_back(pattern_map.at(x));
         new_args.push_back(v_cos);

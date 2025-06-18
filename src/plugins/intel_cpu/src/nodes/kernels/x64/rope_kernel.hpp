@@ -16,8 +16,11 @@ struct jit_rotary_compile_params {
     ov::element::Type src_prc;
     ov::element::Type dst_prc;
     size_t rotary_ndims;
+    size_t head_size;
     bool interleave;
     bool mix_cos_sin;
+    bool can_inplace = false;
+    bool do_quantize = false;
 };
 
 struct jit_rotary_call_args {
@@ -25,6 +28,7 @@ struct jit_rotary_call_args {
     const float* cos;
     const float* sin;
     void* dst;
+    float* scale;
 };
 
 #if defined(OPENVINO_ARCH_X86_64)
@@ -45,7 +49,7 @@ private:
                                                          Xbyak::Zmm>::type;
 
     void generate() override;
-    void rotary_half(size_t step);
+    void rotary_half(size_t step, const Vmm& max, const Vmm& min);
     void rotary_interleave(size_t step);
     void load(const Vmm& vmm_dst,
               const Xbyak::Reg64& reg_src,
@@ -58,6 +62,27 @@ private:
                ov::element::Type dst_prc,
                const int& elt_num,
                size_t offset = 0);
+    void reduce_to_scalar(const Vmm& vmm_dst, bool is_max);
+    void fill_tail(const Vmm& vmm, size_t step, float val);
+    void data_copy(size_t step);
+    void prepare_table() {
+        auto broadcast_int = [&](int val) {
+            for (size_t d = 0; d < vlen / sizeof(float); ++d) {
+                dd(val);
+            }
+        };
+
+        align(64);
+        L(l_table);
+
+        broadcast_int(0xff7fffff); //float min
+        broadcast_int(0x7f7fffff); //float max
+        broadcast_int(0x7fffffff); //abs mask
+        broadcast_int(0x42fe0000); //i8 range, 127 in float representation
+    }
+    Xbyak::Address table_val(int index) {
+        return ptr[reg_table + index * vlen];
+    }
     const Vmm vmm_src0 = Vmm(0);
     const Vmm vmm_src1 = Vmm(1);
     const Vmm vmm_cos = Vmm(2);
@@ -65,11 +90,19 @@ private:
     const Vmm vmm_dst0 = Vmm(4);
     const Vmm vmm_dst1 = Vmm(5);
     const Vmm vmm_idx = Vmm(7);
+    const Vmm vmm_max = Vmm(8);
+    const Vmm vmm_min = Vmm(9);
+    const Vmm vmm_scale = Vmm(10);
+    const Vmm vmm_aux = Vmm(11);
     const Xbyak::Reg64 reg_src = r8;
     const Xbyak::Reg64 reg_cos = r10;
     const Xbyak::Reg64 reg_sin = r11;
     const Xbyak::Reg64 reg_dst = r12;
-    const Xbyak::Reg64 reg_tmp = rdx;
+    const Xbyak::Reg64 reg_tmp = r13;
+    Xbyak::Reg64 reg_table = r14;
+    const Xbyak::Opmask k_mask = Xbyak::Opmask(1);
+
+    Xbyak::Label l_table;
 
     std::unordered_map<size_t, std::unique_ptr<jit_emitter>> emitters;
     const std::vector<size_t> pool_aux_gpr_idxs = {static_cast<size_t>(rax.getIdx()), static_cast<size_t>(r9.getIdx())};
