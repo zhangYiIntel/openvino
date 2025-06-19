@@ -647,7 +647,6 @@ struct MHAHelper {
         }
 
         if (_params.is_sage_attn) {
-            printf("going to resize _quantized_q\n");
            _quantized_q.resize<int8_t>({B_token, H, S + sizeof(float)});
         }
 
@@ -2077,7 +2076,6 @@ struct AttentionExecutor : public PagedAttentionExecutor {
             quant_params.key_group_size = _helper._params.key_group_size;
             quant_params.value_group_size = _helper._params.value_group_size;
             quant_params.is_sage_attn = _helper._params.is_sage_attn;
-            printf("pa_executor|is_sage %d\n", quant_params.is_sage_attn);
 
             paged_attn_quantkv(k,
                                v,
@@ -2187,7 +2185,7 @@ std::shared_ptr<PagedAttentionExecutor> make_pa_executor(ov::element::Type data_
     if (data_type == ov::element::bf16) {
 #    if defined(HAVE_AVX512F)
         if (key_cache_type == ov::element::i8) {
-            printf("make PagedAttn Executor\n");
+            printf("make PagedAttn Executor %d\n", params.is_sage_attn);
             executor = std::make_shared<AttentionExecutor<ov::bfloat16, ov::element::i8, ov::element::u8>>(params);
         } else if (key_cache_type == ov::element::u8) {
             if (value_cache_type == ov::element::u4) {

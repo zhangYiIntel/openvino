@@ -81,7 +81,7 @@ struct Config {
     size_t valueCacheGroupSize = 0ul;
     CacheQuantMode keyCacheQuantMode = CacheQuantMode::AUTO;
     CacheQuantMode valueCacheQuantMode = CacheQuantMode::AUTO;
-    bool enableSageAttn = false;
+    bool enableSageAttn = true;
     ov::threading::IStreamsExecutor::Config streamExecutorConfig;
     int streams = 1;
     bool streamsChanged = false;
