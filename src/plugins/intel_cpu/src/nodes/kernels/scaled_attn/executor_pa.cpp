@@ -1787,6 +1787,28 @@ struct MHA {
 
         auto nthr = static_cast<size_t>(parallel_get_max_threads());
 
+        if (_helper._params.is_sage_attn) {
+            if (getenv("ENABLE_SAGE_RETURN") && _helper._quantized_q.m_dims[0] > 1) {
+                sage_attn<DATA_TYPE, KEY_PREC, VALUE_PREC>(_helper._quantized_q,
+                                                               present_key,
+                                                               present_value,
+                                                               output_emb,
+                                                               output_score,
+                                                               max_context_len,
+                                                               past_lens,
+                                                               subsequence_begins,
+                                                               block_indices,
+                                                               block_indices_begins,
+                                                               alibi_slopes,
+                                                               _workitems,
+                                                               _helper._qk_gemm,
+                                                               _helper._qk_scratch_b,
+                                                               _helper._wsp,
+                                                               _helper._weight_bhl,
+                                                               _helper._output_bhl);
+                return;
+            }
+        }
         if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
             exec_loop_mixed(query,
                             present_key,
