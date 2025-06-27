@@ -134,7 +134,7 @@ BrgemmKernel::BrgemmKernel(size_t M,
                 auto M_ = m ? M_tail : M < M_blk ? 0 : M_blk;
                 auto N_ = n ? N_tail : N - N_tail;
                 auto K_ = k ? K_tail : K - K % K_blk;
-                auto beta = (b_accumulate || (k && brgCtxs[getBrgIdx(m, 0, n)].K != 0)) ? 1.0f : 0.0f;
+                auto beta = (b_accumulate || (k && brgCtxs[getBrgIdx(m, 0, n)].K != 0)) ? 1.0F : 0.0F;
 
                 brgemmCtx.M = M_;
                 brgemmCtx.N = N_;
@@ -236,7 +236,7 @@ void BrgemmKernel::init_brgemm(brgemmCtx& ctx,
                                    ctx.transpose_a,
                                    ctx.transpose_b,
                                    brgemm_row_major,
-                                   1.f,
+                                   1.F,
                                    ctx.beta,
                                    ctx.LDA,
                                    ctx.LDB,
