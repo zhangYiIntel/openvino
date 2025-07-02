@@ -556,6 +556,7 @@ struct MHAHelper {
     PlainTensor _weight;        // [nthr, H, 32, rnd_up(kv_len, block_size)], shared by first and second loop along bh
     PlainTensor _output;        // [nthr, 32, H, S], shared by first and second loop along bh
     PlainTensor _quantized_q;   // [H, batch_in_tokens, S + 1] (S + scale[f32]) / per-token
+    PlainTensor _temp_O;
     PlainTensor _qk_scratch_a;  // [nthr, scratch_a_size]
     PlainTensor _qk_scratch_b;  // [B, rnd_up(kv_len, block_size), Hk, scratch_b_size]
     PlainTensor _wv_scratch_a;
@@ -647,6 +648,7 @@ struct MHAHelper {
         }
 
         if (_params.is_sage_attn) {
+           _temp_O.resize<float>({_nthr, block_size * SV});
            _quantized_q.resize<int8_t>({B_token, H, S + sizeof(float)});
         }
 
@@ -669,12 +671,25 @@ struct MHAHelper {
                                                        H * (S + sizeof(float)),
                                                        S + sizeof(float),
                                                        _block_size,
-                                                       _new_score_stride,
+                                                       _block_size,
                                                        true,
                                                        ov::element::i8,
                                                        ov::element::f32,
                                                        ov::intel_cpu::BrgemmKernel::ScaleType::PER_CHANNEL,
                                                        false);
+                    // _qk_gemm[i] =
+                    //     std::make_shared<BrgemmKernel>(i + 1,
+                    //                                    _block_size,
+                    //                                    S,
+                    //                                    H * (S + sizeof(float)),
+                    //                                    S + sizeof(float),
+                    //                                    _block_size,
+                    //                                    _new_score_stride,
+                    //                                    true,
+                    //                                    ov::element::i8,
+                    //                                    ov::element::f32,
+                    //                                    ov::intel_cpu::BrgemmKernel::ScaleType::PER_CHANNEL,
+                    //                                    false);
                 } else {
                     _qk_gemm[i] = std::make_shared<BrgemmKernel>(i + 1,
                                                                 _block_size,
@@ -690,9 +705,9 @@ struct MHAHelper {
                                                    SV,
                                                    _block_size,
                                                    // if it's bf16, the stride needs double due to reuse float buffer
-                                                   (in_type == ov::element::Type_t::f32 ? 1 : 2) * _new_score_stride,
+                                                   _block_size,
                                                    SV,
-                                                   wv_stride,
+                                                   SV,
                                                    false,
                                                    in_type);
                 _wv_gemm_acc[i] =
@@ -700,9 +715,9 @@ struct MHAHelper {
                                                    SV,
                                                    _block_size,
                                                    // if it's bf16, the stride needs double due to reuse float buffer
-                                                   (in_type == ov::element::Type_t::f32 ? 1 : 2) * _new_score_stride,
+                                                   _block_size,
                                                    SV,
-                                                   wv_stride,
+                                                   SV,
                                                    false,
                                                    in_type,
                                                    true);
@@ -1789,6 +1804,37 @@ struct MHA {
 
         if (_helper._params.is_sage_attn) {
             if (getenv("ENABLE_SAGE_RETURN") && _helper._quantized_q.m_dims[0] > 1) {
+                _helper.init_reorder_buffers(_workitems.get_reorder_max_batch_size(),
+                                            div_up(_workitems.get_reorder_max_kv_len(), _helper._block_size));
+                auto reorder_work_count = _workitems.reorder_work_size();
+                parallel_for2d_dynamic(reorder_work_count, _helper.Hk, [&](size_t w, size_t hk) {
+                    const auto& item = _workitems.get_reorder_work_item(w);
+                    auto ithr = parallel_get_thread_num();
+                    sage_attn_transpose_k(item,
+                                        hk,
+                                        _helper._block_size,
+                                        _helper._qk_gemm[31],
+                                        present_key,
+                                        _helper._qk_scratch_b);
+                    const auto batch_in_seq = item.batch_in_seq;
+                    const auto batch_in_reorder = item.batch_in_reorder;
+                    const auto kv_block = item.kv_block_id;
+                    const size_t valid_len = item.valid_block_len;
+                    const auto block_number = item.block_number;
+                    auto* v_ptr =
+                        present_value.ptr<typename element_type_traits<VALUE_PREC>::value_type, VALUE_PREC>(block_number, hk);
+                    pack_32NxK<DATA_TYPE, VALUE_PREC>(
+                        _helper._wv_scratch_b.template ptr<DATA_TYPE>(batch_in_reorder, kv_block, hk),
+                        v_ptr,                                          // quantized data
+                        _helper._output.template ptr<DATA_TYPE>(ithr),  // temp buffer hold dequantized data
+                        valid_len,                                      // N may be smaller than block_size
+                        _helper.SV,                                     // K
+                        _helper._block_size,                            // block_size
+                        rnd_up(_helper.SV, _helper._block_size),
+                        _helper.SV,
+                        _helper._params.value_group_size,
+                        _helper._params.quant_value_bychannel);
+                });
                 sage_attn<DATA_TYPE, KEY_PREC, VALUE_PREC>(_helper._quantized_q,
                                                                present_key,
                                                                present_value,
@@ -1803,9 +1849,14 @@ struct MHA {
                                                                _workitems,
                                                                _helper._qk_gemm,
                                                                _helper._qk_scratch_b,
+                                                               _helper._wv_gemm,
+                                                               _helper._wv_gemm_acc,
+                                                               _helper._wv_scratch_a,
+                                                               _helper._wv_scratch_b,
                                                                _helper._wsp,
                                                                _helper._weight_bhl,
-                                                               _helper._output_bhl);
+                                                               _helper._output_bhl,
+                                                               _helper._temp_O);
                 return;
             }
         }

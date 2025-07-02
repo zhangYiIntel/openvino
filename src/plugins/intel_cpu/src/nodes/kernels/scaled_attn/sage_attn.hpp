@@ -4,13 +4,13 @@
 #pragma once
 
 #include "nodes/kernels/scaled_attn/common.hpp"
+#include "nodes/rope.h"
 #include "openvino/core/parallel.hpp"
 #include "openvino/core/type/element_type.hpp"
 #include "paged_attn_kernel.hpp"
 #include "softmax_kernel.hpp"
 #include "utils/general_utils.h"
 #include "utils/plain_tensor.hpp"
-#include "nodes/rope.h"
 #if defined(HAVE_SSE) || defined(HAVE_AVX2) || defined(HAVE_AVX512F)
 #    include <immintrin.h>
 #endif
@@ -57,8 +57,7 @@ inline int32_t hsum_16x32(__m512i v) {
 }
 #endif
 
-inline void
-dot_product_block_s8s8_f32(int8_t* a, int8_t* b, float* c, float c_scale, size_t n, size_t block_size) {
+inline void dot_product_block_s8s8_f32(int8_t* a, int8_t* b, float* c, float c_scale, size_t n, size_t block_size) {
     const size_t b_stride = n + sizeof(float);
     for (size_t j = 0; j < block_size; j++) {
         const size_t params_offset = sizeof(float);
@@ -100,6 +99,65 @@ dot_product_block_s8s8_f32(int8_t* a, int8_t* b, float* c, float c_scale, size_t
         *c++ = f32_sum * c_scale;
     }
 }
+// template <typename T>
+inline void exp_reduce_sum(float* a, ov::bfloat16* dst, const float max, const size_t size, float& sum) {
+    size_t i = 0;
+#if defined(HAVE_AVX512F)
+    __m512 v_a;
+    auto v_max = _mm512_set1_ps(max);
+    auto v_sum = _mm512_set1_ps(0.0f);
+    while (i + vec_len_f32_avx512 <= size) {
+        v_a = _mm512_loadu_ps(a + i);
+        v_a = _mm512_sub_ps(v_a, v_max);
+        exp_ps_avx512(v_a);
+        v_sum = _mm512_add_ps(v_sum, v_a);
+        mm512_uni_storeu_ps(dst + i, v_a);
+        i += vec_len_f32_avx512;
+    }
+
+    if (i < size) {
+        __mmask16 mask = (1 << (size - i)) - 1;
+        v_a = _mm512_maskz_loadu_ps(mask, a + i);
+        v_a = _mm512_sub_ps(v_a, v_max);
+        exp_ps_avx512(v_a);
+        v_sum = _mm512_mask_add_ps(v_sum, mask, v_a, v_sum);
+        mm512_uni_mask_storeu_ps(dst + i, mask, v_a);
+
+        i += (size - i);
+    }
+    sum = _mm512_reduce_add_ps(v_sum);
+#elif defined(HAVE_AVX2)
+    __m256 v_a;
+    auto v_max = _mm256_set1_ps(max);
+    auto v_sum = _mm256_set1_ps(0.0f);
+    while (i + vec_len_f32_avx2 <= size) {
+        v_a = _mm256_loadu_ps(a + i);
+        v_a = _mm256_sub_ps(v_a, v_max);
+        exp_ps_avx2(v_a);
+        v_sum = _mm256_add_ps(v_sum, v_a);
+        _mm256_storeu_ps(a + i, v_a);
+        i += vec_len_f32_avx2;
+    }
+
+    if (i < size) {
+        auto mask = get_mask(size - i);
+        v_a = _mm256_maskload_ps(a + i, mask);
+        v_a = _mm256_sub_ps(v_a, v_max);
+        exp_ps_avx2(v_a);
+        v_a = _mm256_blendv_ps(_mm256_setzero_ps(), v_a, _mm256_castsi256_ps(mask));
+        v_sum = _mm256_add_ps(v_a, v_sum);
+        _mm256_maskstore_ps(a + i, mask, v_a);
+
+        i += (size - i);
+    }
+    hsum(v_sum);
+    sum = _mm256_cvtss_f32(v_sum);
+#endif
+    for (; i < size; i++) {
+        a[i] = std::exp(a[i] - max);
+        sum += a[i];
+    }
+}
 
 void sage_attn_transpose_k(const ReorderWorkItem& item,
                            const size_t hk,
@@ -126,18 +184,18 @@ void sage_attn_transpose_k(const ReorderWorkItem& item,
     // layout of repacked_data
     // block_size * S int8(quantized key)
     // block_size * scales (FP32)
-    //copy b_scale to dst tensor
-    float* scales =  reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(batch_in_reorder, kv_block, hk, block_size * S));
-    for(size_t i = 0; i < valid_len; i++) {
+    // copy b_scale to dst tensor
+    float* scales = reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(batch_in_reorder, kv_block, hk, block_size * S));
+    for (size_t i = 0; i < valid_len; i++) {
         scales[i] = reinterpret_cast<float*>(key_cache.ptr<int8_t, ov::element::i8>(block_number, hk, i, 0))[0];
     }
 }
 
 template <typename DATA_TYPE, ov::element::Type_t KEY_PREC>
 void sage_attn_quantize_q(const ov::intel_cpu::PlainTensor& q,
-                   ov::intel_cpu::PlainTensor& quantized_q,
-                   const ov::intel_cpu::PlainTensor& past_lens,
-                   const ov::intel_cpu::PlainTensor& subsequence_begins) {
+                          ov::intel_cpu::PlainTensor& quantized_q,
+                          const ov::intel_cpu::PlainTensor& past_lens,
+                          const ov::intel_cpu::PlainTensor& subsequence_begins) {
     size_t H = q.m_dims[1];
     size_t S = q.m_dims[3];
     parallel_for2d(past_lens.size(0), H, [&](size_t sub_seq_id, size_t h) {
@@ -217,7 +275,8 @@ void sage_attn_ref(const ov::intel_cpu::PlainTensor& q,
                 for (size_t i = 0; i < q_cnt; i++) {
                     float* scale_a = reinterpret_cast<float*>(sub_query.ptr<int8_t>(q_start + i, h, 0));
                     for (size_t j = 0; j < block_size; j++) {
-                        float* scale_b =  reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(0, k_block_id, hk, block_size * (S - param_size)));
+                        float* scale_b = reinterpret_cast<float*>(
+                            qk_scratch_b.ptr<int8_t>(0, k_block_id, hk, block_size * (S - param_size)));
                         (temp_weight.template ptr<float>(h, batch_in_token + q_start + i) + k_start)[j] =
                             temp_c[i * block_size + j] * scale_a[0] * scale_b[j] * _d_scale;
                         // printf(" %d ", temp_c[i * block_size + j]);
@@ -288,7 +347,7 @@ void sage_attn_ref(const ov::intel_cpu::PlainTensor& q,
                 }
             }
         }
-        
+
         attn_memcpy2d_kernel(temp_output.ptr<float>(batch_in_token + q_start, h, 0),
                              output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
                              ov::element::f32,
@@ -315,9 +374,14 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
                const WorkItems work_items,
                const std::vector<std::shared_ptr<ov::intel_cpu::BrgemmKernel>>& qk_s8s8_gemm,
                ov::intel_cpu::PlainTensor& qk_scratch_b,
+               const std::vector<std::shared_ptr<ov::intel_cpu::BrgemmKernel>>& wv_gemm,
+               const std::vector<std::shared_ptr<ov::intel_cpu::BrgemmKernel>>& wv_gemm_acc,
+               ov::intel_cpu::PlainTensor& wv_scratch_a,
+               ov::intel_cpu::PlainTensor& wv_scratch_b,
                std::vector<size_t>& wsp,
                ov::intel_cpu::PlainTensor& temp_weight,
-               ov::intel_cpu::PlainTensor& temp_output) {
+               ov::intel_cpu::PlainTensor& temp_output,
+               ov::intel_cpu::PlainTensor& temp_O) {
     auto seq_cout = static_cast<int32_t>(past_lens.m_dims[0]);
     int32_t block_size = 32;
     size_t B = q.m_dims[0], H = q.m_dims[1], S = q.m_dims[2], SV = v_cache.m_dims[3] - sizeof(float) * 2;
@@ -325,9 +389,10 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
     size_t h_each_group_len = H / Hk;
     const size_t param_size = sizeof(float);
     const float _d_scale = 1 / sqrt(S - param_size);
-    temp_output.resize<float>({B, H, SV});
-    memset(temp_output.ptr<float>(), 0, B * H * SV * sizeof(float));
-    temp_weight.resize<float>({H, B, ov::intel_cpu::rnd_up(max_context_len, std::max(block_size, int32_t{16}))});
+    // memset(temp_output.ptr<float>(), 0, B * H * SV * sizeof(float));
+    temp_weight.resize<float>({parallel_get_max_threads(), block_size, block_size});
+    std::vector<float> temp_O2(parallel_get_max_threads() * block_size * SV);
+    bool enable_brgemm = getenv("ENABLE_BRGEMM");
     // for (int32_t seq_id = 0; seq_id < seq_cout; seq_id++) {
     ov::parallel_for2d_dynamic(work_items.attn_work_size(), H, [&](size_t w, size_t h) {
         const auto& item = work_items.get_attn_work_item(w);
@@ -340,95 +405,206 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
         const auto block_id = q_len == 1 ? 0 : item.q_block_id;
         ov::intel_cpu::PlainTensor sub_query;
         sub_query.resize({static_cast<size_t>(q_len), H, S}, q.ptr<int8_t>(batch_in_token));
-            // compute q_block * k_block
+        // compute q_block * k_block
         auto q_start = block_id * block_size;
         auto q_end = std::min(q_start + block_size, q_len);
         auto q_cnt = q_end - q_start;
-
+        auto id = static_cast<size_t>(parallel_get_thread_num());
+        // float* buffer_O = temp_O2.data() + id * block_size * SV;
+        float* buffer_O = temp_O.ptr<float>(id);
+        memset(buffer_O, 0, block_size * SV * sizeof(float));
         // for (size_t pq = 0; pq < q_cnt; pq++) {
-            // compute q * k
-            // auto* q_ptr = sub_query.template ptr<int8_t>(q_start, h, 0);
-            size_t hk = h / h_each_group_len;
-            float sum[32];
-            float M[32];  // maximum KQ value
-            std::fill_n(sum, 32, 0.0f);
-            std::fill_n(M, 32, -INFINITY);
-            
+        // compute q * k
+        // auto* q_ptr = sub_query.template ptr<int8_t>(q_start, h, 0);
+        size_t hk = h / h_each_group_len;
+        float sum[32];
+        float M[32];  // maximum KQ value
+        std::fill_n(sum, 32, 0.0f);
+        std::fill_n(M, 32, -INFINITY);
 
-            for (int32_t k_block_id = 0; k_block_id < kv_block_num; k_block_id++) {
-                auto k_start = k_block_id * block_size;
-                auto k_end = std::min(k_start + block_size, kv_len);
-
-                // if (k_start < kv_len) {
+        for (int32_t k_block_id = 0; k_block_id < kv_block_num; k_block_id++) {
+            size_t k_start = static_cast<size_t>(k_block_id * block_size);
+            size_t k_end = std::min(static_cast<size_t>(k_start + block_size), static_cast<size_t>(kv_len));
+            auto k_cnt = k_end - k_start;
+            auto block_number =
+                block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[batch_in_seq] + k_block_id];
+            // if (k_start < kv_len) {
+            if (enable_brgemm) {
+                auto* k_ptr = qk_scratch_b.ptr<int8_t>(0, k_block_id, hk);
+                auto* q_ptr = sub_query.template ptr<int8_t>(q_start, h, 0);
+                std::vector<int32_t> temp_c(block_size * block_size, 0);
+                float* scale_b = reinterpret_cast<float*>(
+                    qk_scratch_b.ptr<int8_t>(0, k_block_id, hk, block_size * (S - param_size)));
+                qk_s8s8_gemm[q_cnt - 1]->executeGemmWithScale(q_cnt < block_size,
+                                                              q_ptr + sizeof(float),
+                                                              k_ptr,
+                                                              temp_c.data(),
+                                                              temp_weight.template ptr<float>(id),
+                                                              scale_b,
+                                                              wsp.data() + id * 4 * 1024,
+                                                              nullptr);
+            } else {
                 for (size_t pq = 0; pq < q_cnt; pq++) {
                     auto* q_ptr = sub_query.template ptr<int8_t>(q_start + pq, h, 0);
                     auto ncausal = (past_len + q_start + pq + 1);
-                    auto real_k_end = std::min(k_end, static_cast<int32_t>(ncausal));
+                    auto real_k_end = std::min(k_end, ncausal);
                     auto k_cnt = real_k_end - k_start;
                     // printf("pq %d k_cnt %d ncausal %d\n", pq, k_cnt, ncausal);
-                    if(k_start < kv_len && k_start < ncausal) {
+                    if (k_start < kv_len && k_start < ncausal) {
                         auto block_number =
-                            block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[batch_in_seq] + k_block_id];
+                            block_indices
+                                .ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[batch_in_seq] + k_block_id];
                         auto* k_ptr = k_cache.ptr<int8_t, KEY_PREC>(block_number, hk);
-                        dot_product_block_s8s8_f32(
-                            q_ptr,
-                            k_ptr,
-                            temp_weight.template ptr<float>(h, batch_in_token + q_start + pq) + k_start,
-                            _d_scale,
-                            S - param_size,
-                            k_cnt);
-                        const float Mold = M[pq];
-                        float block_max = -INFINITY;
-                        for (int32_t i = 0; i < k_cnt; i++) {
-                            block_max =
-                                std::max(block_max,
-                                            temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i}));
-                        }
-                        M[pq] = std::max(block_max, M[pq]);
-
-                        for (int32_t i = 0; i < k_cnt; i++) {
-                            temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i}) =
-                                expf(temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i}) - M[pq]);
-                        }
-
-                        float local_sum = 0.0f;
-                        for (int32_t i = 0; i < k_cnt; i++) {
-                            local_sum += temp_weight.at<float>({h, batch_in_token + q_start + pq, k_start + i});
-                        }
-                        float qk_scale = expf(Mold - M[pq]);
-
-                        for (int32_t i = 0; i < SV; i++) {
-                            temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= qk_scale;
-                        }
-
-                        auto* v_ptr = v_cache.ptr<uint8_t, ov::element::u8>(block_number, hk);
-                        attn_acc_value_block_by_dim<uint8_t, ov::element::u8>(
-                            temp_output.template ptr<float>(batch_in_token + q_start + pq, h, 0),
-                            temp_weight.template ptr<float>(h, batch_in_token + q_start + pq) + k_start,
-                            v_ptr,
-                            SV,
-                            k_cnt,
-                            SV);
-                        sum[pq] = sum[pq] * qk_scale + local_sum;
+                        dot_product_block_s8s8_f32(q_ptr,
+                                                   k_ptr,
+                                                   temp_weight.template ptr<float>(id, pq),
+                                                   _d_scale,
+                                                   S - param_size,
+                                                   k_cnt);
                     }
                 }
             }
 
             for (size_t pq = 0; pq < q_cnt; pq++) {
-                float inv_sum = 1.0f / sum[pq];
-                for (size_t i = 0; i < SV; i++) {
-                    temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= inv_sum;
+                auto* q_ptr = sub_query.template ptr<int8_t>(q_start + pq, h, 0);
+                auto ncausal = (past_len + q_start + pq + 1);
+                // auto real_k_end = std::min(k_end, ncausal);
+                // auto k_cnt = real_k_end - k_start;
+                float* scale_a = reinterpret_cast<float*>(sub_query.ptr<int8_t>(q_start + pq, h, 0));
+                // printf("pq %d k_cnt %d ncausal %d k_start %d k_end %d\n", pq, k_cnt, ncausal, k_start, k_end);
+                // Apply casual mask
+                // for (size_t i = std::max(k_start, ncausal); i < k_end; i++) {
+                //     temp_weight.at<float>({id, pq, i - k_start}) = -INFINITY;
+                // }
+                if (k_start < kv_len) {
+                    const float Mold = M[pq];
+                    float block_max = -INFINITY;
+                    // if (ncausal <= k_start) {
+                    //     std::fill_n(temp_weight.ptr<float>(id, pq, 0), k_end - k_start, -INFINITY);
+                    // } else if (ncausal > k_start && ncausal < k_end) {
+                    //     std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, -INFINITY);
+                    // }
+                    if (ncausal <= k_start) {
+                        std::fill_n(temp_weight.ptr<float>(id, pq, 0), k_end - k_start, 0);
+                    } else if (ncausal > k_start) {
+                        auto real_k_end = std::min(k_end, ncausal); 
+                        // std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, -INFINITY);
+                        scale_add2_reduce_max<false, false, false, float>(temp_weight.ptr<float>(id, pq, 0), scale_a[0] * _d_scale, nullptr, nullptr, nullptr,false, real_k_end - k_start, 0.0f, block_max);
+                        M[pq] = std::max(block_max, M[pq]);
+                        float local_sum = 0.0f;
+                        exp_reduce_sum(temp_weight.ptr<float>(id, pq), M[pq], real_k_end - k_start, local_sum);
+                        if (ncausal < k_end)
+                            std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, 0);
+                        float qk_scale = expf(Mold - M[pq]);
+                        multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, qk_scale, SV);
+                        sum[pq] = sum[pq] * qk_scale + local_sum;
+                    }
+                    // for (size_t i = k_start; i < k_end; i++) {
+                    //     temp_weight.at<float>({id, pq, i - k_start}) *= scale_a[0] * _d_scale;
+                    //     block_max = std::max(block_max, temp_weight.at<float>({id, pq, i - k_start}));
+
+                    // }
+                    // printf("ncausal %ld k_start %ld k_end %ld\n", ncausal, k_start, k_end);
+                    // cvt_copy(temp_bf16, temp_weight.ptr<float>(id, pq), 1, k_cnt, 0, 0);
+                    // for (size_t i = k_start; i < k_end; i++) {
+                    //     if (i >= ncausal)
+                    //         temp_weight.at<float>({id, pq, i - k_start}) = -INFINITY;
+                    // }
+                    // scale_add2_reduce_max<false, false, false, float>(temp_weight.ptr<float>(id, pq, 0), scale_a[0] * _d_scale, nullptr, nullptr, nullptr,false, k_cnt, 0.0f, block_max);
+                    // M[pq] = std::max(block_max, M[pq]);
+
+                    // float local_sum = 0.0f;
+                    // auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id, pq));
+                    // exp_reduce_sum(temp_weight.ptr<float>(id, pq), M[pq], k_cnt, local_sum);
+                    // float qk_scale = expf(Mold - M[pq]);
+                    // multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, qk_scale, SV);
+                    // sum[pq] = sum[pq] * qk_scale + local_sum;
+                    // for (size_t i = 0; i < k_cnt; i++) {
+                    //     temp_weight.at<float>({id, pq, i}) = expf(temp_weight.at<float>({id, pq, i}) - M[pq]);
+                    //     local_sum += temp_weight.at<float>({id, pq, i});
+                    //     // auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+                    //     // temp_bf16[pq * block_size + i] = temp_weight.at<float>({id, pq, i});
+                    // }
+
+                    // for (size_t i = 0; i < SV; i++) {
+                    //     buffer_O[pq * SV + i] *= qk_scale;
+                    //     // temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= qk_scale;
+                    // }
                 }
+                auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+                cvt_copy(temp_bf16 + block_size * pq, temp_weight.ptr<float>(id, pq), 1, block_size, block_size, block_size);
+                // printf("%ld\n", pq);
+                // for (size_t i = 0; i < block_size; i++) {
+                //     printf("%f ", temp_bf16[i]);
+                // }
+                // printf("\n");
             }
+            // std::vector<ov::bfloat16> bf16_output(block_size * block_size);
+            auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+            // attn_memcpy2d_kernel(temp_weight.ptr<float>(id),
+            //             temp_bf16,
+            //             ov::element::f32,
+            //             ov::element::bf16,
+            //             block_size,
+            //             block_size,
+            //             block_size,
+            //             q_cnt);
+            auto* v_ptr = wv_scratch_b.ptr<DATA_TYPE>(0, k_block_id, hk);
+            auto* w_ptr = temp_bf16;
+            if (k_block_id == 0) {
+                wv_gemm[q_cnt - 1]->executeGemm(q_cnt < block_size,
+                                                w_ptr,
+                                                v_ptr,
+                                                buffer_O,
+                                                wsp.data() + id * 4 * 1024,
+                                                wv_scratch_a ? wv_scratch_a.ptr<DATA_TYPE>(id, 0) : nullptr);
+            } else {
+                // printf("k_block_id %d hk %d w_tr %p v ptr %p buffer_O %p\n", k_block_id, hk, w_ptr, v_ptr, buffer_O);
+                wv_gemm_acc[q_cnt - 1]->executeGemm(q_cnt < block_size,
+                                                    w_ptr,
+                                                    v_ptr,
+                                                    buffer_O,
+                                                    wsp.data() + id * 4 * 1024,
+                                                    wv_scratch_a ? wv_scratch_a.ptr<DATA_TYPE>(id, 0) : nullptr);
+            }
+
+            // for (size_t pq = 0; pq < q_cnt; pq++) {
+            //     auto* q_ptr = sub_query.template ptr<int8_t>(q_start + pq, h, 0);
+            //     auto ncausal = (past_len + q_start + pq + 1);
+            //     auto real_k_end = std::min(k_end, ncausal);
+            //     auto k_cnt = real_k_end - k_start;
+            //     auto block_number =
+            //         block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[batch_in_seq] + k_block_id];
+            //     // printf("pq %d k_cnt %d ncausal %d\n", pq, k_cnt, ncausal);
+            //     if (k_start < kv_len && k_start < ncausal) {
+            //         auto* v_ptr = v_cache.ptr<uint8_t, ov::element::u8>(block_number, hk);
+            //         attn_acc_value_block_by_dim<uint8_t, ov::element::u8>(buffer_O + pq * SV,
+            //                                                               temp_weight.template ptr<float>(id, pq),
+            //                                                               v_ptr,
+            //                                                               SV,
+            //                                                               k_cnt,
+            //                                                               SV);
+            //     }
+            // }
+        }
+
+        for (size_t pq = 0; pq < q_cnt; pq++) {
+            float inv_sum = 1.0f / sum[pq];
+            multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, inv_sum, SV);
+            // for (size_t i = 0; i < SV; i++) {
+            //     buffer_O[pq * SV + i] *= inv_sum;
+            //     // temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= inv_sum;
+            // }
+        }
         // } // q
-        attn_memcpy2d_kernel(temp_output.ptr<float>(batch_in_token + q_start, h, 0),
-                                output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
-                                ov::element::f32,
-                                ov::element::bf16,
-                                temp_output.stride(0),
-                                output_emb.stride(0),
-                                SV,
-                                q_cnt);
+        attn_memcpy2d_kernel(buffer_O,
+                             output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
+                             ov::element::f32,
+                             ov::element::bf16,
+                             SV,
+                             output_emb.stride(0),
+                             SV,
+                             q_cnt);
     });
 }
 
