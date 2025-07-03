@@ -126,36 +126,11 @@ inline void exp_reduce_sum(float* a, ov::bfloat16* dst, const float max, const s
         i += (size - i);
     }
     sum = _mm512_reduce_add_ps(v_sum);
-#elif defined(HAVE_AVX2)
-    __m256 v_a;
-    auto v_max = _mm256_set1_ps(max);
-    auto v_sum = _mm256_set1_ps(0.0f);
-    while (i + vec_len_f32_avx2 <= size) {
-        v_a = _mm256_loadu_ps(a + i);
-        v_a = _mm256_sub_ps(v_a, v_max);
-        exp_ps_avx2(v_a);
-        v_sum = _mm256_add_ps(v_sum, v_a);
-        _mm256_storeu_ps(a + i, v_a);
-        i += vec_len_f32_avx2;
-    }
-
-    if (i < size) {
-        auto mask = get_mask(size - i);
-        v_a = _mm256_maskload_ps(a + i, mask);
-        v_a = _mm256_sub_ps(v_a, v_max);
-        exp_ps_avx2(v_a);
-        v_a = _mm256_blendv_ps(_mm256_setzero_ps(), v_a, _mm256_castsi256_ps(mask));
-        v_sum = _mm256_add_ps(v_a, v_sum);
-        _mm256_maskstore_ps(a + i, mask, v_a);
-
-        i += (size - i);
-    }
-    hsum(v_sum);
-    sum = _mm256_cvtss_f32(v_sum);
 #endif
     for (; i < size; i++) {
         a[i] = std::exp(a[i] - max);
         sum += a[i];
+        dst[i] = a[i];
     }
 }
 
@@ -476,7 +451,7 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
                 // for (size_t i = std::max(k_start, ncausal); i < k_end; i++) {
                 //     temp_weight.at<float>({id, pq, i - k_start}) = -INFINITY;
                 // }
-                if (k_start < kv_len) {
+                // if (k_start < kv_len) {
                     const float Mold = M[pq];
                     float block_max = -INFINITY;
                     // if (ncausal <= k_start) {
@@ -485,16 +460,24 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
                     //     std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, -INFINITY);
                     // }
                     if (ncausal <= k_start) {
-                        std::fill_n(temp_weight.ptr<float>(id, pq, 0), k_end - k_start, 0);
+                        auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+                        std::fill_n(temp_bf16 + block_size * pq, block_size, 0);
+                        // std::fill_n(temp_weight.ptr<float>(id, pq, 0), k_end - k_start, 0);
+                        // cvt_copy(temp_bf16 + block_size * pq, temp_weight.ptr<float>(id, pq), 1, block_size, block_size, block_size);
                     } else if (ncausal > k_start) {
                         auto real_k_end = std::min(k_end, ncausal); 
                         // std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, -INFINITY);
                         scale_add2_reduce_max<false, false, false, float>(temp_weight.ptr<float>(id, pq, 0), scale_a[0] * _d_scale, nullptr, nullptr, nullptr,false, real_k_end - k_start, 0.0f, block_max);
                         M[pq] = std::max(block_max, M[pq]);
                         float local_sum = 0.0f;
-                        exp_reduce_sum(temp_weight.ptr<float>(id, pq), M[pq], real_k_end - k_start, local_sum);
-                        if (ncausal < k_end)
-                            std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, 0);
+                        auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+                        exp_reduce_sum(temp_weight.ptr<float>(id, pq), temp_bf16 + block_size * pq, M[pq], real_k_end - k_start, local_sum);
+                        auto* bf16_dst = temp_bf16 + block_size * pq;
+                        if (ncausal <= k_end) {
+                            std::fill_n(temp_bf16 + block_size * pq + ncausal - k_start, block_size - (ncausal - k_start), 0);
+                        }
+                        // auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+                        // cvt_copy(temp_bf16 + block_size * pq, temp_weight.ptr<float>(id, pq), 1, block_size, block_size, block_size);
                         float qk_scale = expf(Mold - M[pq]);
                         multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, qk_scale, SV);
                         sum[pq] = sum[pq] * qk_scale + local_sum;
@@ -530,9 +513,7 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
                     //     buffer_O[pq * SV + i] *= qk_scale;
                     //     // temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= qk_scale;
                     // }
-                }
-                auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
-                cvt_copy(temp_bf16 + block_size * pq, temp_weight.ptr<float>(id, pq), 1, block_size, block_size, block_size);
+                // }
                 // printf("%ld\n", pq);
                 // for (size_t i = 0; i < block_size; i++) {
                 //     printf("%f ", temp_bf16[i]);
@@ -590,21 +571,21 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
 
         for (size_t pq = 0; pq < q_cnt; pq++) {
             float inv_sum = 1.0f / sum[pq];
-            multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, inv_sum, SV);
+            multiply_scalar(buffer_O + pq * SV, output_emb.ptr<DATA_TYPE>(batch_in_token + q_start + pq, 0, h * SV), inv_sum, SV);
             // for (size_t i = 0; i < SV; i++) {
             //     buffer_O[pq * SV + i] *= inv_sum;
             //     // temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= inv_sum;
             // }
         }
         // } // q
-        attn_memcpy2d_kernel(buffer_O,
-                             output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
-                             ov::element::f32,
-                             ov::element::bf16,
-                             SV,
-                             output_emb.stride(0),
-                             SV,
-                             q_cnt);
+        // attn_memcpy2d_kernel(buffer_O,
+        //                      output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
+        //                      ov::element::f32,
+        //                      ov::element::bf16,
+        //                      SV,
+        //                      output_emb.stride(0),
+        //                      SV,
+        //                      q_cnt);
     });
 }
 
