@@ -37,6 +37,7 @@
 #include "transpose_kernel.hpp"
 #include "utils/general_utils.h"
 #include "utils/plain_tensor.hpp"
+#include "utils/profiler.hpp"
 #if defined(OPENVINO_ARCH_X86_64)
 #    include "nodes/kernels/x64/brgemm_kernel.hpp"
 #elif defined(OPENVINO_ARCH_ARM64) && defined(HAVE_SVE)
@@ -1502,6 +1503,7 @@ struct MHA {
                          const PlainTensor& block_indices_begins,
                          const PlainTensor& alibi_slopes,
                          const PlainTensor& score_aggregation_window) {
+        auto _prof = Profile("PA::Mixed");
         auto Hk = v_cache.m_dims[1];
         constexpr bool q_is_xf16 = one_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
         auto attn_work_count = _workitems.attn_work_size();
@@ -2149,7 +2151,6 @@ struct AttentionExecutor : public PagedAttentionExecutor {
              rotation_trig_lut,
              output_emb,
              output_score);
-
         if (rotated_block_indices) {
             // Rotate kv cache currently doesn't support quantized cache.
             // for u8 it only supports compilation but throws exception in the runtime
