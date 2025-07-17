@@ -187,10 +187,10 @@ void sage_attn_quantize_q(const ov::intel_cpu::PlainTensor& q,
 
 template <typename DATA_TYPE, ov::element::Type_t KEY_PREC>
 void sage_attn_quantize_q(const ov::intel_cpu::PlainTensor& q,
-                   ov::intel_cpu::PlainTensor& quantized_q,
-                   ov::intel_cpu::PlainTensor& dst,
-                   const ov::intel_cpu::PlainTensor& past_lens,
-                   const ov::intel_cpu::PlainTensor& subsequence_begins) {
+                          ov::intel_cpu::PlainTensor& quantized_q,
+                          ov::intel_cpu::PlainTensor& dst,
+                          const ov::intel_cpu::PlainTensor& past_lens,
+                          const ov::intel_cpu::PlainTensor& subsequence_begins) {
     size_t B = q.m_dims[0];
     size_t H = q.m_dims[1];
     size_t S = q.m_dims[3];
@@ -387,33 +387,26 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
     size_t h_each_group_len = H / Hk;
     const size_t param_size = sizeof(float);
     const float _d_scale = 1 / sqrt(S - param_size);
-    // memset(temp_output.ptr<float>(), 0, B * H * SV * sizeof(float));
     temp_weight.resize<float>({parallel_get_max_threads(), block_size, block_size});
     std::vector<float> temp_O2(parallel_get_max_threads() * block_size * SV);
-    bool enable_brgemm = getenv("ENABLE_BRGEMM");
-    // for (int32_t seq_id = 0; seq_id < seq_cout; seq_id++) {
     ov::parallel_for2d_dynamic(work_items.attn_work_size(), H, [&](size_t w, size_t h) {
         const auto& item = work_items.get_attn_work_item(w);
+        const auto q_len = item.q_len;
+        const auto block_id = q_len == 1 ? 0 : item.q_block_id;
         const auto batch_in_seq = item.batch_in_seq;
         const auto batch_in_token = subsequence_begins.ptr<int32_t>()[batch_in_seq];
-        const auto q_len = item.q_len;
-        auto kv_len = static_cast<int32_t>(past_lens.ptr<int32_t>()[batch_in_seq] + q_len);
-        auto kv_block_num = static_cast<int32_t>(ov::intel_cpu::div_up(kv_len, block_size));
-        const auto past_len = past_lens.ptr<int32_t>()[batch_in_seq];
-        const auto block_id = q_len == 1 ? 0 : item.q_block_id;
-        ov::intel_cpu::PlainTensor sub_query;
-        sub_query.resize({static_cast<size_t>(q_len), H, S}, q.ptr<int8_t>(batch_in_token));
-        // compute q_block * k_block
         auto q_start = block_id * block_size;
         auto q_end = std::min(q_start + block_size, q_len);
         auto q_cnt = q_end - q_start;
+        auto kv_len = static_cast<int32_t>(past_lens.ptr<int32_t>()[batch_in_seq] + q_len);
+        auto cur_kv_len = static_cast<size_t>(past_lens.ptr<int32_t>()[batch_in_seq]) + block_id * block_size + q_cnt;
+        auto kv_block_num = static_cast<int32_t>(ov::intel_cpu::div_up(cur_kv_len, block_size));
+        const auto past_len = past_lens.ptr<int32_t>()[batch_in_seq];
+        ov::intel_cpu::PlainTensor sub_query;
+        sub_query.resize({static_cast<size_t>(q_len), H, S}, q.ptr<int8_t>(batch_in_token));
         auto id = static_cast<size_t>(parallel_get_thread_num());
-        // float* buffer_O = temp_O2.data() + id * block_size * SV;
         float* buffer_O = temp_O.ptr<float>(id);
-        memset(buffer_O, 0, block_size * SV * sizeof(float));
-        // for (size_t pq = 0; pq < q_cnt; pq++) {
-        // compute q * k
-        // auto* q_ptr = sub_query.template ptr<int8_t>(q_start, h, 0);
+        // memset(buffer_O, 0, block_size * SV * sizeof(float));
         size_t hk = h / h_each_group_len;
         float sum[32];
         float M[32];  // maximum KQ value
@@ -422,12 +415,12 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
 
         for (int32_t k_block_id = 0; k_block_id < kv_block_num; k_block_id++) {
             size_t k_start = static_cast<size_t>(k_block_id * block_size);
-            size_t k_end = std::min(static_cast<size_t>(k_start + block_size), static_cast<size_t>(kv_len));
+            size_t k_end = std::min(static_cast<size_t>(k_start + block_size), static_cast<size_t>(cur_kv_len));
             auto k_cnt = k_end - k_start;
             auto block_number =
                 block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[batch_in_seq] + k_block_id];
-            // if (k_start < kv_len) {
-            if (enable_brgemm) {
+
+            if (true) {
                 auto* k_ptr = qk_scratch_b.ptr<int8_t>(0, k_block_id, hk);
                 auto* q_ptr = sub_query.template ptr<int8_t>(q_start, h, 0);
                 std::vector<int32_t> temp_c(block_size * block_size, 0);
@@ -466,45 +459,42 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
             for (size_t pq = 0; pq < q_cnt; pq++) {
                 auto* q_ptr = sub_query.template ptr<int8_t>(q_start + pq, h, 0);
                 auto ncausal = (past_len + q_start + pq + 1);
-                // auto real_k_end = std::min(k_end, ncausal);
-                // auto k_cnt = real_k_end - k_start;
                 float* scale_a = reinterpret_cast<float*>(sub_query.ptr<int8_t>(q_start + pq, h, 0));
-                // printf("pq %d k_cnt %d ncausal %d k_start %d k_end %d\n", pq, k_cnt, ncausal, k_start, k_end);
-                // Apply casual mask
-                // for (size_t i = std::max(k_start, ncausal); i < k_end; i++) {
-                //     temp_weight.at<float>({id, pq, i - k_start}) = -INFINITY;
-                // }
-                // if (k_start < kv_len) {
-                    const float Mold = M[pq];
-                    float block_max = -INFINITY;
-                    // if (ncausal <= k_start) {
-                    //     std::fill_n(temp_weight.ptr<float>(id, pq, 0), k_end - k_start, -INFINITY);
-                    // } else if (ncausal > k_start && ncausal < k_end) {
-                    //     std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, -INFINITY);
-                    // }
-                    if (ncausal <= k_start) {
-                        auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
-                        std::fill_n(temp_bf16 + block_size * pq, block_size, 0);
-                        // std::fill_n(temp_weight.ptr<float>(id, pq, 0), k_end - k_start, 0);
-                        // cvt_copy(temp_bf16 + block_size * pq, temp_weight.ptr<float>(id, pq), 1, block_size, block_size, block_size);
-                    } else if (ncausal > k_start) {
-                        auto real_k_end = std::min(k_end, ncausal); 
-                        // std::fill_n(temp_weight.ptr<float>(id, pq, ncausal - k_start), k_end - ncausal, -INFINITY);
-                        scale_add2_reduce_max<false, false, false, float>(temp_weight.ptr<float>(id, pq, 0), scale_a[0] * _d_scale, nullptr, nullptr, nullptr,false, real_k_end - k_start, 0.0f, block_max);
-                        M[pq] = std::max(block_max, M[pq]);
-                        float local_sum = 0.0f;
-                        auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
-                        exp_reduce_sum(temp_weight.ptr<float>(id, pq), temp_bf16 + block_size * pq, M[pq], real_k_end - k_start, local_sum);
-                        auto* bf16_dst = temp_bf16 + block_size * pq;
-                        if (ncausal <= k_end) {
-                            std::fill_n(temp_bf16 + block_size * pq + ncausal - k_start, block_size - (ncausal - k_start), 0);
-                        }
-                        // auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
-                        // cvt_copy(temp_bf16 + block_size * pq, temp_weight.ptr<float>(id, pq), 1, block_size, block_size, block_size);
-                        float qk_scale = expf(Mold - M[pq]);
-                        multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, qk_scale, SV);
-                        sum[pq] = sum[pq] * qk_scale + local_sum;
+                const float Mold = M[pq];
+                float block_max = -INFINITY;
+                if (ncausal <= k_start) {
+                    auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+                    std::fill_n(temp_bf16 + block_size * pq, block_size, 0);
+                } else if (ncausal > k_start) {
+                    auto real_k_end = std::min(k_end, ncausal);
+                    scale_add2_reduce_max<false, false, false, float>(temp_weight.ptr<float>(id, pq, 0),
+                                                                      scale_a[0] * _d_scale,
+                                                                      nullptr,
+                                                                      nullptr,
+                                                                      nullptr,
+                                                                      false,
+                                                                      real_k_end - k_start,
+                                                                      0.0f,
+                                                                      block_max);
+                    M[pq] = std::max(block_max, M[pq]);
+                    float local_sum = 0.0f;
+                    auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
+                    exp_reduce_sum(temp_weight.ptr<float>(id, pq),
+                                   temp_bf16 + block_size * pq,
+                                   M[pq],
+                                   real_k_end - k_start,
+                                   local_sum);
+                    auto* bf16_dst = temp_bf16 + block_size * pq;
+                    if (ncausal <= k_end) {
+                        std::fill_n(temp_bf16 + block_size * pq + ncausal - k_start,
+                                    block_size - (ncausal - k_start),
+                                    0);
                     }
+
+                    float qk_scale = expf(Mold - M[pq]);
+                    multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, qk_scale, SV);
+                    sum[pq] = sum[pq] * qk_scale + local_sum;
+                }
             }
             auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
             auto* v_ptr = wv_scratch_b.ptr<DATA_TYPE>(0, k_block_id, hk);
@@ -528,7 +518,10 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
 
         for (size_t pq = 0; pq < q_cnt; pq++) {
             float inv_sum = 1.0f / sum[pq];
-            multiply_scalar(buffer_O + pq * SV, output_emb.ptr<DATA_TYPE>(batch_in_token + q_start + pq, 0, h * SV), inv_sum, SV);
+            multiply_scalar(buffer_O + pq * SV,
+                            output_emb.ptr<DATA_TYPE>(batch_in_token + q_start + pq, 0, h * SV),
+                            inv_sum,
+                            SV);
         }
     });
 }

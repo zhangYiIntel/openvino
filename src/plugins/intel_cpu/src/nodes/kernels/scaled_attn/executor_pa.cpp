@@ -1805,7 +1805,7 @@ struct MHA {
         auto nthr = static_cast<size_t>(parallel_get_max_threads());
 
         if (_helper._params.is_sage_attn) {
-            if (getenv("ENABLE_SAGE_RETURN") && _helper._quantized_q.m_dims[0] > 1) {
+            if (_helper._quantized_q.m_dims[0] > 1) {
                 _helper.init_reorder_buffers(_workitems.get_reorder_max_batch_size(),
                                             div_up(_workitems.get_reorder_max_kv_len(), _helper._block_size));
                 auto reorder_work_count = _workitems.reorder_work_size();
@@ -1837,6 +1837,9 @@ struct MHA {
                         _helper._params.value_group_size,
                         _helper._params.quant_value_bychannel);
                 });
+                {
+                    _helper.resize_temporary_weight_buffer(_helper.H);
+                auto _prof = Profile("PA::Sage");
                 sage_attn<DATA_TYPE, KEY_PREC, VALUE_PREC>(_helper._quantized_q,
                                                                present_key,
                                                                present_value,
@@ -1856,9 +1859,10 @@ struct MHA {
                                                                _helper._wv_scratch_a,
                                                                _helper._wv_scratch_b,
                                                                _helper._wsp,
-                                                               _helper._weight_bhl,
+                                                               _helper._weight,
                                                                _helper._output_bhl,
                                                                _helper._temp_O);
+                }
                 return;
             }
         }
