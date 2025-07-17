@@ -505,54 +505,8 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
                         multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, qk_scale, SV);
                         sum[pq] = sum[pq] * qk_scale + local_sum;
                     }
-                    // for (size_t i = k_start; i < k_end; i++) {
-                    //     temp_weight.at<float>({id, pq, i - k_start}) *= scale_a[0] * _d_scale;
-                    //     block_max = std::max(block_max, temp_weight.at<float>({id, pq, i - k_start}));
-
-                    // }
-                    // printf("ncausal %ld k_start %ld k_end %ld\n", ncausal, k_start, k_end);
-                    // cvt_copy(temp_bf16, temp_weight.ptr<float>(id, pq), 1, k_cnt, 0, 0);
-                    // for (size_t i = k_start; i < k_end; i++) {
-                    //     if (i >= ncausal)
-                    //         temp_weight.at<float>({id, pq, i - k_start}) = -INFINITY;
-                    // }
-                    // scale_add2_reduce_max<false, false, false, float>(temp_weight.ptr<float>(id, pq, 0), scale_a[0] * _d_scale, nullptr, nullptr, nullptr,false, k_cnt, 0.0f, block_max);
-                    // M[pq] = std::max(block_max, M[pq]);
-
-                    // float local_sum = 0.0f;
-                    // auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id, pq));
-                    // exp_reduce_sum(temp_weight.ptr<float>(id, pq), M[pq], k_cnt, local_sum);
-                    // float qk_scale = expf(Mold - M[pq]);
-                    // multiply_scalar(buffer_O + pq * SV, buffer_O + pq * SV, qk_scale, SV);
-                    // sum[pq] = sum[pq] * qk_scale + local_sum;
-                    // for (size_t i = 0; i < k_cnt; i++) {
-                    //     temp_weight.at<float>({id, pq, i}) = expf(temp_weight.at<float>({id, pq, i}) - M[pq]);
-                    //     local_sum += temp_weight.at<float>({id, pq, i});
-                    //     // auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
-                    //     // temp_bf16[pq * block_size + i] = temp_weight.at<float>({id, pq, i});
-                    // }
-
-                    // for (size_t i = 0; i < SV; i++) {
-                    //     buffer_O[pq * SV + i] *= qk_scale;
-                    //     // temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= qk_scale;
-                    // }
-                // }
-                // printf("%ld\n", pq);
-                // for (size_t i = 0; i < block_size; i++) {
-                //     printf("%f ", temp_bf16[i]);
-                // }
-                // printf("\n");
             }
-            // std::vector<ov::bfloat16> bf16_output(block_size * block_size);
             auto* temp_bf16 = reinterpret_cast<ov::bfloat16*>(temp_weight.ptr<float>(id));
-            // attn_memcpy2d_kernel(temp_weight.ptr<float>(id),
-            //             temp_bf16,
-            //             ov::element::f32,
-            //             ov::element::bf16,
-            //             block_size,
-            //             block_size,
-            //             block_size,
-            //             q_cnt);
             auto* v_ptr = wv_scratch_b.ptr<DATA_TYPE>(0, k_block_id, hk);
             auto* w_ptr = temp_bf16;
             if (k_block_id == 0) {
@@ -563,7 +517,6 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
                                                 wsp.data() + id * 4 * 1024,
                                                 wv_scratch_a ? wv_scratch_a.ptr<DATA_TYPE>(id, 0) : nullptr);
             } else {
-                // printf("k_block_id %d hk %d w_tr %p v ptr %p buffer_O %p\n", k_block_id, hk, w_ptr, v_ptr, buffer_O);
                 wv_gemm_acc[q_cnt - 1]->executeGemm(q_cnt < block_size,
                                                     w_ptr,
                                                     v_ptr,
@@ -571,44 +524,12 @@ void sage_attn(const ov::intel_cpu::PlainTensor& q,
                                                     wsp.data() + id * 4 * 1024,
                                                     wv_scratch_a ? wv_scratch_a.ptr<DATA_TYPE>(id, 0) : nullptr);
             }
-
-            // for (size_t pq = 0; pq < q_cnt; pq++) {
-            //     auto* q_ptr = sub_query.template ptr<int8_t>(q_start + pq, h, 0);
-            //     auto ncausal = (past_len + q_start + pq + 1);
-            //     auto real_k_end = std::min(k_end, ncausal);
-            //     auto k_cnt = real_k_end - k_start;
-            //     auto block_number =
-            //         block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[batch_in_seq] + k_block_id];
-            //     // printf("pq %d k_cnt %d ncausal %d\n", pq, k_cnt, ncausal);
-            //     if (k_start < kv_len && k_start < ncausal) {
-            //         auto* v_ptr = v_cache.ptr<uint8_t, ov::element::u8>(block_number, hk);
-            //         attn_acc_value_block_by_dim<uint8_t, ov::element::u8>(buffer_O + pq * SV,
-            //                                                               temp_weight.template ptr<float>(id, pq),
-            //                                                               v_ptr,
-            //                                                               SV,
-            //                                                               k_cnt,
-            //                                                               SV);
-            //     }
-            // }
         }
 
         for (size_t pq = 0; pq < q_cnt; pq++) {
             float inv_sum = 1.0f / sum[pq];
             multiply_scalar(buffer_O + pq * SV, output_emb.ptr<DATA_TYPE>(batch_in_token + q_start + pq, 0, h * SV), inv_sum, SV);
-            // for (size_t i = 0; i < SV; i++) {
-            //     buffer_O[pq * SV + i] *= inv_sum;
-            //     // temp_output.at<float>({batch_in_token + q_start + pq, h, i}) *= inv_sum;
-            // }
         }
-        // } // q
-        // attn_memcpy2d_kernel(buffer_O,
-        //                      output_emb.ptr<DATA_TYPE>(batch_in_token + q_start, 0, h * SV),
-        //                      ov::element::f32,
-        //                      ov::element::bf16,
-        //                      SV,
-        //                      output_emb.stride(0),
-        //                      SV,
-        //                      q_cnt);
     });
 }
 
