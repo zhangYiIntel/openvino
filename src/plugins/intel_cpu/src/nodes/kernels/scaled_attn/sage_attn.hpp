@@ -44,13 +44,13 @@ inline void sage_attn_transpose_k(const ReorderWorkItem& item,
     for (size_t i = valid_len; i < block_size; i++) {
         memset(key_cache.ptr<int8_t, ov::element::i8>(block_number, hk, i), 0, sizeof(int8_t) * key_cache.m_dims[3]);
     }
-    auto* repacked = qk_scratch_b.ptr<int8_t>(batch_in_reorder, kv_block, hk);
+    auto* repacked = qk_scratch_b.ptr<int8_t>(batch_in_reorder, hk, kv_block);
     brgemm_ptr->copy_buffer_b(k_ptr, repacked);
     // layout of repacked_data
     // block_size * S int8(quantized key)
     // block_size * scales (FP32)
     // copy b_scale to dst tensor
-    float* scales = reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(batch_in_reorder, kv_block, hk, block_size * S));
+    float* scales = reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(batch_in_reorder, hk, kv_block, block_size * S));
     for (size_t i = 0; i < valid_len; i++) {
         scales[i] = reinterpret_cast<float*>(key_cache.ptr<int8_t, ov::element::i8>(block_number, hk, i, 0))[0];
     }

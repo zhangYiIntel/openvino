@@ -760,7 +760,7 @@ struct MHAHelper {
         // append the scale after the tokens
         if (_params.is_sage_attn) {
             size_t padded_S = std::max((S + sizeof(float) / sizeof(int8_t)), rnd_up(S, 64));
-            _qk_scratch_b.resize<int8_t>({batch, kv_len_in_blocks, Hk, _block_size * padded_S});
+            _qk_scratch_b.resize<int8_t>({batch, Hk, kv_len_in_blocks, _block_size * padded_S});
         } else {
             _qk_scratch_b.resize<DATA_TYPE>({batch, kv_len_in_blocks, Hk, _block_size * S});
         }
@@ -855,10 +855,14 @@ struct MHAHelper {
                 if (_params.is_sage_attn) {
 #    if defined(OPENVINO_ARCH_X86_64)
                     auto* q_ptr = _quantized_q.ptr<int8_t>(ithr);
-                    auto* k_ptr = qk_scratch_b.ptr<int8_t>(k_blk, hk);
+                    auto* k_ptr = qk_scratch_b.ptr<int8_t>(hk, k_blk);
                     int32_t* temp_C = reinterpret_cast<int32_t*>(_output.ptr<float>(ithr, 0, 0, 0));
-                    float* scale_b = reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(k_blk, hk, _block_size * S));
+                    float* scale_b = reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(hk, k_blk, _block_size * S));
                     float* dst_f32 = c_ptr + k_blk * _block_size;
+                    // const size_t ptr_distance = 32;
+                    // if (k_blk & (ptr_distance - 1) == 0 && ((k_blk + ptr_distance) < cur_kv_len_blocks)) {
+                    //     _mm_prefetch(k_ptr + _block_size * S * ptr_distance, _MM_HINT_T0);
+                    // }
                     _qk_gemm[q_cnt - 1]->executeGemmWithScale(
                         q_cnt < _block_size,
                         q_ptr + sizeof(float),
