@@ -859,7 +859,8 @@ struct MHAHelper {
                     int32_t* temp_C = reinterpret_cast<int32_t*>(_output.ptr<float>(ithr, 0, 0, 0));
                     float* scale_b = reinterpret_cast<float*>(qk_scratch_b.ptr<int8_t>(hk, k_blk, _block_size * S));
                     float* dst_f32 = c_ptr + k_blk * _block_size;
-                    // const size_t ptr_distance = 32;
+                    const size_t ptr_distance = 32;
+                    // ptr_distance in blocks
                     // if (k_blk & (ptr_distance - 1) == 0 && ((k_blk + ptr_distance) < cur_kv_len_blocks)) {
                     //     _mm_prefetch(k_ptr + _block_size * S * ptr_distance, _MM_HINT_T0);
                     // }

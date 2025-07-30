@@ -295,6 +295,20 @@ void BrgemmKernel::init_brgemm(brgemmCtx& ctx,
         THROW_ERROR("cannot be executed due to invalid brgemm params");
     }
 
+    if (use_amx && !b_accumulate) {
+        brgemm_attr_t brgattr;
+        brgattr.max_bs = 1;
+        brgattr.wary_tail_read = false;
+        brgattr.hint_innermost_loop = brgemm_innermost_undef;
+        brgattr.use_interleave_stores = true;
+        brgattr.hint_prefetching = brgemm_kernel_prefetching_t::brgemm_prf1;
+        brgattr.hint_expected_A_size = ctx.M * ctx.K * 1;
+        brgattr.hint_expected_B_size = ctx.N * ctx.K * 1;
+        brgattr.hint_expected_C_size = ctx.N * ctx.K * 1;
+        if (brgemm_desc_set_attr(&brgDesc, brgattr) != dnnl_success) {
+            THROW_ERROR("cannot be executed due to brgemm_desc_set_attr failed");
+        }
+    }
     if (use_amx && b_accumulate) {
         brgemm_attr_t brgattr;
         brgattr.max_bs = 1;
