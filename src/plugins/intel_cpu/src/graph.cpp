@@ -76,6 +76,7 @@
 #include "utils/node_dumper.h"
 #include "utils/verbose.h"
 #include "weights_cache.hpp"
+#include "utils/profiler.hpp"
 
 #if (OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO || OV_THREAD == OV_THREAD_TBB_ADAPTIVE || \
      OV_THREAD == OV_THREAD_OMP)
@@ -1629,12 +1630,17 @@ inline void Graph::ExecuteNodeWithCatch(const NodePtr& node, SyncInferRequest* r
 template <typename UpdateStrategy>
 void Graph::InferDynamic(SyncInferRequest* request, int numaId, UpdateStrategy&& update) {
     size_t inferCounter = 0;
+    auto _prof0 = Profile("Graph" + std::to_string(graph_id) + "::InferDynamic_#" + std::to_string(infer_count));
     for (auto stopIndx : m_executableSyncNodesInds) {
         std::forward<UpdateStrategy>(update)(stopIndx);
 
         for (; inferCounter < stopIndx; ++inferCounter) {
             auto& node = m_executableGraphNodes[inferCounter];
-
+            auto _prof = Profile(node->getTypeStr());
+            if (_prof) {
+                _prof->args["Name"] = node->getName();
+                _prof->args["Impl"] = node->getPrimitiveDescriptorType();
+            }
             ExecuteNodeWithCatch(node, request, numaId);
         }
     }
@@ -1673,9 +1679,7 @@ void Graph::Infer(SyncInferRequest* request) {
                         static_cast<int>(status));
     }
 
-    if (infer_count != -1) {
-        infer_count++;
-    }
+    infer_count++;
 }
 
 void Graph::SortTopologically() {
