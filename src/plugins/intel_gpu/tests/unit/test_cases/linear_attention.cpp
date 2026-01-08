@@ -94,8 +94,8 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
                        const std::vector<T>& v,
                        const std::vector<T>& g,
                        const std::vector<T>& beta,
-                       const std::vector<T>& state,
                        const float attn_scale,
+                       std::vector<T>& state,
                        std::vector<T>& output) {
         for (size_t i_b = 0; i_b < this->B; i_b++) {
             for (size_t i_h = 0; i_h < this->H; i_h++) {
@@ -155,11 +155,10 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
                         output[i_b * this->T * this->H * this->V + i * this->H * this->V + i_h * this->V + i_v] = b_output;
                         // printf("i_b %zd i %zd i_h %zd iv %zd b_output %f\n", i_b, i, i_h, i_v, b_output);
                     }
-                    
-                    // for (size_t j = 0; j < this->V; j++) {
-                    //     output_state[i_b * this->T * this->H * this->V + i_h * this->H * this->V + j * this->K + i_v] = init_state[j];
-                    //     b * K_HEAD_NUMS * SEQ_LEN * K_HEAD_DIMS + h * SEQ_LEN * K_HEAD_DIMS + i * K_HEAD_DIMS + i_v
-                    // }
+                    // B, H, V, K
+                    for (size_t j = 0; j < this->K; j++) {
+                        state[i_b * this->H * this->V * this->K + i_h * this->V * this->K + i_v * this->K + j] = init_state[j];
+                    }
                 }
             }
         }
@@ -176,10 +175,9 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
 
         auto linear_attn_prim =
             linear_attention("linear_attention", {input_info("q"), input_info("k"), input_info("v"), input_info("g"), input_info("beta"), input_info("state")});
-        linear_attn_prim.num_outputs = 2;
         topo.add(linear_attn_prim);
         topo.add(reorder("output", input_info("linear_attention", 0), format::bfyx, data_types::f16));
-        topo.add(reorder("states", input_info("linear_attention", 1), format::bfyx, data_types::f16));
+        // topo.add(reorder("states", input_info("linear_attention", 1), format::bfyx, data_types::f16));
         return topo;
     }
 
@@ -270,24 +268,21 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
                                         q_mem, k_mem, v_mem, g_mem, beta_mem, state_mem,
                                         is_caching_test);
         std::vector<ov::float16> ref_output(batch*t*num_heads*head_size);
-        run_reference<ov::float16>(input_q, input_k, input_v, input_g, input_beta, input_state, 1/sqrt(this->K), ref_output);
+        run_reference<ov::float16>(input_q, input_k, input_v, input_g, input_beta, 1/sqrt(this->K), input_state, ref_output);
         // validate results
-        // cldnn::mem_lock<ov::float16, mem_lock_type::read> ref_data(mem_ref_ptr, get_test_stream());
-        cldnn::mem_lock<ov::float16, mem_lock_type::read> opt_data(mem_opt_ptr, get_test_stream());
-        // std::cout << "ref data ";
-        // for (const auto& data : ref_output) {
-        //     std::cout << data << " ";
-        // }
-        // std::cout << "\n";
-        // std::cout << "opt data ";
-        // for (const auto& data : opt_data) {
-        //     std::cout << data << " ";
-        // }
-        // std::cout << "\n";
         if (mem_opt_ptr) {
+            cldnn::mem_lock<ov::float16, mem_lock_type::read> opt_data(mem_opt_ptr, get_test_stream());
             ASSERT_EQ(mem_opt_ptr->count(), ref_output.size());
             for (size_t i = 0; i < mem_opt_ptr->count(); i++) {
                 ASSERT_NEAR(opt_data[i], ref_output[i], 0.01) << " at index=" << i;
+            }
+        }
+
+        if (state_mem) {
+            ASSERT_EQ(state_mem->count(), input_state.size());
+            cldnn::mem_lock<ov::float16, mem_lock_type::read> state_data(state_mem, get_test_stream());
+            for (size_t i = 0; i < mem_opt_ptr->count(); i++) {
+                ASSERT_NEAR(state_data[i], input_state[i], 0.01) << " at index=" << i;
             }
         }
         // {

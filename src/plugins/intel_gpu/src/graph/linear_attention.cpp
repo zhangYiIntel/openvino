@@ -24,9 +24,8 @@ std::vector<layout> linear_attention_inst::calc_output_layouts(linear_attention_
         OPENVINO_THROW("linear_attention's must have 6 inputs");
     // query, key, value, g, beta, initial_states
     auto value_layout = impl_param.get_input_layout(2);
-    auto states_layout = impl_param.get_input_layout(5);
     auto output_layout = layout{value_layout.get_partial_shape(), value_layout.data_type, value_layout.format};
-    return {output_layout, states_layout};
+    return {output_layout};
 }
 
 template std::vector<layout> linear_attention_inst::calc_output_layouts<ov::PartialShape>(linear_attention_node const& node, const kernel_impl_params& impl_param);

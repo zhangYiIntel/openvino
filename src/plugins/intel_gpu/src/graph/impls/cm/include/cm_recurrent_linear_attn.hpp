@@ -84,8 +84,7 @@ void recurrent_linear_attn(int b_idx,
                            SurfaceIndex g [[type("buffer_t")]],
                            SurfaceIndex beta [[type("buffer_t")]],
                            SurfaceIndex initial_state [[type("buffer_t")]],
-                           SurfaceIndex output [[type("buffer_t")]],
-                           SurfaceIndex output_state [[type("buffer_t")]]
+                           SurfaceIndex output [[type("buffer_t")]]
                         ) {
     constexpr int v_head_dim_per_t = v_head_dims / 8;  // 16
     vector<float, v_head_dim_per_t * k_head_dims> h0;
@@ -210,7 +209,7 @@ void recurrent_linear_attn(int b_idx,
         int v_head_dim_idx = head_dim_t_idx * v_head_dim_per_t + i;
         int stride = b_idx * k_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims +
                      v_head_dim_idx * k_head_dims;
-        cm_store_by_row<IN_OUT_DTYPE, float, k_head_dims>(output_state,
+        cm_store_by_row<IN_OUT_DTYPE, float, k_head_dims>(initial_state,
                                                           h0.select<k_head_dims, 1>(k_head_dims * i),
                                                           stride * sizeof(IN_OUT_DTYPE));
         // if constexpr (k_head_dims == 128) {
