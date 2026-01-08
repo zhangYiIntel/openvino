@@ -23,7 +23,7 @@ constexpr auto get_linear_attention_build_options() {
 
 class LinearAttentionGenerator : public KernelGenerator {
 public:
-    LinearAttentionGenerator() : KernelGenerator("recurrent_gated_delta_rule") {}
+    LinearAttentionGenerator() : KernelGenerator("cm_linear_attn") {}
 
 protected:
     [[nodiscard]] std::string get_build_options(const RuntimeParams& params) const override {
@@ -40,8 +40,8 @@ protected:
 
         const size_t k_head_size = key_shape[query_shape.size() - 1].get_length();
         const size_t v_head_size = value_shape[query_shape.size() - 1].get_length();
-        const size_t num_k_heads = query_shape[query_shape.size() - 3].get_length();
-        const size_t num_v_heads = value_shape[key_shape.size() - 3].get_length();
+        const size_t num_k_heads = query_shape[query_shape.size() - 2].get_length();
+        const size_t num_v_heads = value_shape[key_shape.size() - 2].get_length();
         const float scale_factor = 1.0 / std::sqrt(static_cast<double>(k_head_size));
 
         GPU_DEBUG_TRACE_DETAIL << "LinearAttention query_shape " << query_shape << ", key_shape " << key_shape << ", k_head_size="
@@ -52,8 +52,9 @@ protected:
             make_jit_constant("K_HEAD_NUMS", num_k_heads),
             make_jit_constant("V_HEAD_NUMS", num_v_heads),
             make_jit_constant("K_HEAD_DIMS", k_head_size),
-            make_jit_constant("V_HEAD_DIMS", num_v_heads),
+            make_jit_constant("V_HEAD_DIMS", v_head_size),
             make_jit_constant("SCALE_FACTOR", scale_factor),
+            make_jit_constant("IO_TYPE", 0),
         });
 
         return jit;
@@ -62,14 +63,14 @@ protected:
     [[nodiscard]] Arguments get_arguments_desc(const RuntimeParams& params) const override {
         Arguments args;
 
-        for (uint32_t i = 0; i < params.input_layouts.size() - 1; i++) {  // inputs: q, k, v
+        for (uint32_t i = 0; i < params.input_layouts.size(); i++) {  // inputs: q, k, v
             args.push_back({ArgumentDescriptor::Types::INPUT, i});
         }
 
         for (uint32_t i = 0; i < params.output_layouts.size(); i++) {
             args.push_back({ArgumentDescriptor::Types::OUTPUT, i});
         }
-
+        args.push_back({ArgumentDescriptor::Types::SCALAR, 0});
         return args;
     }
 
@@ -80,11 +81,20 @@ protected:
             const auto query_shape = params.get_input_layout(0).get_shape();
             // B, T, H, K
             const size_t batch = query_shape[0];
+            const size_t seq = query_shape[1];
             const size_t head_nums = query_shape[2];
 
             auto& wgs = kd.params.workGroups;
-            wgs.global = {batch, head_nums, 1};
+            wgs.global = {batch, head_nums, 8};
             wgs.local = {1, 1, 8};
+            std::vector<int32_t> scalars{static_cast<int32_t>(seq)};
+            kd.params.scalars.clear();
+            for (auto i : scalars) {
+                scalar_desc desc;
+                desc.t = scalar_desc::Types::INT32;
+                desc.v.s32 = static_cast<int32_t>(i);
+                kd.params.scalars.push_back(desc);
+            }
         }};
     }
 };

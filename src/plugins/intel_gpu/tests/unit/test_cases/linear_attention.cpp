@@ -33,34 +33,137 @@ struct linear_attention_test_params {
 
 struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attention_test_params> {
     tests::random_generator rg;
+    size_t B = 0;
+    size_t T = 0;
+    size_t H = 0;
+    size_t K = 0;
+    size_t V = 0;
 
     void SetUp() override {
         rg.set_seed(GET_SUITE_NAME);
+        const auto& params = this->GetParam();
+        B = params.batch;
+        T = params.t;
+        H = params.num_heads;
+        K = params.head_size;
+        V = params.head_size;
+        printf(" B %zd T %zd H %zd K %zd V %zd\n", B, T, H, K, V);
     }
 
-    void load_input(cldnn::memory::ptr mem, size_t idx) {
-        auto shapes = mem->get_layout().get_shape();
-        size_t size = ov::shape_size(shapes);
-        auto input_data = rg.generate_random_1d<ov::float16>(size, -1.0f, 1.0f);
+    template<typename T>
+    void load_input(cldnn::memory::ptr mem, size_t idx, std::vector<T>& input_data) {
         set_values(mem, input_data);
     }
 
-    // topology create_ref_topology(layout q_layout, layout k_layout, layout v_layout, layout attn_mask_layout) {
-    //     topology topo;
-    //     topo.add(input_layout("q", q_layout));
-    //     topo.add(input_layout("k", k_layout));
-    //     topo.add(input_layout("v", v_layout));
-    //     topo.add(input_layout("attn", attn_mask_layout));  // "attention_mask"
+    float dot_product(float* a, float* b, size_t n) {
+        float result = 0.0f;
+        for (size_t i = 0; i < n; i++) {
+            result += a[i] * b[i];
+        }
+        return result;
+    }
 
-    //     auto sdpa_prim = scaled_dot_product_attention("sdpa", {input_info("q"), input_info("k"), input_info("v"), input_info("attn")},
-    //         false, -1, order_q, order_k, order_v, {0, 1, 2}, {}, false);
-    //     topo.add(sdpa_prim);
+    void scale(float *a, float scale, size_t n) {
+        for (size_t i = 0; i < n; i++) {
+            a[i] = a[i] * scale;
+        }
+    }
 
-    //     topo.add(permute("permute_o", input_info("sdpa"), order_o2));
+    void add(float *a, float* b, size_t n) {
+        for (size_t i = 0; i < n; i++) {
+            a[i] += b[i];
+        }
+    }
 
-    //     topo.add(reorder("result",input_info("permute_o"), format::bfyx, data_types::f16));
-    //     return topo;
-    // };
+    void l2norm(float* a, size_t n) {
+        float eps = 0.000001;
+        float sum = 0.0f;
+        for (int j = 0; j < n; j++) {
+            sum += a[j] * a[j];
+        }
+        sum += eps;
+        sum = 1 / sqrt(sum);
+        for (int j = 0; j < n; j++) {
+            a[j] = a[j] * sum;
+        }
+    }
+
+    template <typename T>
+    void run_reference(const std::vector<T>& q,
+                       const std::vector<T>& k,
+                       const std::vector<T>& v,
+                       const std::vector<T>& g,
+                       const std::vector<T>& beta,
+                       const std::vector<T>& state,
+                       const float attn_scale,
+                       std::vector<T>& output) {
+        for (size_t i_b = 0; i_b < this->B; i_b++) {
+            for (size_t i_h = 0; i_h < this->H; i_h++) {
+                for (size_t i_v = 0; i_v < this->V; i_v++) {
+                    float init_state[128] = {0};
+                    float b_k[128] = {0};
+                    float b_q[128] = {0};
+                    // B, T, H, K
+                    size_t BATCH_STRIDE = this->B * this->K * this->T;
+                    size_t HEAD_STRIDE = this->K;
+                    const T* q_ptr = q.data() + i_b * BATCH_STRIDE + i_h * HEAD_STRIDE;
+                    const T* k_ptr = k.data() + i_b * BATCH_STRIDE + i_h * HEAD_STRIDE;
+                    const T* v_ptr = v.data() + i_b * BATCH_STRIDE + i_h * HEAD_STRIDE;
+                    // B, H, V, K
+                    for (size_t j = 0; j < this->K; j++) {
+                        init_state[j] = state[i_b * this->H * this->V * this->K + i_h * this->V * this->K + i_v * this->K + j];
+                    }
+                    for (size_t i = 0; i < this->T; i++) {
+                        // g: B, T, H
+                        size_t G_B_STRIDE = this->T * this->H;
+                        float b_g = g[i_b * G_B_STRIDE + i * this->H + i_h];
+                        float b_beta = beta[i_b * G_B_STRIDE + i * this->H + i_h];
+                        b_g = exp(b_g);
+                        // TODO SCALE
+                        for (int j = 0; j < this->K; j++) {
+                            b_k[j] = k_ptr[i * this->K * this->H + j];
+                            b_q[j] = q_ptr[i * this->K * this->H + j];
+                        }
+                        
+                        l2norm(b_k, this->K);
+                        l2norm(b_q, this->K);
+
+                        scale(b_q, attn_scale, this->K);
+                        // std::cout << "b_q ";
+                        // for (size_t nn = 0; nn < this->K; nn++) {
+                        //     std::cout << " " << b_q[nn];
+                        // }
+                        // std::cout << "b_q" << std::endl;
+
+                        // h0 * g
+                        scale(init_state, b_g, this->K);
+                        float h_k = dot_product(init_state, b_k, this->K);
+                        float b_v = v_ptr[i_v + i * this->V * this->H];
+                        b_v -= h_k;
+                        // b_v * b_k
+                        b_v *= b_beta;
+                        scale(b_k, b_v, this->K);
+                        // h = h0 + update
+                        add(init_state, b_k, this->K);
+                        float b_output  = dot_product(init_state, b_q, this->K);
+                        // std::cout << "init_state ";
+                        // for (size_t nn = 0; nn < this->K; nn++) {
+                        //     std::cout << " " << init_state[nn];
+                        // }
+                        // std::cout << "init_state" << std::endl;
+                        // B, T, H, V
+                        output[i_b * this->T * this->H * this->V + i * this->H * this->V + i_h * this->V + i_v] = b_output;
+                        // printf("i_b %zd i %zd i_h %zd iv %zd b_output %f\n", i_b, i, i_h, i_v, b_output);
+                    }
+                    
+                    // for (size_t j = 0; j < this->V; j++) {
+                    //     output_state[i_b * this->T * this->H * this->V + i_h * this->H * this->V + j * this->K + i_v] = init_state[j];
+                    //     b * K_HEAD_NUMS * SEQ_LEN * K_HEAD_DIMS + h * SEQ_LEN * K_HEAD_DIMS + i * K_HEAD_DIMS + i_v
+                    // }
+                }
+            }
+        }
+    }
 
     topology create_topology(layout q_layout, layout k_layout, layout v_layout, layout g_layout, layout beta_layout, layout state_layout) {
         topology topo;
@@ -72,9 +175,11 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         topo.add(input_layout("state", state_layout));
 
         auto linear_attn_prim =
-            linear_attention("vlsdpa", {input_info("q"), input_info("k"), input_info("v"), input_info("g"), input_info("beta"), input_info("state")});
-
+            linear_attention("linear_attention", {input_info("q"), input_info("k"), input_info("v"), input_info("g"), input_info("beta"), input_info("state")});
+        linear_attn_prim.num_outputs = 2;
         topo.add(linear_attn_prim);
+        topo.add(reorder("output", input_info("linear_attention", 0), format::bfyx, data_types::f16));
+        topo.add(reorder("states", input_info("linear_attention", 1), format::bfyx, data_types::f16));
         return topo;
     }
 
@@ -101,12 +206,13 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         net->set_input_data("state", state_mem);
 
         auto outputs = net->execute();
-        auto output = outputs.at("result").get_memory();
+        std::cout << "Run exec LinearAttn " << outputs.size() << std::endl;
+        auto output = outputs.at("output").get_memory();
         return {output, net};
     }
 
     void execute(linear_attention_test_params& p, const bool is_caching_test = false) {
-        const auto batch = p.head_size;
+        const auto batch = p.batch;
         const auto t = p.t;
         const auto num_heads = p.num_heads;
         const auto head_size = p.head_size;
@@ -119,7 +225,7 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         cldnn::layout v_dyn_layout({-1, -1, num_heads, head_size}, data_types::f16, format::bfyx);
         cldnn::layout g_dyn_layout({-1, -1, num_heads}, data_types::f16, format::bfyx);
         cldnn::layout beta_dyn_layout({-1, -1, num_heads}, data_types::f16, format::bfyx);
-        cldnn::layout state_dyn_layout({-1, -1, head_size, head_size}, data_types::f16, format::bfyx);
+        cldnn::layout state_dyn_layout({-1, num_heads, head_size, head_size}, data_types::f16, format::bfyx);
 
         topology opt_topo = create_topology(q_dyn_layout, k_dyn_layout, v_dyn_layout, g_dyn_layout, g_dyn_layout, state_dyn_layout);
 
@@ -129,7 +235,7 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         cldnn::layout v_static_layout({batch, t, num_heads, head_size}, data_types::f16, format::bfyx);
         cldnn::layout g_static_layout({batch, t, num_heads}, data_types::f16, format::bfyx);
         cldnn::layout beta_static_layout({batch, t, num_heads}, data_types::f16, format::bfyx);
-        cldnn::layout state_static_layout({batch, t, head_size, head_size}, data_types::f16, format::bfyx);
+        cldnn::layout state_static_layout({batch, num_heads, head_size, head_size}, data_types::f16, format::bfyx);
 
         auto q_mem = engine.allocate_memory(q_static_layout);
         auto k_mem = engine.allocate_memory(k_static_layout);
@@ -138,21 +244,52 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         auto beta_mem = engine.allocate_memory(beta_static_layout);
         auto state_mem = engine.allocate_memory(state_static_layout);
 
-        load_input(q_mem, 0);
-        load_input(k_mem, 1);
-        load_input(v_mem, 2);
-        load_input(g_mem, 3);
-        load_input(beta_mem, 4);
-        load_input(state_mem, 5);
+        auto input_q = rg.generate_random_1d<ov::float16>(ov::shape_size(q_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_k = rg.generate_random_1d<ov::float16>(ov::shape_size(k_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_v = rg.generate_random_1d<ov::float16>(ov::shape_size(v_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_g = rg.generate_random_1d<ov::float16>(ov::shape_size(g_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_beta = rg.generate_random_1d<ov::float16>(ov::shape_size(beta_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_state = rg.generate_random_1d<ov::float16>(ov::shape_size(state_mem->get_layout().get_shape()), -1.0f, 1.0f);
 
+
+        // auto input_q = std::vector<ov::float16>(ov::shape_size(q_mem->get_layout().get_shape()), 1.0f);
+        // auto input_k = std::vector<ov::float16>(ov::shape_size(k_mem->get_layout().get_shape()), 1.0f);
+        // auto input_v = std::vector<ov::float16>(ov::shape_size(v_mem->get_layout().get_shape()), 1.0f);
+        // auto input_g = std::vector<ov::float16>(ov::shape_size(g_mem->get_layout().get_shape()), 0.0f);
+        // auto input_beta = std::vector<ov::float16>(ov::shape_size(beta_mem->get_layout().get_shape()), 1.0f);
+        // auto input_state = std::vector<ov::float16>(ov::shape_size(state_mem->get_layout().get_shape()), 0.0f);
+
+        load_input(q_mem, 0, input_q);
+        load_input(k_mem, 1, input_k);
+        load_input(v_mem, 2, input_v);
+        load_input(g_mem, 3, input_g);
+        load_input(beta_mem, 4, input_beta);
+        load_input(state_mem, 5, input_state);
         // execute networks
         auto [mem_opt_ptr, net_opt_ptr] = run_network(opt_topo,
                                         q_mem, k_mem, v_mem, g_mem, beta_mem, state_mem,
                                         is_caching_test);
-
+        std::vector<ov::float16> ref_output(batch*t*num_heads*head_size);
+        run_reference<ov::float16>(input_q, input_k, input_v, input_g, input_beta, input_state, 1/sqrt(this->K), ref_output);
         // validate results
         // cldnn::mem_lock<ov::float16, mem_lock_type::read> ref_data(mem_ref_ptr, get_test_stream());
         cldnn::mem_lock<ov::float16, mem_lock_type::read> opt_data(mem_opt_ptr, get_test_stream());
+        // std::cout << "ref data ";
+        // for (const auto& data : ref_output) {
+        //     std::cout << data << " ";
+        // }
+        // std::cout << "\n";
+        // std::cout << "opt data ";
+        // for (const auto& data : opt_data) {
+        //     std::cout << data << " ";
+        // }
+        // std::cout << "\n";
+        if (mem_opt_ptr) {
+            ASSERT_EQ(mem_opt_ptr->count(), ref_output.size());
+            for (size_t i = 0; i < mem_opt_ptr->count(); i++) {
+                ASSERT_NEAR(opt_data[i], ref_output[i], 0.01) << " at index=" << i;
+            }
+        }
         // {
         //     for (size_t idx = 0; idx < ref_data.size(); idx++) {
         //         ASSERT_FALSE(std::isnan(opt_data[idx]) || std::isnan(ref_data[idx])) << "NaN found at index " << idx;
@@ -201,7 +338,11 @@ TEST_P(linear_attention_gpu_test, basic) {
 INSTANTIATE_TEST_SUITE_P(smoke_linear_attention_gpu_test,
     linear_attention_gpu_test,
     ::testing::Values(
-        linear_attention_test_params{1, 1, 16, 16}
+        linear_attention_test_params{1, 1, 2, 16},
+        linear_attention_test_params{1, 16, 2, 16},
+        linear_attention_test_params{2, 16, 2, 16},
+        linear_attention_test_params{1, 16, 2, 128},
+        linear_attention_test_params{2, 16, 2, 128}
     ),
     linear_attention_gpu_test::PrintToStringParamName
 );

@@ -18,13 +18,15 @@ namespace KERNEL_NAME {
     
 #include "cm_recurrent_linear_attn.hpp"
 
-_GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
+extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                              SurfaceIndex k [[type("buffer_t")]],
                              SurfaceIndex v [[type("buffer_t")]],
                              SurfaceIndex g [[type("buffer_t")]],
                              SurfaceIndex beta [[type("buffer_t")]],
                              SurfaceIndex initial_state [[type("buffer_t")]],
-                             SurfaceIndex output [[type("buffer_t")]]) {
+                             SurfaceIndex output [[type("buffer_t")]],
+                             SurfaceIndex output_state [[type("buffer_t")]],
+                             int seq) {
     int b_idx = cm_group_id(0);
     int head_idx = cm_group_id(1);
     int head_dim_t_idx = cm_local_id(2);
@@ -36,24 +38,29 @@ _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
     recurrent_linear_attn<half, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
                                                                                                 head_idx,
                                                                                                 head_dim_t_idx,
+                                                                                                seq,
                                                                                                 q,
                                                                                                 k,
                                                                                                 v,
                                                                                                 g,
                                                                                                 beta,
                                                                                                 initial_state,
-                                                                                                output);
+                                                                                                output,
+                                                                                                output_state);
 #elif IO_TYPE == 1
     recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
                                                                                                  head_idx,
                                                                                                  head_dim_t_idx,
+                                                                                                 seq,
                                                                                                  q,
                                                                                                  k,
                                                                                                  v,
                                                                                                  g,
                                                                                                  beta,
                                                                                                  initial_state,
-                                                                                                 output);
+                                                                                                 output,
+                                                                                                 output_state);
 #endif
 }
+
 }  // NAMESPACE
