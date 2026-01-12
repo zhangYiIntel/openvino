@@ -47,7 +47,6 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         H = params.num_heads;
         K = params.head_size;
         V = params.head_size;
-        printf(" B %zd T %zd H %zd K %zd V %zd\n", B, T, H, K, V);
     }
 
     template<typename T>
@@ -104,7 +103,7 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
                     float b_k[128] = {0};
                     float b_q[128] = {0};
                     // B, T, H, K
-                    size_t BATCH_STRIDE = this->B * this->K * this->T;
+                    size_t BATCH_STRIDE = this->H * this->K * this->T;
                     size_t HEAD_STRIDE = this->K;
                     const T* q_ptr = q.data() + i_b * BATCH_STRIDE + i_h * HEAD_STRIDE;
                     const T* k_ptr = k.data() + i_b * BATCH_STRIDE + i_h * HEAD_STRIDE;
@@ -204,7 +203,6 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         net->set_input_data("state", state_mem);
 
         auto outputs = net->execute();
-        std::cout << "Run exec LinearAttn " << outputs.size() << std::endl;
         auto output = outputs.at("output").get_memory();
         return {output, net};
     }
@@ -285,13 +283,6 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
                 ASSERT_NEAR(state_data[i], input_state[i], 0.01) << " at index=" << i;
             }
         }
-        // {
-        //     for (size_t idx = 0; idx < ref_data.size(); idx++) {
-        //         ASSERT_FALSE(std::isnan(opt_data[idx]) || std::isnan(ref_data[idx])) << "NaN found at index " << idx;
-        //     }
-        //     auto ret = cosineSimilarity(ref_data, opt_data);
-        //     ASSERT_GE(ret, 0.95f);
-        // }
     }
 
     static std::string
