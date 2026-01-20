@@ -81,11 +81,11 @@ void LinearAttention::execute([[maybe_unused]] const dnnl::stream& strm) {
     PlainTensor query(inputs[0]);
     PlainTensor key(inputs[1]);
     PlainTensor value(inputs[2]);
-    PlainTensor beta(inputs[3]);
-    PlainTensor g(inputs[4]);
-    PlainTensor initial_states(outputs[0]);
+    PlainTensor g(inputs[3]);
+    PlainTensor beta(inputs[4]);
+    PlainTensor initial_states(inputs[5]);
     PlainTensor output(outputs[0]);
-    PlainTensor output_hidden_states(inputs[1]);
+    PlainTensor output_hidden_states(outputs[1]);
     recurrent_linear_attn(query, key, value, beta, g, initial_states, output, output_hidden_states);
 }
 
