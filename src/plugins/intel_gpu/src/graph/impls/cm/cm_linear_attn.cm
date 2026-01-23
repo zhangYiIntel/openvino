@@ -37,6 +37,7 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
     constexpr int k_head_dims = K_HEAD_DIMS;
     constexpr int v_head_dims = V_HEAD_DIMS;
 #if IO_TYPE == 0
+#ifdef OUTPUT_STATE
     recurrent_linear_attn<half, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
                                                                                                 head_idx,
                                                                                                 head_dim_t_idx,
@@ -48,11 +49,24 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                                                                                                 beta,
                                                                                                 initial_state,
                                                                                                 output,
-#ifdef OUTPUT_STATE
                                                                                                 output_state
-#endif
                                                                                                 );
+#else
+    recurrent_linear_attn<half, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
+                                                                                                head_idx,
+                                                                                                head_dim_t_idx,
+                                                                                                seq,
+                                                                                                q,
+                                                                                                k,
+                                                                                                v,
+                                                                                                g,
+                                                                                                beta,
+                                                                                                initial_state,
+                                                                                                output
+                                                                                                );
+#endif
 #elif IO_TYPE == 1
+#ifdef OUTPUT_STATE
     recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
                                                                                                  head_idx,
                                                                                                  head_dim_t_idx,
@@ -64,10 +78,22 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                                                                                                  beta,
                                                                                                  initial_state,
                                                                                                  output,
-#ifdef OUTPUT_STATE
-                                                                                                output_state
-#endif
+                                                                                                 output_state
                                                                                                 );
+#else
+    recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
+                                                                                                 head_idx,
+                                                                                                 head_dim_t_idx,
+                                                                                                 seq,
+                                                                                                 q,
+                                                                                                 k,
+                                                                                                 v,
+                                                                                                 g,
+                                                                                                 beta,
+                                                                                                 initial_state,
+                                                                                                 output
+                                                                                                );
+#endif                                                                                                
 #endif
 }
 

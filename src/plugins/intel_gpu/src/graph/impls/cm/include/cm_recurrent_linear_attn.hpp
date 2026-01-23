@@ -65,29 +65,6 @@ CM_INLINE void cm_prefetch_by_row(SurfaceIndex base, uint offset) {
     }
 }
 
-// used for inplaced update states
-template <typename IN_OUT_DTYPE,
-          int k_num_heads,
-          int v_num_heads,
-          int k_head_dims,
-          int v_head_dims,
-          bool use_qk_l2norm,
-          int PRE_FETCH_DPT = 0,
-          int PRE_FETCH_CNT = 1>
-void recurrent_linear_attn(int b_idx,
-                           int head_idx,
-                           int head_dim_t_idx,
-                           int seq,
-                           SurfaceIndex q [[type("buffer_t")]],
-                           SurfaceIndex k [[type("buffer_t")]],
-                           SurfaceIndex v [[type("buffer_t")]],
-                           SurfaceIndex g [[type("buffer_t")]],
-                           SurfaceIndex beta [[type("buffer_t")]],
-                           SurfaceIndex initial_state [[type("buffer_t")]],
-                           SurfaceIndex output [[type("buffer_t")]]) {
-    recurrent_linear_attn(b_idx, head_idx, head_dim_t_idx, seq, q, k, v, g, beta, initial_state, output, initial_state);
-}
-
 template <typename IN_OUT_DTYPE,
           int k_num_heads,
           int v_num_heads,
@@ -232,4 +209,38 @@ void recurrent_linear_attn(int b_idx,
         //     cm_store<float, k_head_dims>(initial_state, stride * 4, h0.select<k_head_dims, 1>(k_head_dims * i));
         // }
     }
+}
+
+// used for inplaced update states
+template <typename IN_OUT_DTYPE,
+          int k_num_heads,
+          int v_num_heads,
+          int k_head_dims,
+          int v_head_dims,
+          bool use_qk_l2norm,
+          int PRE_FETCH_DPT = 0,
+          int PRE_FETCH_CNT = 1>
+void recurrent_linear_attn(int b_idx,
+                           int head_idx,
+                           int head_dim_t_idx,
+                           int seq,
+                           SurfaceIndex q [[type("buffer_t")]],
+                           SurfaceIndex k [[type("buffer_t")]],
+                           SurfaceIndex v [[type("buffer_t")]],
+                           SurfaceIndex g [[type("buffer_t")]],
+                           SurfaceIndex beta [[type("buffer_t")]],
+                           SurfaceIndex initial_state [[type("buffer_t")]],
+                           SurfaceIndex output [[type("buffer_t")]]) {
+    recurrent_linear_attn<IN_OUT_DTYPE, k_num_heads, v_num_heads, k_head_dims, v_head_dims, use_qk_l2norm, PRE_FETCH_DPT, PRE_FETCH_CNT>(b_idx,
+                                                                                                                                         head_idx,
+                                                                                                                                         head_dim_t_idx,
+                                                                                                                                         seq,
+                                                                                                                                         q,
+                                                                                                                                         k,
+                                                                                                                                         v,
+                                                                                                                                         g,
+                                                                                                                                         beta,
+                                                                                                                                         initial_state,
+                                                                                                                                         output,
+                                                                                                                                         initial_state);
 }

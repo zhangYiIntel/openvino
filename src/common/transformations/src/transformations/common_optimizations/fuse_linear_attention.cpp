@@ -11,10 +11,13 @@
 #include "openvino/core/rt_info.hpp"
 #include "openvino/core/type.hpp"
 #include "openvino/op/add.hpp"
+#include "openvino/op/constant.hpp"
 #include "openvino/op/divide.hpp"
 #include "openvino/op/exp.hpp"
 #include "openvino/op/loop.hpp"
 #include "openvino/op/multiply.hpp"
+#include "openvino/op/power.hpp"
+#include "openvino/op/convert.hpp"
 #include "openvino/op/reduce_sum.hpp"
 #include "openvino/op/scatter_update.hpp"
 #include "openvino/op/sqrt.hpp"
@@ -22,6 +25,7 @@
 #include "openvino/pass/pattern/matcher.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "openvino/op/util/op_types.hpp"
+#include "transformations/utils/gen_pattern.hpp"
 
 using namespace ov::pass;
 
@@ -76,106 +80,6 @@ bool has_body_node_type(const std::shared_ptr<ov::Model>& body,
 
 bool is_add_node(const std::shared_ptr<ov::Node>& node) {
 	return std::dynamic_pointer_cast<ov::op::v1::Add>(node) != nullptr;
-}
-
-bool is_const_one(const std::shared_ptr<ov::Node>& node) {
-	auto c = std::dynamic_pointer_cast<ov::op::v0::Constant>(node);
-	if (!c) {
-		return false;
-	}
-	if (!c->get_element_type().is_real()) {
-		return false;
-	}
-	std::vector<float> values;
-	try {
-		values = c->cast_vector<float>();
-	} catch (...) {
-		return false;
-	}
-	if (values.empty()) {
-		return false;
-	}
-	for (auto v : values) {
-		if (std::abs(v - 1.0f) > 1e-6f) {
-			return false;
-		}
-	}
-	return true;
-}
-
-bool match_l2norm(const ov::Output<ov::Node>& value,
-				 ov::Output<ov::Node>& original,
-				 std::vector<std::shared_ptr<ov::Node>>& rt_nodes) {
-	auto mul = std::dynamic_pointer_cast<ov::op::v1::Multiply>(value.get_node_shared_ptr());
-	if (!mul) {
-		return false;
-	}
-
-	for (size_t i = 0; i < 2; ++i) {
-		auto x = mul->input_value(i);
-		auto scale = mul->input_value(1 - i);
-
-		auto div = std::dynamic_pointer_cast<ov::op::v1::Divide>(scale.get_node_shared_ptr());
-		if (!div) {
-			continue;
-		}
-		if (!is_const_one(div->input_value(0).get_node_shared_ptr())) {
-			continue;
-		}
-
-		auto sqrt = std::dynamic_pointer_cast<ov::op::v0::Sqrt>(div->input_value(1).get_node_shared_ptr());
-		if (!sqrt) {
-			continue;
-		}
-		auto add = std::dynamic_pointer_cast<ov::op::v1::Add>(sqrt->input_value(0).get_node_shared_ptr());
-		if (!add) {
-			continue;
-		}
-
-		std::shared_ptr<ov::op::v1::ReduceSum> reduce_sum;
-		std::shared_ptr<ov::op::v0::Constant> eps;
-		for (size_t j = 0; j < 2; ++j) {
-			reduce_sum = std::dynamic_pointer_cast<ov::op::v1::ReduceSum>(add->input_value(j).get_node_shared_ptr());
-			eps = std::dynamic_pointer_cast<ov::op::v0::Constant>(add->input_value(1 - j).get_node_shared_ptr());
-			if (reduce_sum && eps) {
-				break;
-			}
-		}
-		if (!reduce_sum || !eps) {
-			continue;
-		}
-		if (!reduce_sum->get_keep_dims()) {
-			continue;
-		}
-		auto square = std::dynamic_pointer_cast<ov::op::v1::Multiply>(reduce_sum->input_value(0).get_node_shared_ptr());
-		if (!square) {
-			continue;
-		}
-		if (square->input_value(0).get_node_shared_ptr() != x.get_node_shared_ptr() ||
-			square->input_value(1).get_node_shared_ptr() != x.get_node_shared_ptr()) {
-			continue;
-		}
-
-		original = x;
-		rt_nodes.push_back(square);
-		rt_nodes.push_back(reduce_sum);
-		rt_nodes.push_back(add);
-		rt_nodes.push_back(sqrt);
-		rt_nodes.push_back(div);
-		rt_nodes.push_back(mul);
-		return true;
-	}
-
-	return false;
-}
-
-ov::Output<ov::Node> strip_l2norm(const ov::Output<ov::Node>& value,
-						 std::vector<std::shared_ptr<ov::Node>>& rt_nodes) {
-	ov::Output<ov::Node> original;
-	if (match_l2norm(value, original, rt_nodes)) {
-		return original;
-	}
-	return value;
 }
 
 bool matches_linear_attention_loop(const std::shared_ptr<ov::op::v5::Loop>& loop) {
@@ -258,11 +162,51 @@ bool matches_linear_attention_loop(const std::shared_ptr<ov::op::v5::Loop>& loop
 }
 
 }  // namespace
-
+using namespace ov::gen_pattern;
+using namespace ov::pass::pattern;
 ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
-	auto loop_label = ov::pass::pattern::wrap_type<ov::op::v5::Loop>();
+	auto key = ov::pass::pattern::any_input();
+	auto query = ov::pass::pattern::any_input();
+	auto value = ov::pass::pattern::any_input();
+	auto axis_q = pattern::wrap_type<opset1::Constant>();
+	auto eps_q = pattern::wrap_type<opset1::Constant>();
+	auto scale_q = pattern::wrap_type<opset1::Constant>();
+	auto inv_const_q = pattern::wrap_type<opset1::Constant>();
 
-	matcher_pass_callback callback = [this](ov::pass::pattern::Matcher& m) {
+	auto axis_k = pattern::wrap_type<opset1::Constant>();
+	auto eps_k = pattern::wrap_type<opset1::Constant>();
+	auto scale_k = pattern::wrap_type<opset1::Constant>();
+	auto inv_const_k = pattern::wrap_type<opset1::Constant>();
+
+	auto minus_one = pattern::wrap_type<opset1::Constant>();
+
+	auto Multiply_14 = pattern::wrap_type<opset1::Multiply>({query, query}, {{"auto_broadcast", "numpy"}});
+	auto ReduceSum_15 = pattern::wrap_type<opset1::ReduceSum>({Multiply_14, axis_q}, {{"keep_dims", true}});
+	auto Add_18 = pattern::wrap_type<opset1::Add>({ReduceSum_15, eps_q}, {{"auto_broadcast", "numpy"}});
+	auto Sqrt_19 = pattern::wrap_type<opset1::Sqrt>({Add_18});
+	auto Divide_20 = pattern::wrap_type<opset1::Divide>({inv_const_q, Sqrt_19}, {{"auto_broadcast", "numpy"}});
+	auto Power_20 = pattern::wrap_type<opset1::Power>({Sqrt_19, minus_one}, {{"auto_broadcast", "numpy"}});
+	auto inv_sqrt_q = std::make_shared<pattern::op::Or>(OutputVector{Divide_20, Power_20});
+	auto Multiply_21 = pattern::wrap_type<opset1::Multiply>({query, inv_sqrt_q}, {{"auto_broadcast", "numpy"}});
+	auto Multiply_32 = pattern::wrap_type<opset1::Multiply>({Multiply_21, scale_q}, {{"auto_broadcast", "numpy"}});
+
+	auto Multiply_32_compressed_to_f16 = pattern::wrap_type<op::v0::Convert>({Multiply_32}, {{"destination_type", "f16"}});
+
+	auto Multiply_22 = pattern::wrap_type<opset1::Multiply>({key, key}, {{"auto_broadcast", "numpy"}});
+	auto ReduceSum_23 = pattern::wrap_type<opset1::ReduceSum>({Multiply_22, axis_k}, {{"keep_dims", true}});
+	auto Add_26 = pattern::wrap_type<opset1::Add>({ReduceSum_23, eps_k}, {{"auto_broadcast", "numpy"}});
+	auto Sqrt_27 = pattern::wrap_type<opset1::Sqrt>({Add_26});
+	auto Divide_28 = pattern::wrap_type<opset1::Divide>({inv_const_k, Sqrt_27}, {{"auto_broadcast", "numpy"}});
+	auto Power_28 = pattern::wrap_type<opset1::Power>({Sqrt_27, minus_one}, {{"auto_broadcast", "numpy"}});
+	auto inv_sqrt_k = std::make_shared<pattern::op::Or>(OutputVector{Divide_28, Power_28});
+	auto Multiply_29 = pattern::wrap_type<opset1::Multiply>({key, inv_sqrt_k}, {{"auto_broadcast", "numpy"}});
+	auto Multiply_29_compressed_to_f16 = pattern::wrap_type<op::v0::Convert>({Multiply_29}, {{"destination_type", "f16"}});
+
+	auto loop_label = ov::pass::pattern::wrap_type<ov::op::v5::Loop>(
+		{any_input(), any_input(), Multiply_32 | Multiply_32_compressed_to_f16, Multiply_29 | Multiply_29_compressed_to_f16, value, any_input(), any_input(), any_input(), any_input()});
+
+	matcher_pass_callback callback = [=](ov::pass::pattern::Matcher& m) {
+		const auto& pattern_map = m.get_pattern_value_map();
 		auto loop = std::dynamic_pointer_cast<ov::op::v5::Loop>(m.get_match_root());
         std::cout << "LinearAttentionFusion 11111." << std::endl;
 		if (!matches_linear_attention_loop(loop)) {
@@ -271,10 +215,9 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 
 		std::vector<std::shared_ptr<ov::Node>> rt_nodes{loop};
 
-		auto query_in = strip_l2norm(loop->input_value(2), rt_nodes);
-		auto key_in = strip_l2norm(loop->input_value(3), rt_nodes);
-		auto value_in = strip_l2norm(loop->input_value(4), rt_nodes);
-
+		auto query_in = pattern_map.at(query);
+		auto key_in =  pattern_map.at(key);
+		auto value_in = loop->input_value(4);
 		ov::OutputVector inputs;
 		inputs.reserve(6);
 

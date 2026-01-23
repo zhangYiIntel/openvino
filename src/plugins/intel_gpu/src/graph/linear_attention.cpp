@@ -20,12 +20,17 @@ template<typename ShapeType>
 std::vector<layout> linear_attention_inst::calc_output_layouts(linear_attention_node const& node, const kernel_impl_params& impl_param) {
     const auto& desc = impl_param.typed_desc<linear_attention>();
     const auto& all_inputs = node.get_input_layouts();
+    const auto num_outputs = desc->output_size();
     if (all_inputs.size() != 6)
         OPENVINO_THROW("linear_attention's must have 6 inputs");
     // query, key, value, g, beta, initial_states
     auto value_layout = impl_param.get_input_layout(2);
-    auto output_layout = layout{value_layout.get_partial_shape(), value_layout.data_type, value_layout.format};
-    return {output_layout};
+    std::vector<layout> output_layouts;
+    output_layouts.emplace_back(value_layout.get_partial_shape(), value_layout.data_type, value_layout.format);
+    if (num_outputs == 2) {
+        output_layouts.push_back(impl_param.get_input_layout(5));
+    }
+    return output_layouts;
 }
 
 template std::vector<layout> linear_attention_inst::calc_output_layouts<ov::PartialShape>(linear_attention_node const& node, const kernel_impl_params& impl_param);

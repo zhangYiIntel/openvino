@@ -24,7 +24,8 @@ static void CreateLinearAttentionOp(ProgramBuilder& p, const std::shared_ptr<ov:
     auto inputs = p.GetInputInfo(op);
 
     const std::string layerName = layer_type_name_ID(op);
-    const cldnn::linear_attention linear_attention_prim(layerName, inputs);
+    cldnn::linear_attention linear_attention_prim(layerName, inputs);
+    linear_attention_prim.num_outputs = op->get_output_size();
     p.add_primitive(*op, linear_attention_prim);
 }
 

@@ -107,6 +107,7 @@
 #include "transformations/common_optimizations/common_optimizations.hpp"
 #include "transformations/common_optimizations/convert_pagedattn_inputs.hpp"
 #include "transformations/common_optimizations/convert_quantize_dequantize.hpp"
+#include "transformations/common_optimizations/fuse_linear_attention.hpp"
 #include "transformations/common_optimizations/fuse_rotary_positional_embeddings.hpp"
 #include "transformations/common_optimizations/glu_fusion.hpp"
 #include "transformations/common_optimizations/group_normalization_fusion.hpp"
@@ -192,6 +193,7 @@
 #include "transformations/rt_info/fused_names_attribute.hpp"
 #include "transformations/rt_info/keep_const_precision.hpp"
 #include "transformations/smart_reshape/matmul_sr.hpp"
+#include "transformations/utils/print_model.hpp"
 #include "openvino/op/abs.hpp"
 #include "openvino/op/broadcast.hpp"
 #include "openvino/op/ceiling.hpp"
@@ -564,6 +566,8 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
         // the "input -> reshape" subgraph is constant-folded in the above "CommonOptimizations"
         // To handle this case, "KeepConstPrecision" is executed again.
         manager.register_pass<ov::pass::KeepConstPrecision>(supported_woq_types, !device_info.supports_immad);
+        manager.register_pass<ov::pass::PrintModel>("before_la_fusion.cpp");
+        manager.register_pass<ov::pass::LinearAttentionFusion>();
 
         {
             // Disable XAttention if GPU Xe2/Xe3 architectures is unavaiable or IGC incompatiable.

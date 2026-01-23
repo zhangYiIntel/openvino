@@ -34,6 +34,7 @@ protected:
         auto jit = KernelGenerator::get_jit_constants(params);
 
         auto desc = params.typed_desc<linear_attention>();
+
         const auto query_shape = params.get_input_layout(0).get_partial_shape();
         const auto key_shape = params.get_input_layout(1).get_partial_shape();
         const auto value_shape = params.get_input_layout(2).get_partial_shape();
@@ -43,9 +44,12 @@ protected:
         const size_t num_k_heads = query_shape[query_shape.size() - 2].get_length();
         const size_t num_v_heads = value_shape[key_shape.size() - 2].get_length();
         const float scale_factor = 1.0 / std::sqrt(static_cast<double>(k_head_size));
+        const auto io_type = params.get_input_layout(0).data_type == data_types::f16 ? 0 : 1;
+        const auto num_outputs = desc->output_size();
 
-        GPU_DEBUG_TRACE_DETAIL << "LinearAttention query_shape " << query_shape << ", key_shape " << key_shape << ", k_head_size="
-                               << k_head_size << ", v_head_size=" << v_head_size << ", num_k_heads=" << num_k_heads << ", num_v_heads=" << num_v_heads << '\n';
+        GPU_DEBUG_TRACE_DETAIL << "LinearAttention io_type" << io_type << " query_shape " << query_shape << ", key_shape " << key_shape
+                               << ", k_head_size=" << k_head_size << ", v_head_size=" << v_head_size << ", num_k_heads=" << num_k_heads
+                               << ", num_v_heads=" << num_v_heads << ", num_outputs=" << num_outputs << '\n';
 
         jit.add({
             make_jit_constant("KERNEL_NAME", get_entry_point(params)),
@@ -54,8 +58,8 @@ protected:
             make_jit_constant("K_HEAD_DIMS", k_head_size),
             make_jit_constant("V_HEAD_DIMS", v_head_size),
             make_jit_constant("SCALE_FACTOR", scale_factor),
-            make_jit_constant("IO_TYPE", 0),
-        });
+            make_jit_constant("IO_TYPE", io_type),
+            make_jit_constant("OUTPUT_STATE", 1)});
 
         return jit;
     }
