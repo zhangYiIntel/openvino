@@ -25,6 +25,9 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                              SurfaceIndex beta [[type("buffer_t")]],
                              SurfaceIndex initial_state [[type("buffer_t")]],
                              SurfaceIndex output [[type("buffer_t")]],
+#ifdef OUTPUT_STATE
+                             SurfaceIndex output_state [[type("buffer_t")]],
+#endif
                              int seq) {
     int b_idx = cm_group_id(0);
     int head_idx = cm_group_id(1);
@@ -44,7 +47,11 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                                                                                                 g,
                                                                                                 beta,
                                                                                                 initial_state,
-                                                                                                output);
+                                                                                                output,
+#ifdef OUTPUT_STATE
+                                                                                                output_state
+#endif
+                                                                                                );
 #elif IO_TYPE == 1
     recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
                                                                                                  head_idx,
@@ -56,7 +63,11 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                                                                                                  g,
                                                                                                  beta,
                                                                                                  initial_state,
-                                                                                                 output);
+                                                                                                 output,
+#ifdef OUTPUT_STATE
+                                                                                                output_state
+#endif
+                                                                                                );
 #endif
 }
 
