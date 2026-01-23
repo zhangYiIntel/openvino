@@ -13,13 +13,11 @@
 #include "openvino/op/add.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/divide.hpp"
-#include "openvino/op/exp.hpp"
 #include "openvino/op/loop.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/power.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/reduce_sum.hpp"
-#include "openvino/op/scatter_update.hpp"
 #include "openvino/op/sqrt.hpp"
 #include "openvino/op/linear_attn.hpp"
 #include "openvino/pass/pattern/matcher.hpp"
@@ -32,7 +30,6 @@ using namespace ov::pass;
 namespace {
 
 using InputDesc = ov::op::util::MultiSubGraphOp::InputDescription;
-using OutputDesc = ov::op::util::MultiSubGraphOp::OutputDescription;
 
 bool is_slice_desc(const std::shared_ptr<InputDesc>& desc,
 				   uint64_t input_index,
@@ -51,36 +48,6 @@ bool is_merged_desc(const std::shared_ptr<InputDesc>& desc, uint64_t input_index
 	return merged && merged->m_input_index == input_index;
 }
 
-bool is_concat_desc(const std::shared_ptr<OutputDesc>& desc,
-					uint64_t output_index,
-					int64_t axis,
-					int64_t part_size) {
-	auto concat = std::dynamic_pointer_cast<ov::op::util::MultiSubGraphOp::ConcatOutputDescription>(desc);
-	if (!concat) {
-		return false;
-	}
-	return concat->m_output_index == output_index && concat->m_axis == axis && concat->m_part_size == part_size &&
-		   concat->m_stride == 1 && concat->m_start == 0 && concat->m_end == -1;
-}
-
-bool is_body_desc(const std::shared_ptr<OutputDesc>& desc, uint64_t output_index) {
-	auto body = std::dynamic_pointer_cast<ov::op::util::MultiSubGraphOp::BodyOutputDescription>(desc);
-	return body && body->m_output_index == output_index;
-}
-
-bool has_body_node_type(const std::shared_ptr<ov::Model>& body,
-						const ov::DiscreteTypeInfo& type_info) {
-	for (const auto& node : body->get_ops()) {
-		if (node->get_type_info() == type_info) {
-			return true;
-		}
-	}
-	return false;
-}
-
-bool is_add_node(const std::shared_ptr<ov::Node>& node) {
-	return std::dynamic_pointer_cast<ov::op::v1::Add>(node) != nullptr;
-}
 
 bool matches_linear_attention_loop(const std::shared_ptr<ov::op::v5::Loop>& loop) {
 	if (!loop) {
@@ -168,42 +135,69 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 	auto key = ov::pass::pattern::any_input();
 	auto query = ov::pass::pattern::any_input();
 	auto value = ov::pass::pattern::any_input();
-	auto axis_q = pattern::wrap_type<opset1::Constant>();
-	auto eps_q = pattern::wrap_type<opset1::Constant>();
-	auto scale_q = pattern::wrap_type<opset1::Constant>();
-	auto inv_const_q = pattern::wrap_type<opset1::Constant>();
+	auto axis_q_const = pattern::wrap_type<opset1::Constant>();
+	auto axis_q_convert = pattern::wrap_type<opset1::Convert>({axis_q_const});
+	auto axis_q = std::make_shared<pattern::op::Or>(OutputVector{axis_q_const, axis_q_convert});
 
-	auto axis_k = pattern::wrap_type<opset1::Constant>();
-	auto eps_k = pattern::wrap_type<opset1::Constant>();
-	auto scale_k = pattern::wrap_type<opset1::Constant>();
-	auto inv_const_k = pattern::wrap_type<opset1::Constant>();
+	auto eps_q_const = pattern::wrap_type<opset1::Constant>();
+	auto eps_q_convert = pattern::wrap_type<opset1::Convert>({eps_q_const});
+	auto eps_q = std::make_shared<pattern::op::Or>(OutputVector{eps_q_const, eps_q_convert});
+
+	auto inv_const_q_const = pattern::wrap_type<opset1::Constant>();
+	auto inv_const_q_convert = pattern::wrap_type<opset1::Convert>({inv_const_q_const});
+	auto inv_const_q = std::make_shared<pattern::op::Or>(OutputVector{inv_const_q_const, inv_const_q_convert});
+
+	auto axis_k_const = pattern::wrap_type<opset1::Constant>();
+	auto axis_k_convert = pattern::wrap_type<opset1::Convert>({axis_k_const});
+	auto axis_k = std::make_shared<pattern::op::Or>(OutputVector{axis_k_const, axis_k_convert});
+
+	auto eps_k_const = pattern::wrap_type<opset1::Constant>();
+	auto eps_k_convert = pattern::wrap_type<opset1::Convert>({eps_k_const});
+	auto eps_k = std::make_shared<pattern::op::Or>(OutputVector{eps_k_const, eps_k_convert});
+
+	auto inv_const_k_const = pattern::wrap_type<opset1::Constant>();
+	auto inv_const_k_convert = pattern::wrap_type<opset1::Convert>({inv_const_k_const});
+	auto inv_const_k = std::make_shared<pattern::op::Or>(OutputVector{inv_const_k_const, inv_const_k_convert});
 
 	auto minus_one = pattern::wrap_type<opset1::Constant>();
 
 	auto Multiply_14 = pattern::wrap_type<opset1::Multiply>({query, query}, {{"auto_broadcast", "numpy"}});
-	auto ReduceSum_15 = pattern::wrap_type<opset1::ReduceSum>({Multiply_14, axis_q}, {{"keep_dims", true}});
-	auto Add_18 = pattern::wrap_type<opset1::Add>({ReduceSum_15, eps_q}, {{"auto_broadcast", "numpy"}});
+	auto ReduceSum_15 = pattern::wrap_type<opset1::ReduceSum>({Multiply_14, axis_q->output(0)}, {{"keep_dims", true}});
+	auto Add_18 = pattern::wrap_type<opset1::Add>({ReduceSum_15, eps_q->output(0)}, {{"auto_broadcast", "numpy"}});
 	auto Sqrt_19 = pattern::wrap_type<opset1::Sqrt>({Add_18});
-	auto Divide_20 = pattern::wrap_type<opset1::Divide>({inv_const_q, Sqrt_19}, {{"auto_broadcast", "numpy"}});
+	auto Divide_20 = pattern::wrap_type<opset1::Divide>({inv_const_q->output(0), Sqrt_19}, {{"auto_broadcast", "numpy"}});
 	auto Power_20 = pattern::wrap_type<opset1::Power>({Sqrt_19, minus_one}, {{"auto_broadcast", "numpy"}});
 	auto inv_sqrt_q = std::make_shared<pattern::op::Or>(OutputVector{Divide_20, Power_20});
-	auto Multiply_21 = pattern::wrap_type<opset1::Multiply>({query, inv_sqrt_q}, {{"auto_broadcast", "numpy"}});
-	auto Multiply_32 = pattern::wrap_type<opset1::Multiply>({Multiply_21, scale_q}, {{"auto_broadcast", "numpy"}});
+	auto Multiply_21 = pattern::wrap_type<opset1::Multiply>({query, inv_sqrt_q->output(0)}, {{"auto_broadcast", "numpy"}});
+	// q / sqrt(d)
+	auto Multiply_32 = pattern::wrap_type<opset1::Multiply>({Multiply_21, any_input()}, {{"auto_broadcast", "numpy"}});
 
 	auto Multiply_32_compressed_to_f16 = pattern::wrap_type<op::v0::Convert>({Multiply_32}, {{"destination_type", "f16"}});
 
 	auto Multiply_22 = pattern::wrap_type<opset1::Multiply>({key, key}, {{"auto_broadcast", "numpy"}});
-	auto ReduceSum_23 = pattern::wrap_type<opset1::ReduceSum>({Multiply_22, axis_k}, {{"keep_dims", true}});
-	auto Add_26 = pattern::wrap_type<opset1::Add>({ReduceSum_23, eps_k}, {{"auto_broadcast", "numpy"}});
+	auto ReduceSum_23 = pattern::wrap_type<opset1::ReduceSum>({Multiply_22, axis_k->output(0)}, {{"keep_dims", true}});
+	auto Add_26 = pattern::wrap_type<opset1::Add>({ReduceSum_23, eps_k->output(0)}, {{"auto_broadcast", "numpy"}});
 	auto Sqrt_27 = pattern::wrap_type<opset1::Sqrt>({Add_26});
-	auto Divide_28 = pattern::wrap_type<opset1::Divide>({inv_const_k, Sqrt_27}, {{"auto_broadcast", "numpy"}});
+	auto Divide_28 = pattern::wrap_type<opset1::Divide>({inv_const_k->output(0), Sqrt_27}, {{"auto_broadcast", "numpy"}});
 	auto Power_28 = pattern::wrap_type<opset1::Power>({Sqrt_27, minus_one}, {{"auto_broadcast", "numpy"}});
 	auto inv_sqrt_k = std::make_shared<pattern::op::Or>(OutputVector{Divide_28, Power_28});
-	auto Multiply_29 = pattern::wrap_type<opset1::Multiply>({key, inv_sqrt_k}, {{"auto_broadcast", "numpy"}});
+	auto Multiply_29 = pattern::wrap_type<opset1::Multiply>({key, inv_sqrt_k->output(0)}, {{"auto_broadcast", "numpy"}});
 	auto Multiply_29_compressed_to_f16 = pattern::wrap_type<op::v0::Convert>({Multiply_29}, {{"destination_type", "f16"}});
 
-	auto loop_label = ov::pass::pattern::wrap_type<ov::op::v5::Loop>(
-		{any_input(), any_input(), Multiply_32 | Multiply_32_compressed_to_f16, Multiply_29 | Multiply_29_compressed_to_f16, value, any_input(), any_input(), any_input(), any_input()});
+	auto q_in = std::make_shared<pattern::op::Or>(OutputVector{Multiply_32, Multiply_32_compressed_to_f16});
+	auto k_in = std::make_shared<pattern::op::Or>(OutputVector{Multiply_29, Multiply_29_compressed_to_f16});
+
+	auto loop_label = ov::pass::pattern::wrap_type<ov::op::v5::Loop>(OutputVector{
+		any_input(),
+		any_input(),
+		q_in->output(0),
+		k_in->output(0),
+		value,
+		any_input(),
+		any_input(),
+		any_input(),
+		any_input()
+	});
 
 	matcher_pass_callback callback = [=](ov::pass::pattern::Matcher& m) {
 		const auto& pattern_map = m.get_pattern_value_map();
