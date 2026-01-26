@@ -209,8 +209,18 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 
 		std::vector<std::shared_ptr<ov::Node>> rt_nodes{loop};
 
-		auto query_in = pattern_map.at(query);
-		auto key_in =  pattern_map.at(key);
+		ov::Output<Node> query_in, key_in;
+		if (pattern_map.count(Multiply_32_compressed_to_f16)) {
+			 query_in = pattern_map.at(Multiply_32_compressed_to_f16);
+		} else {
+			query_in = pattern_map.at(query);
+		}
+
+		if (pattern_map.count(Multiply_29_compressed_to_f16)) {
+			 key_in = pattern_map.at(Multiply_29_compressed_to_f16);
+		} else {
+			key_in = pattern_map.at(key);
+		}
 		auto value_in = loop->input_value(4);
 		ov::OutputVector inputs;
 		inputs.reserve(6);
