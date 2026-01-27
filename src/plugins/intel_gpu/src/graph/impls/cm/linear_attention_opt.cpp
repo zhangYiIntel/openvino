@@ -50,7 +50,6 @@ protected:
         GPU_DEBUG_TRACE_DETAIL << "LinearAttention io_type" << io_type << " query_shape " << query_shape << ", key_shape " << key_shape
                                << ", k_head_size=" << k_head_size << ", v_head_size=" << v_head_size << ", num_k_heads=" << num_k_heads
                                << ", num_v_heads=" << num_v_heads << ", num_outputs=" << num_outputs << '\n';
-
         jit.add({
             make_jit_constant("KERNEL_NAME", get_entry_point(params)),
             make_jit_constant("K_HEAD_NUMS", num_k_heads),
@@ -59,7 +58,7 @@ protected:
             make_jit_constant("V_HEAD_DIMS", v_head_size),
             make_jit_constant("SCALE_FACTOR", scale_factor),
             make_jit_constant("IO_TYPE", io_type),
-            make_jit_constant("OUTPUT_STATE", 1)});
+            make_jit_constant("OUTPUT_STATE", 1),});
 
         return jit;
     }
@@ -75,6 +74,8 @@ protected:
             args.push_back({ArgumentDescriptor::Types::OUTPUT, i});
         }
         args.push_back({ArgumentDescriptor::Types::SCALAR, 0});
+        args.push_back({ArgumentDescriptor::Types::SCALAR, 1});
+        args.push_back({ArgumentDescriptor::Types::SCALAR, 2});
         return args;
     }
 
@@ -88,10 +89,28 @@ protected:
             const size_t seq = query_shape[1];
             const size_t head_nums = query_shape[2];
 
+            const auto& info = params.get_device_info();
+            const size_t thread_nums = (info.arch <= gpu_arch::xe_hpc) ? 16 : 8;
             auto& wgs = kd.params.workGroups;
-            wgs.global = {batch, head_nums, 8};
-            wgs.local = {1, 1, 8};
-            std::vector<int32_t> scalars{static_cast<int32_t>(seq)};
+            wgs.global = {batch, head_nums, thread_nums};
+            wgs.local = {1, 1, thread_nums};
+            auto key_layout = params.input_layouts[1];
+            auto value_layout = params.input_layouts[2];
+            auto get_simple_offset = [](const cldnn::layout& layout) {
+                size_t offset = 0;
+                const auto& data_padding = layout.data_padding;
+                const auto& lower_pads = data_padding._lower_size;
+                for (auto& it : lower_pads) {
+                    if (it > 0) {
+                        offset = it;
+                        break;
+                    }
+                }
+                return offset;
+            };
+            size_t key_offset = get_simple_offset(key_layout);
+            size_t value_offset = get_simple_offset(value_layout);
+            std::vector<int32_t> scalars{static_cast<int32_t>(seq), static_cast<int32_t>(key_offset), static_cast<int32_t>(value_offset)};
             kd.params.scalars.clear();
             for (auto i : scalars) {
                 scalar_desc desc;

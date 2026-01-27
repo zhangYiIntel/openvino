@@ -28,7 +28,9 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
 #ifdef OUTPUT_STATE
                              SurfaceIndex output_state [[type("buffer_t")]],
 #endif
-                             int seq) {
+                             int seq,
+                             int key_offset,
+                             int value_offset) {
     int b_idx = cm_group_id(0);
     int head_idx = cm_group_id(1);
     int head_dim_t_idx = cm_local_id(2);
@@ -38,10 +40,12 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
     constexpr int v_head_dims = V_HEAD_DIMS;
 #if IO_TYPE == 0
 #ifdef OUTPUT_STATE
-    recurrent_linear_attn<half, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
+    recurrent_linear_attn<half, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 0, 4>(b_idx,
                                                                                                 head_idx,
                                                                                                 head_dim_t_idx,
                                                                                                 seq,
+                                                                                                key_offset,
+                                                                                                value_offset,
                                                                                                 q,
                                                                                                 k,
                                                                                                 v,
@@ -52,10 +56,12 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                                                                                                 output_state
                                                                                                 );
 #else
-    recurrent_linear_attn<half, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
+    recurrent_linear_attn<half, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 0, 4>(b_idx,
                                                                                                 head_idx,
                                                                                                 head_dim_t_idx,
                                                                                                 seq,
+                                                                                                key_offset,
+                                                                                                value_offset,
                                                                                                 q,
                                                                                                 k,
                                                                                                 v,
@@ -67,10 +73,12 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
 #endif
 #elif IO_TYPE == 1
 #ifdef OUTPUT_STATE
-    recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
+    recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 0, 4>(b_idx,
                                                                                                  head_idx,
                                                                                                  head_dim_t_idx,
                                                                                                  seq,
+                                                                                                 key_offset,
+                                                                                                 value_offset,
                                                                                                  q,
                                                                                                  k,
                                                                                                  v,
@@ -81,10 +89,12 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(SurfaceIndex q [[type("buffer_t")]],
                                                                                                  output_state
                                                                                                 );
 #else
-    recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
+    recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 0, 4>(b_idx,
                                                                                                  head_idx,
                                                                                                  head_dim_t_idx,
                                                                                                  seq,
+                                                                                                 key_offset,
+                                                                                                 value_offset,
                                                                                                  q,
                                                                                                  k,
                                                                                                  v,
