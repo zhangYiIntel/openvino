@@ -12,13 +12,19 @@
 #include "openvino/core/type.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/constant.hpp"
+#include "openvino/op/concat.hpp"
 #include "openvino/op/divide.hpp"
 #include "openvino/op/loop.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/power.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/reduce_sum.hpp"
+#include "openvino/op/reduce_prod.hpp"
+#include "openvino/op/reshape.hpp"
+#include "openvino/op/shape_of.hpp"
+#include "openvino/op/slice.hpp"
 #include "openvino/op/sqrt.hpp"
+#include "openvino/op/strided_slice.hpp"
 #include "openvino/op/linear_attn.hpp"
 #include "openvino/pass/pattern/matcher.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
@@ -128,6 +134,130 @@ bool matches_linear_attention_loop(const std::shared_ptr<ov::op::v5::Loop>& loop
 	return true;
 }
 
+template <typename T>
+std::shared_ptr<T> get_single_consumer_as(const ov::Output<ov::Node>& output) {
+	const auto& targets = output.get_target_inputs();
+	if (targets.size() != 1) {
+		return nullptr;
+	}
+	auto target_node = targets.begin()->get_node()->shared_from_this();
+	return ov::as_type_ptr<T>(target_node);
+}
+
+std::shared_ptr<ov::opset1::ReduceProd> find_reduce_prod_from_slice_like(
+	const std::shared_ptr<ov::Node>& slice) {
+	if (!slice) {
+		return nullptr;
+	}
+	auto try_inputs = [&](const std::shared_ptr<ov::Node>& node) {
+		for (size_t i = 1; i <= 2; ++i) {
+			if (node->get_input_size() <= i) {
+				continue;
+			}
+			auto reduce_prod = std::dynamic_pointer_cast<ov::opset1::ReduceProd>(
+				node->input_value(i).get_node_shared_ptr());
+			if (reduce_prod) {
+				return reduce_prod;
+			}
+		}
+		return std::shared_ptr<ov::opset1::ReduceProd>{};
+	};
+
+	if (std::dynamic_pointer_cast<ov::opset8::Slice>(slice) ||
+		std::dynamic_pointer_cast<ov::opset1::StridedSlice>(slice)) {
+		return try_inputs(slice);
+	}
+	return nullptr;
+}
+
+bool uses_reduce_prod_at(const std::shared_ptr<ov::Node>& slice,
+																const std::shared_ptr<ov::opset1::ReduceProd>& reduce_prod,
+																size_t idx) {
+	if (!slice || !reduce_prod) {
+		return false;
+	}
+	if (slice->get_input_size() <= idx) {
+		return false;
+	}
+	return slice->input_value(idx).get_node_shared_ptr() == reduce_prod;
+}
+
+bool replace_concat_slice_with_linear_attention(
+	const std::shared_ptr<ov::op::v5::Loop>& loop,
+	const std::shared_ptr<ov::op::LinearAttention>& linear_attn) {
+	if (!loop || !linear_attn) {
+		return false;
+	}
+
+	auto reshape_out0 = get_single_consumer_as<ov::opset1::Reshape>(loop->output(0));
+	auto reshape_out1 = get_single_consumer_as<ov::opset1::Reshape>(loop->output(1));
+	if (!reshape_out0 || !reshape_out1) {
+		return false;
+	}
+	auto concat0 = get_single_consumer_as<ov::opset1::Concat>(reshape_out0->output(0));
+	auto concat1 = get_single_consumer_as<ov::opset1::Concat>(reshape_out1->output(0));
+	if (!concat0 || concat0 != concat1) {
+		return false;
+	}
+	auto concat = concat0;
+	const auto& concat_targets = concat->output(0).get_target_inputs();
+	if (concat_targets.size() != 2) {
+		return false;
+	}
+	std::vector<std::shared_ptr<ov::Node>> slices;
+	slices.reserve(2);
+	for (const auto& input : concat_targets) {
+		auto slice_node = input.get_node()->shared_from_this();
+		if (!std::dynamic_pointer_cast<ov::opset8::Slice>(slice_node) &&
+			!std::dynamic_pointer_cast<ov::opset1::StridedSlice>(slice_node)) {
+			return false;
+		}
+		slices.push_back(slice_node);
+	}
+
+	auto reduce_prod = find_reduce_prod_from_slice_like(slices[0]);
+	if (!reduce_prod) {
+		reduce_prod = find_reduce_prod_from_slice_like(slices[1]);
+	}
+	if (!reduce_prod) {
+		return false;
+	}
+	const auto is_first_part = [&](const std::shared_ptr<ov::Node>& slice) {
+		return uses_reduce_prod_at(slice, reduce_prod, 2) && !uses_reduce_prod_at(slice, reduce_prod, 1);
+	};
+	const auto is_second_part = [&](const std::shared_ptr<ov::Node>& slice) {
+		return uses_reduce_prod_at(slice, reduce_prod, 1) && !uses_reduce_prod_at(slice, reduce_prod, 2);
+	};
+
+	std::shared_ptr<ov::Node> slice_value;
+	std::shared_ptr<ov::Node> slice_state;
+	for (const auto& slice : slices) {
+		if (is_first_part(slice)) {
+			slice_value = slice;
+		}
+		if (is_second_part(slice)) {
+			slice_state = slice;
+		}
+	}
+	if (!slice_value || !slice_state) {
+		return false;
+	}
+
+	auto reshape_value = get_single_consumer_as<ov::opset1::Reshape>(slice_value->output(0));
+	auto reshape_state = get_single_consumer_as<ov::opset1::Reshape>(slice_state->output(0));
+	if (!reshape_value || !reshape_state) {
+		return false;
+	}
+	if (!ov::replace_output_update_name(reshape_value->output(0), linear_attn->output(0))) {
+		reshape_value->output(0).replace(linear_attn->output(0));
+	}
+	if (!ov::replace_output_update_name(reshape_state->output(0), linear_attn->output(1))) {
+		reshape_state->output(0).replace(linear_attn->output(1));
+	}
+	std::cout << "Fused LinearAttention Replace Concat//Slice\n";
+	return true;
+}
+
 }  // namespace
 using namespace ov::gen_pattern;
 using namespace ov::pass::pattern;
@@ -171,8 +301,12 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 	auto Multiply_21 = pattern::wrap_type<opset1::Multiply>({query, inv_sqrt_q->output(0)}, {{"auto_broadcast", "numpy"}});
 	// q / sqrt(d)
 	auto Multiply_32 = pattern::wrap_type<opset1::Multiply>({Multiply_21, any_input()}, {{"auto_broadcast", "numpy"}});
+	// q * scale (when no per-token normalization is present)
+	auto Multiply_q_simple = pattern::wrap_type<opset1::Multiply>({query, any_input()}, {{"auto_broadcast", "numpy"}});
+	auto q_candidate = std::make_shared<pattern::op::Or>(OutputVector{Multiply_32, Multiply_21, Multiply_q_simple});
 
-	auto Multiply_32_compressed_to_f16 = pattern::wrap_type<op::v0::Convert>({Multiply_32}, {{"destination_type", "f16"}});
+	auto q_candidate_compressed_to_f16 =
+		pattern::wrap_type<op::v0::Convert>({q_candidate->output(0)}, {{"destination_type", "f16"}});
 
 	auto Multiply_22 = pattern::wrap_type<opset1::Multiply>({key, key}, {{"auto_broadcast", "numpy"}});
 	auto ReduceSum_23 = pattern::wrap_type<opset1::ReduceSum>({Multiply_22, axis_k->output(0)}, {{"keep_dims", true}});
@@ -184,7 +318,7 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 	auto Multiply_29 = pattern::wrap_type<opset1::Multiply>({key, inv_sqrt_k->output(0)}, {{"auto_broadcast", "numpy"}});
 	auto Multiply_29_compressed_to_f16 = pattern::wrap_type<op::v0::Convert>({Multiply_29}, {{"destination_type", "f16"}});
 
-	auto q_in = std::make_shared<pattern::op::Or>(OutputVector{Multiply_32, Multiply_32_compressed_to_f16});
+	auto q_in = std::make_shared<pattern::op::Or>(OutputVector{q_candidate, q_candidate_compressed_to_f16});
 	auto k_in = std::make_shared<pattern::op::Or>(OutputVector{Multiply_29, Multiply_29_compressed_to_f16});
 
 	auto loop_label = ov::pass::pattern::wrap_type<ov::op::v5::Loop>(OutputVector{
@@ -202,7 +336,6 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 	matcher_pass_callback callback = [=](ov::pass::pattern::Matcher& m) {
 		const auto& pattern_map = m.get_pattern_value_map();
 		auto loop = std::dynamic_pointer_cast<ov::op::v5::Loop>(m.get_match_root());
-        std::cout << "LinearAttentionFusion 11111." << std::endl;
 		if (!matches_linear_attention_loop(loop)) {
 			return false;
 		}
@@ -210,14 +343,22 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 		std::vector<std::shared_ptr<ov::Node>> rt_nodes{loop};
 
 		ov::Output<Node> query_in, key_in;
-		if (pattern_map.count(Multiply_32_compressed_to_f16)) {
-			 query_in = pattern_map.at(Multiply_32_compressed_to_f16);
+		if (pattern_map.count(q_candidate_compressed_to_f16)) {
+			query_in = pattern_map.at(q_candidate_compressed_to_f16);
+		} else if (pattern_map.count(Multiply_32)) {
+			query_in = pattern_map.at(Multiply_32);
+		} else if (pattern_map.count(Multiply_21)) {
+			query_in = pattern_map.at(Multiply_21);
+		} else if (pattern_map.count(Multiply_q_simple)) {
+			query_in = pattern_map.at(Multiply_q_simple);
 		} else {
 			query_in = pattern_map.at(query);
 		}
 
 		if (pattern_map.count(Multiply_29_compressed_to_f16)) {
-			 key_in = pattern_map.at(Multiply_29_compressed_to_f16);
+			key_in = pattern_map.at(Multiply_29_compressed_to_f16);
+		} else if (pattern_map.count(Multiply_29)) {
+			key_in = pattern_map.at(Multiply_29);
 		} else {
 			key_in = pattern_map.at(key);
 		}
@@ -238,6 +379,7 @@ ov::pass::LinearAttentionFusion::LinearAttentionFusion() {
 		linear_attn->set_friendly_name(loop->get_friendly_name());
 
 		ov::copy_runtime_info(rt_nodes, linear_attn);
+		replace_concat_slice_with_linear_attention(loop, linear_attn);
 		ov::replace_node(loop, linear_attn);
         std::cout << "LinearAttentionFusion applied." << std::endl;
 		register_new_node(linear_attn);
