@@ -26,9 +26,10 @@ struct linear_attention_test_params {
     int32_t t;
     int32_t num_heads;
     int32_t head_size;
+    ov::element::Type precision;
 
-    linear_attention_test_params(int batch, int t, int num_heads, int head_size)
-        : batch(batch), t(t), num_heads(num_heads), head_size(head_size) {}
+    linear_attention_test_params(int batch, int t, int num_heads, int head_size, ov::element::Type precision)
+        : batch(batch), t(t), num_heads(num_heads), head_size(head_size), precision(precision) {}
 };
 
 struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attention_test_params> {
@@ -40,13 +41,15 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
     size_t V = 0;
 
     void SetUp() override {
-        rg.set_seed(GET_SUITE_NAME);
         const auto& params = this->GetParam();
         B = params.batch;
         T = params.t;
         H = params.num_heads;
         K = params.head_size;
         V = params.head_size;
+        const std::string seed = "linear_attention_" + std::to_string(B) + "_" + std::to_string(T) + "_" +
+                                 std::to_string(H) + "_" + std::to_string(K) + "_" + params.precision.to_string();
+        rg.set_seed(seed);
     }
 
     template<typename T>
@@ -163,7 +166,13 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         }
     }
 
-    topology create_topology(layout q_layout, layout k_layout, layout v_layout, layout g_layout, layout beta_layout, layout state_layout) {
+    topology create_topology(layout q_layout,
+                             layout k_layout,
+                             layout v_layout,
+                             layout g_layout,
+                             layout beta_layout,
+                             layout state_layout,
+                             data_types output_dt) {
         topology topo;
         topo.add(input_layout("q", q_layout));
         topo.add(input_layout("k", k_layout));
@@ -175,7 +184,7 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         auto linear_attn_prim =
             linear_attention("linear_attention", {input_info("q"), input_info("k"), input_info("v"), input_info("g"), input_info("beta"), input_info("state")});
         topo.add(linear_attn_prim);
-        topo.add(reorder("output", input_info("linear_attention", 0), format::bfyx, data_types::f16));
+        topo.add(reorder("output", input_info("linear_attention", 0), format::bfyx, output_dt));
         // topo.add(reorder("states", input_info("linear_attention", 1), format::bfyx, data_types::f16));
         return topo;
     }
@@ -207,7 +216,11 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         return {output, net};
     }
 
-    void execute(linear_attention_test_params& p, const bool is_caching_test = false) {
+    template <typename T>
+    void execute_t(linear_attention_test_params& p,
+                   data_types data_type,
+                   float tolerance,
+                   const bool is_caching_test = false) {
         const auto batch = p.batch;
         const auto t = p.t;
         const auto num_heads = p.num_heads;
@@ -216,22 +229,22 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         auto& engine = get_test_engine();
 
         // create topologies
-        cldnn::layout q_dyn_layout({-1, -1, num_heads, head_size}, data_types::f16, format::bfyx);
-        cldnn::layout k_dyn_layout({-1, -1, num_heads, head_size}, data_types::f16, format::bfyx);
-        cldnn::layout v_dyn_layout({-1, -1, num_heads, head_size}, data_types::f16, format::bfyx);
-        cldnn::layout g_dyn_layout({-1, -1, num_heads}, data_types::f16, format::bfyx);
-        cldnn::layout beta_dyn_layout({-1, -1, num_heads}, data_types::f16, format::bfyx);
-        cldnn::layout state_dyn_layout({-1, num_heads, head_size, head_size}, data_types::f16, format::bfyx);
+        cldnn::layout q_dyn_layout({-1, -1, num_heads, head_size}, data_type, format::bfyx);
+        cldnn::layout k_dyn_layout({-1, -1, num_heads, head_size}, data_type, format::bfyx);
+        cldnn::layout v_dyn_layout({-1, -1, num_heads, head_size}, data_type, format::bfyx);
+        cldnn::layout g_dyn_layout({-1, -1, num_heads}, data_type, format::bfyx);
+        cldnn::layout beta_dyn_layout({-1, -1, num_heads}, data_type, format::bfyx);
+        cldnn::layout state_dyn_layout({-1, num_heads, head_size, head_size}, data_type, format::bfyx);
 
-        topology opt_topo = create_topology(q_dyn_layout, k_dyn_layout, v_dyn_layout, g_dyn_layout, g_dyn_layout, state_dyn_layout);
+        topology opt_topo = create_topology(q_dyn_layout, k_dyn_layout, v_dyn_layout, g_dyn_layout, g_dyn_layout, state_dyn_layout, data_type);
 
         // allocate memories
-        cldnn::layout q_static_layout({batch, t, num_heads, head_size}, data_types::f16, format::bfyx);
-        cldnn::layout k_static_layout({batch, t, num_heads, head_size}, data_types::f16, format::bfyx);
-        cldnn::layout v_static_layout({batch, t, num_heads, head_size}, data_types::f16, format::bfyx);
-        cldnn::layout g_static_layout({batch, t, num_heads}, data_types::f16, format::bfyx);
-        cldnn::layout beta_static_layout({batch, t, num_heads}, data_types::f16, format::bfyx);
-        cldnn::layout state_static_layout({batch, num_heads, head_size, head_size}, data_types::f16, format::bfyx);
+        cldnn::layout q_static_layout({batch, t, num_heads, head_size}, data_type, format::bfyx);
+        cldnn::layout k_static_layout({batch, t, num_heads, head_size}, data_type, format::bfyx);
+        cldnn::layout v_static_layout({batch, t, num_heads, head_size}, data_type, format::bfyx);
+        cldnn::layout g_static_layout({batch, t, num_heads}, data_type, format::bfyx);
+        cldnn::layout beta_static_layout({batch, t, num_heads}, data_type, format::bfyx);
+        cldnn::layout state_static_layout({batch, num_heads, head_size, head_size}, data_type, format::bfyx);
 
         auto q_mem = engine.allocate_memory(q_static_layout);
         auto k_mem = engine.allocate_memory(k_static_layout);
@@ -240,12 +253,12 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         auto beta_mem = engine.allocate_memory(beta_static_layout);
         auto state_mem = engine.allocate_memory(state_static_layout);
 
-        auto input_q = rg.generate_random_1d<ov::float16>(ov::shape_size(q_mem->get_layout().get_shape()), -1.0f, 1.0f);
-        auto input_k = rg.generate_random_1d<ov::float16>(ov::shape_size(k_mem->get_layout().get_shape()), -1.0f, 1.0f);
-        auto input_v = rg.generate_random_1d<ov::float16>(ov::shape_size(v_mem->get_layout().get_shape()), -1.0f, 1.0f);
-        auto input_g = rg.generate_random_1d<ov::float16>(ov::shape_size(g_mem->get_layout().get_shape()), -1.0f, 1.0f);
-        auto input_beta = rg.generate_random_1d<ov::float16>(ov::shape_size(beta_mem->get_layout().get_shape()), -1.0f, 1.0f);
-        auto input_state = rg.generate_random_1d<ov::float16>(ov::shape_size(state_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_q = rg.generate_random_1d<T>(ov::shape_size(q_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_k = rg.generate_random_1d<T>(ov::shape_size(k_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_v = rg.generate_random_1d<T>(ov::shape_size(v_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_g = rg.generate_random_1d<T>(ov::shape_size(g_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_beta = rg.generate_random_1d<T>(ov::shape_size(beta_mem->get_layout().get_shape()), -1.0f, 1.0f);
+        auto input_state = rg.generate_random_1d<T>(ov::shape_size(state_mem->get_layout().get_shape()), -1.0f, 1.0f);
 
 
         // auto input_q = std::vector<ov::float16>(ov::shape_size(q_mem->get_layout().get_shape()), 1.0f);
@@ -265,29 +278,44 @@ struct linear_attention_gpu_test : public ::testing::TestWithParam<linear_attent
         auto [mem_opt_ptr, net_opt_ptr] = run_network(opt_topo,
                                         q_mem, k_mem, v_mem, g_mem, beta_mem, state_mem,
                                         is_caching_test);
-        std::vector<ov::float16> ref_output(batch*t*num_heads*head_size);
-        run_reference<ov::float16>(input_q, input_k, input_v, input_g, input_beta, 1/sqrt(this->K), input_state, ref_output);
+        std::vector<T> ref_output(batch*t*num_heads*head_size);
+        run_reference<T>(input_q, input_k, input_v, input_g, input_beta, 1/sqrt(this->K), input_state, ref_output);
         // validate results
         if (mem_opt_ptr) {
-            cldnn::mem_lock<ov::float16, mem_lock_type::read> opt_data(mem_opt_ptr, get_test_stream());
+            cldnn::mem_lock<T, mem_lock_type::read> opt_data(mem_opt_ptr, get_test_stream());
             ASSERT_EQ(mem_opt_ptr->count(), ref_output.size());
             for (size_t i = 0; i < mem_opt_ptr->count(); i++) {
-                ASSERT_NEAR(opt_data[i], ref_output[i], 0.01) << " at index=" << i;
+                ASSERT_NEAR(opt_data[i], ref_output[i], tolerance) << " at index=" << i;
             }
         }
 
         if (state_mem) {
             ASSERT_EQ(state_mem->count(), input_state.size());
-            cldnn::mem_lock<ov::float16, mem_lock_type::read> state_data(state_mem, get_test_stream());
+            cldnn::mem_lock<T, mem_lock_type::read> state_data(state_mem, get_test_stream());
             for (size_t i = 0; i < mem_opt_ptr->count(); i++) {
-                ASSERT_NEAR(state_data[i], input_state[i], 0.01) << " at index=" << i;
+                ASSERT_NEAR(state_data[i], input_state[i], tolerance) << " at index=" << i;
             }
         }
     }
 
+    void execute(linear_attention_test_params& p, const bool is_caching_test = false) {
+        auto cldnn_precision = cldnn::element_type_to_data_type(p.precision);
+        if (p.precision == ov::element::f16) {
+            execute_t<ov::float16>(p, cldnn_precision, 0.01f, is_caching_test);
+            return;
+        }
+
+        if (p.precision == ov::element::f32) {
+            execute_t<float>(p, cldnn_precision, 1e-4f, is_caching_test);
+            return;
+        }
+
+        FAIL() << "Unsupported precision for linear attention test";
+    }
+
     static std::string
     PrintToStringParamName(const testing::TestParamInfo<linear_attention_test_params>& info) {
-        std::string result = "linear_attention_gpu_test_" + std::to_string(info.param.batch) + "_" +
+        std::string result = "linear_attention_gpu_test_" + info.param.precision.to_string() + "_" + std::to_string(info.param.batch) + "_" +
                std::to_string(info.param.t) + "_" + std::to_string(info.param.num_heads) + "_" +
                std::to_string(info.param.head_size);
 
@@ -324,11 +352,16 @@ TEST_P(linear_attention_gpu_test, basic) {
 INSTANTIATE_TEST_SUITE_P(smoke_linear_attention_gpu_test,
     linear_attention_gpu_test,
     ::testing::Values(
-        linear_attention_test_params{1, 1, 2, 16},
-        linear_attention_test_params{1, 16, 2, 16},
-        linear_attention_test_params{2, 16, 2, 16},
-        linear_attention_test_params{1, 16, 2, 128},
-        linear_attention_test_params{2, 16, 2, 128}
+        linear_attention_test_params{1, 1, 2, 16, ov::element::f16},
+        linear_attention_test_params{1, 16, 2, 16, ov::element::f16},
+        linear_attention_test_params{2, 16, 2, 16, ov::element::f16},
+        linear_attention_test_params{1, 16, 2, 128, ov::element::f16},
+        linear_attention_test_params{2, 16, 2, 128, ov::element::f16},
+        linear_attention_test_params{1, 1, 2, 16, ov::element::f32},
+        linear_attention_test_params{1, 16, 2, 16, ov::element::f32},
+        linear_attention_test_params{2, 16, 2, 16, ov::element::f32},
+        linear_attention_test_params{1, 16, 2, 128, ov::element::f32},
+        linear_attention_test_params{2, 16, 2, 128, ov::element::f32}
     ),
     linear_attention_gpu_test::PrintToStringParamName
 );
