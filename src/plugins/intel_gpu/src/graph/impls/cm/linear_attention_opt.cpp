@@ -58,7 +58,11 @@ protected:
             make_jit_constant("V_HEAD_DIMS", v_head_size),
             make_jit_constant("SCALE_FACTOR", scale_factor),
             make_jit_constant("IO_TYPE", io_type),
-            make_jit_constant("OUTPUT_STATE", 1),});
+        });
+
+        if (params.output_layouts.size() > 1) {
+            jit.add(make_jit_constant("OUTPUT_STATE", 1));
+        }
 
         return jit;
     }
