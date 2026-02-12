@@ -38,36 +38,21 @@ protected:
         auto jit = KernelGenerator::get_jit_constants(params);
 
         const auto& q_shape = params.get_input_layout(0).get_partial_shape();
-        const size_t head_nums = q_shape[2].get_length();
+        const size_t q_head_nums = q_shape[2].get_length();
         const size_t k_head_dims = q_shape[3].get_length();
+        const auto& v_shape = params.get_input_layout(2).get_partial_shape();
+        const size_t v_head_nums = v_shape[2].get_length();
         const auto io_type = params.get_input_layout(0).data_type == data_types::f16 ? 0 : 1;
         const float scale_factor = 1.0f / std::sqrt(static_cast<double>(k_head_dims));
         const auto output_state = params.output_layouts.size() > 1 ? 1 : 0;
 
-        auto get_simple_offset = [](const cldnn::layout& layout) {
-            size_t offset = 0;
-            const auto& data_padding = layout.data_padding;
-            const auto& lower_pads = data_padding._lower_size;
-            for (auto& it : lower_pads) {
-                if (it > 0) {
-                    offset = it;
-                    break;
-                }
-            }
-            return offset;
-        };
-
-        size_t key_offset = get_simple_offset(params.input_layouts[1]);
-        size_t value_offset = get_simple_offset(params.input_layouts[2]);
-
-        jit.make("K_HEAD_NUMS", head_nums);
+        jit.make("Q_HEAD_NUMS", q_head_nums);
+        jit.make("V_HEAD_NUMS", v_head_nums);
         jit.make("K_HEAD_DIMS", k_head_dims);
         jit.make("SUBGROUP_SIZE", get_subgroup_size(params.get_device_info().arch));
         jit.make("IO_TYPE", io_type);
         jit.make("SCALE_FACTOR", scale_factor);
         jit.make("OUTPUT_STATE", output_state);
-        jit.make("KEY_OFFSET", key_offset);
-        jit.make("VALUE_OFFSET", value_offset);
 
         return jit;
     }
@@ -82,8 +67,9 @@ protected:
         for (uint32_t i = 0; i < params.output_layouts.size(); i++) {
             args.push_back({ArgumentDescriptor::Types::OUTPUT, i});
         }
-
         args.push_back({ArgumentDescriptor::Types::SCALAR, 0});
+        args.push_back({ArgumentDescriptor::Types::SCALAR, 1});
+        args.push_back({ArgumentDescriptor::Types::SCALAR, 2});
 
         return args;
     }
@@ -94,21 +80,41 @@ protected:
             auto& wgs = kd.params.workGroups;
 
             const auto& q_shape = params.get_input_layout(0).get_partial_shape();
+            const auto& v_shape = params.get_input_layout(2).get_partial_shape();
             const size_t batch = q_shape[0].get_length();
             const size_t seq_len = q_shape[1].get_length();
-            const size_t head_nums = q_shape[2].get_length();
+            const size_t head_nums = v_shape[2].get_length();
             const size_t k_head_dims = q_shape[3].get_length();
             const size_t v_blocks = (k_head_dims + v_block_size - 1) / v_block_size;
             const size_t subgroup_size = get_subgroup_size(params.get_device_info().arch);
+
+            auto get_simple_offset = [](const cldnn::layout& layout) {
+                size_t offset = 0;
+                const auto& data_padding = layout.data_padding;
+                const auto& lower_pads = data_padding._lower_size;
+                for (auto& it : lower_pads) {
+                    if (it > 0) {
+                        offset = it;
+                        break;
+                    }
+                }
+                return offset;
+            };
+
+            size_t key_offset = get_simple_offset(params.input_layouts[1]);
+            size_t value_offset = get_simple_offset(params.input_layouts[2]);
 
             wgs.global = {batch, head_nums * v_blocks, subgroup_size};
             wgs.local = {1, 1, subgroup_size};
 
             kd.params.scalars.clear();
-            scalar_desc desc;
-            desc.t = scalar_desc::Types::INT32;
-            desc.v.s32 = static_cast<int32_t>(seq_len);
-            kd.params.scalars.push_back(desc);
+            std::vector<int32_t> scalars{static_cast<int32_t>(seq_len), static_cast<int32_t>(key_offset), static_cast<int32_t>(value_offset)};
+            for (auto i : scalars) {
+                scalar_desc desc;
+                desc.t = scalar_desc::Types::INT32;
+                desc.v.s32 = static_cast<int32_t>(i);
+                kd.params.scalars.push_back(desc);
+            }
         }};
     }
 };

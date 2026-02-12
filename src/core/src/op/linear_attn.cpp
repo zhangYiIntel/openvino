@@ -80,9 +80,16 @@ void LinearAttention::validate_and_infer_types() {
     input_check(this, 4, "g", {3}, {});
     input_check(this, 5, "initial_states", {4}, {});
 
-    // value head_size may be not same with key
-    auto out_ps = get_input_partial_shape(2);
-    const auto&  h_ps= get_input_partial_shape(5);
+    // value head_size may be not same with key, output uses query head count
+    const auto& q_ps = get_input_partial_shape(0);
+    const auto& v_ps = get_input_partial_shape(2);
+    const auto& h_ps = get_input_partial_shape(5);
+
+    ov::PartialShape out_ps = v_ps;
+    if (out_ps.rank().is_static() && q_ps.rank().is_static() && out_ps.rank().get_length() == 4 && q_ps.rank().get_length() == 4) {
+        out_ps[0] = q_ps[0];
+        out_ps[1] = q_ps[1];
+    }
     set_output_type(0, get_input_element_type(0), out_ps);
     set_output_type(1, get_input_element_type(5), h_ps);
 }

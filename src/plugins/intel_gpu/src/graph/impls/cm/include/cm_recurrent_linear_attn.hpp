@@ -98,13 +98,15 @@ void recurrent_linear_attn(int b_idx,
 #pragma unroll
     for (int i = 0; i < v_head_dim_per_t; i++) {
         int v_head_dim_idx = head_dim_t_idx * v_head_dim_per_t + i;
-        int stride = b_idx * k_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims + v_head_dim_idx * k_head_dims;
+        int stride = b_idx * v_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims + v_head_dim_idx * k_head_dims;
         cm_load_by_row<float, IN_OUT_DTYPE, k_head_dims>(h0.select<k_head_dims, 1>(k_head_dims * i), initial_state, stride * sizeof(IN_OUT_DTYPE));
     }
 
+    const int group_size = v_num_heads / k_num_heads;
+    const int qk_head_idx = head_idx / group_size;
     for (int s = 0; s < seq; s++) {
-        // beta B, T, HV
-        // g B, T, HV
+        // beta B, T, H
+        // g B, T, H
         int stride = b_idx * seq * v_num_heads + s * v_num_heads + head_idx;
         vector<float, 1> b_beta;  // cm_load<float, 1>(beta, stride * sizeof(IN_OUT_DTYPE));
         cm_load_by_row<float, IN_OUT_DTYPE, 1>(b_beta, beta, stride * sizeof(IN_OUT_DTYPE));
@@ -119,15 +121,15 @@ void recurrent_linear_attn(int b_idx,
         //            b_g[0]);
         // }
         // B, T, HK, K
-        int q_stride = b_idx * seq * k_num_heads * k_head_dims + s * k_num_heads * k_head_dims + head_idx * k_head_dims;
-        int k_stride = b_idx * seq * k_num_heads * k_head_dims + s * (k_num_heads + key_offset) * k_head_dims + (head_idx + key_offset) * k_head_dims;
+        int q_stride = b_idx * seq * k_num_heads * k_head_dims + s * k_num_heads * k_head_dims + qk_head_idx * k_head_dims;
+        int k_stride = b_idx * seq * k_num_heads * k_head_dims + s * (k_num_heads + key_offset) * k_head_dims + (qk_head_idx + key_offset) * k_head_dims;
         if constexpr (PRE_FETCH_DPT > 0) {
             if ((s % PRE_FETCH_CNT == 0) && head_dim_t_idx < PRE_FETCH_CNT) {
                 const int q_stride =
-                    (b_idx * seq * k_num_heads * k_head_dims + (s + PRE_FETCH_DPT + head_dim_t_idx) * k_num_heads * k_head_dims + head_idx * k_head_dims) *
+                    (b_idx * seq * k_num_heads * k_head_dims + (s + PRE_FETCH_DPT + head_dim_t_idx) * k_num_heads * k_head_dims + qk_head_idx * k_head_dims) *
                     sizeof(IN_OUT_DTYPE);
                 const int k_stride =
-                    (b_idx * seq * k_num_heads * k_head_dims + (s + PRE_FETCH_DPT + head_dim_t_idx) * (k_num_heads + key_offset) * k_head_dims + (head_idx + key_offset) * k_head_dims) *
+                    (b_idx * seq * k_num_heads * k_head_dims + (s + PRE_FETCH_DPT + head_dim_t_idx) * (k_num_heads + key_offset) * k_head_dims + (qk_head_idx + key_offset) * k_head_dims) *
                     sizeof(IN_OUT_DTYPE);
                 const int v_stride =
                     (b_idx * seq * v_num_heads * v_head_dims + (s + PRE_FETCH_DPT + head_dim_t_idx) * (v_num_heads + value_offset) * v_head_dims + (head_idx + value_offset) * v_head_dims) *
@@ -213,7 +215,7 @@ void recurrent_linear_attn(int b_idx,
 #pragma unroll
     for (int i = 0; i < v_head_dim_per_t; i++) {
         int v_head_dim_idx = head_dim_t_idx * v_head_dim_per_t + i;
-        int stride = b_idx * k_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims + v_head_dim_idx * k_head_dims;
+        int stride = b_idx * v_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims + v_head_dim_idx * k_head_dims;
         cm_store_by_row<IN_OUT_DTYPE, float, k_head_dims>(output_state, h0.select<k_head_dims, 1>(k_head_dims * i), stride * sizeof(IN_OUT_DTYPE));
         // if constexpr (k_head_dims == 128) {
         //     cm_store<float, 64>(initial_state, stride * 4, h0.select<64, 1>(k_head_dims * i));

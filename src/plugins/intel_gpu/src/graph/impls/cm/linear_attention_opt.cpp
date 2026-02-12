@@ -88,10 +88,11 @@ protected:
             assert(!params.is_dynamic());
             auto desc = params.typed_desc<linear_attention>();
             const auto query_shape = params.get_input_layout(0).get_shape();
+            const auto value_shape = params.get_input_layout(2).get_shape();
             // B, T, H, K
             const size_t batch = query_shape[0];
             const size_t seq = query_shape[1];
-            const size_t head_nums = query_shape[2];
+            const size_t head_nums = value_shape[2];
 
             const auto& info = params.get_device_info();
             const size_t thread_nums = (info.arch <= gpu_arch::xe_hpc) ? 16 : 8;

@@ -272,25 +272,30 @@ KERNEL(linear_attention_ref)
 #if OUTPUT_STATE
  __global OUTPUT1_TYPE* output_state,
 #endif
- int seq_len) {
+ int seq_len,
+ int key_offset,
+ int value_offset) {
     int b = get_global_id(0);
     int gid1 = get_global_id(1);
-    int BATCH_STRIDE = K_HEAD_NUMS * seq_len * K_HEAD_DIMS;
-    int STEP_STRIDE = K_HEAD_NUMS * K_HEAD_DIMS;
-    int KEY_STEP_STRIDE = STEP_STRIDE;
-    int VALUE_STEP_STRIDE = STEP_STRIDE;
-    int KEY_BATCH_STRIDE = BATCH_STRIDE;
-    int VALUE_BATCH_STRIDE = BATCH_STRIDE;
+    int BATCH_STRIDE = Q_HEAD_NUMS * seq_len * K_HEAD_DIMS;
+    int STEP_STRIDE = Q_HEAD_NUMS * K_HEAD_DIMS;
+    int OUTPUT_STEP_STRIDE = V_HEAD_NUMS * K_HEAD_DIMS;
+    int KEY_STEP_STRIDE = (Q_HEAD_NUMS + key_offset) * K_HEAD_DIMS;
+    int VALUE_STEP_STRIDE = (V_HEAD_NUMS + value_offset) * K_HEAD_DIMS;
+    int KEY_BATCH_STRIDE = KEY_STEP_STRIDE * seq_len;
+    int VALUE_BATCH_STRIDE = VALUE_STEP_STRIDE * seq_len;
     int v_blocks = (K_HEAD_DIMS + V_BLOCK_SIZE - 1) / V_BLOCK_SIZE;
     int h = gid1 / v_blocks;
+    int group_size = V_HEAD_NUMS / Q_HEAD_NUMS;
+    int qk_h = h / group_size;
     int v_block_id = gid1 - h * v_blocks;
     int i_v_base = v_block_id * V_BLOCK_SIZE;
     const __global INPUT0_TYPE* q_ptr = q + b * BATCH_STRIDE;
-    const __global INPUT1_TYPE* k_ptr = k + b * KEY_BATCH_STRIDE + KEY_OFFSET * K_HEAD_DIMS;
-    const __global INPUT2_TYPE* v_ptr = v + b * VALUE_BATCH_STRIDE + VALUE_OFFSET * K_HEAD_DIMS;
-    const __global INPUT3_TYPE* g_ptr = g + b * K_HEAD_NUMS * seq_len;
-    const __global INPUT4_TYPE* beta_ptr = beta + b * K_HEAD_NUMS * seq_len;
-    int out_base = b * K_HEAD_NUMS * seq_len * K_HEAD_DIMS + h * K_HEAD_DIMS;
+    const __global INPUT1_TYPE* k_ptr = k + b * KEY_BATCH_STRIDE;
+    const __global INPUT2_TYPE* v_ptr = v + b * VALUE_BATCH_STRIDE;
+    const __global INPUT3_TYPE* g_ptr = g + b * V_HEAD_NUMS * seq_len;
+    const __global INPUT4_TYPE* beta_ptr = beta + b * V_HEAD_NUMS * seq_len;
+    int out_base = b * V_HEAD_NUMS * seq_len * K_HEAD_DIMS + h * K_HEAD_DIMS;
 #if (K_HEAD_DIMS == 128)
 #    if (SUBGROUP_SIZE == 8)
     float8 init_state[V_BLOCK_SIZE][2];
@@ -315,7 +320,7 @@ KERNEL(linear_attention_ref)
     // load initial state
     for (int iv = 0; iv < V_BLOCK_SIZE; iv++) {
         int i_v = i_v_base + iv;
-        int init_base = b * K_HEAD_NUMS * K_HEAD_DIMS * K_HEAD_DIMS + h * K_HEAD_DIMS * K_HEAD_DIMS + i_v * K_HEAD_DIMS;
+        int init_base = b * V_HEAD_NUMS * K_HEAD_DIMS * K_HEAD_DIMS + h * K_HEAD_DIMS * K_HEAD_DIMS + i_v * K_HEAD_DIMS;
 #if (K_HEAD_DIMS == 128)
 #    if (SUBGROUP_SIZE == 8)
         load_init_state_128_sg8(init_state[iv], initial_state, init_base);
@@ -333,14 +338,14 @@ KERNEL(linear_attention_ref)
 #endif
     }
 
-        int q_base = h * K_HEAD_DIMS;
-        int k_base = h * K_HEAD_DIMS;
-        int v_base = h * K_HEAD_DIMS;
+        int q_base = qk_h * K_HEAD_DIMS;
+        int k_base = (qk_h + key_offset) * K_HEAD_DIMS;
+        int v_base = (h + value_offset) * K_HEAD_DIMS;
         int out_i_base = out_base;
     //  loop over time step
-        for (int i = 0; i < seq_len; i++, q_base += STEP_STRIDE, k_base += KEY_STEP_STRIDE, v_base += VALUE_STEP_STRIDE, out_i_base += STEP_STRIDE) {
-        float b_g = exp(convert_float(g_ptr[i * K_HEAD_NUMS + h]));
-        float b_beta = convert_float(beta_ptr[i * K_HEAD_NUMS + h]);
+        for (int i = 0; i < seq_len; i++, q_base += STEP_STRIDE, k_base += KEY_STEP_STRIDE, v_base += VALUE_STEP_STRIDE, out_i_base += OUTPUT_STEP_STRIDE) {
+        float b_g = exp(convert_float(g_ptr[i * V_HEAD_NUMS + h]));
+        float b_beta = convert_float(beta_ptr[i * V_HEAD_NUMS + h]);
         // load k and q
 #if (K_HEAD_DIMS == 128)
 #    if (SUBGROUP_SIZE == 8)
@@ -536,7 +541,7 @@ KERNEL(linear_attention_ref)
     #endif
     for (int iv = 0; iv < V_BLOCK_SIZE; iv++) {
         int i_v = i_v_base + iv;
-        int init_base = b * K_HEAD_NUMS * K_HEAD_DIMS * K_HEAD_DIMS + h * K_HEAD_DIMS * K_HEAD_DIMS + i_v * K_HEAD_DIMS;
+        int init_base = b * V_HEAD_NUMS * K_HEAD_DIMS * K_HEAD_DIMS + h * K_HEAD_DIMS * K_HEAD_DIMS + i_v * K_HEAD_DIMS;
 #if (K_HEAD_DIMS == 128)
 #    if (SUBGROUP_SIZE == 8)
         store_init_state_128_sg8(init_state[iv], state_out, init_base);

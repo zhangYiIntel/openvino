@@ -24,9 +24,16 @@ std::vector<layout> linear_attention_inst::calc_output_layouts(linear_attention_
     if (all_inputs.size() != 6)
         OPENVINO_THROW("linear_attention's must have 6 inputs");
     // query, key, value, g, beta, initial_states
+    auto query_layout = impl_param.get_input_layout(0);
     auto value_layout = impl_param.get_input_layout(2);
+    auto out_ps = value_layout.get_partial_shape();
+    const auto& q_ps = query_layout.get_partial_shape();
+    if (out_ps.rank().is_static() && q_ps.rank().is_static() && out_ps.rank().get_length() == 4 && q_ps.rank().get_length() == 4) {
+        out_ps[0] = q_ps[0];
+        out_ps[1] = q_ps[1];
+    }
     std::vector<layout> output_layouts;
-    output_layouts.emplace_back(value_layout.get_partial_shape(), value_layout.data_type, value_layout.format);
+    output_layouts.emplace_back(out_ps, value_layout.data_type, value_layout.format);
     if (num_outputs == 2) {
         output_layouts.push_back(impl_param.get_input_layout(5));
     }
