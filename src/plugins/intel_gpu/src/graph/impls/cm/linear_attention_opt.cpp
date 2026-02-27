@@ -13,6 +13,7 @@
 #include "registry/implementation_manager.hpp"
 #include "utils/kernel_generator.hpp"
 #include "linear_attention_opt.hpp"
+#include "intel_gpu/graph/network.hpp"
 
 namespace ov::intel_gpu::cm {
 namespace {
@@ -149,7 +150,17 @@ public:
     }
 
     cldnn::event::ptr execute(const std::vector<cldnn::event::ptr>& events, cldnn::primitive_inst& instance) override {
-        return PrimitiveImplCM::execute(events, instance);
+        auto ev = PrimitiveImplCM::execute(events, instance);
+
+        auto& prim = instance.get_node().as<linear_attention>().get_primitive();
+        if (!prim->variable_id.empty() && instance.outputs_memory_count() > 1) {
+            auto& variable = instance.get_network().get_variable(prim->variable_id);
+            auto out_layout = instance.get_output_layout(1);
+            variable.set_memory(instance.output_memory_ptr(1), out_layout);
+            variable.set();
+        }
+
+        return ev;
     }
 };
 

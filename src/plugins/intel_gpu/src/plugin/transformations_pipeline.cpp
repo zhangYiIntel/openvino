@@ -90,6 +90,7 @@
 #include "plugin/transformations/keep_moe_3gemm_const_precision.hpp"
 #include "plugin/transformations/kv_cache_compression.hpp"
 #include "plugin/transformations/kv_cache_fusion.hpp"
+#include "plugin/transformations/linear_attention_variable_fusion.hpp"
 #include "plugin/transformations/lora_horizontal_fusion.hpp"
 #include "plugin/transformations/lora_subgraph_horizontal_fusion.hpp"
 #include "plugin/transformations/move_fc_reshape_to_weights.hpp"
@@ -568,6 +569,8 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
         manager.register_pass<ov::pass::KeepConstPrecision>(supported_woq_types, !device_info.supports_immad);
         manager.register_pass<ov::pass::PrintModel>("before_la_fusion.cpp");
         manager.register_pass<ov::pass::LinearAttentionFusion>();
+        manager.register_pass<ov::pass::PrintModel>("after_la_fusion.cpp");
+        manager.register_pass<ov::intel_gpu::LinearAttentionVariableFusion>();
 
         {
             // Disable XAttention if GPU Xe2/Xe3 architectures is unavaiable or IGC incompatiable.

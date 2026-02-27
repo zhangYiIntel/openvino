@@ -25,33 +25,46 @@ struct linear_attention : public primitive_base<linear_attention> {
     /// @param id                 An identifier of new primitive.
     /// @param inputs             A list of Input primitive ids (inputs).
     linear_attention(const primitive_id& id,
-            const std::vector<input_info>& inputs)
-        : primitive_base(id, inputs) {
+            const std::vector<input_info>& inputs,
+            const std::string& variable_id = "",
+            const ov::element::Type& user_specified_type = ov::element::dynamic)
+        : primitive_base(id, inputs)
+        , variable_id(variable_id)
+        , user_specified_type(user_specified_type) {
     }
+
+    std::string variable_id;
+    ov::element::Type user_specified_type;
 
     size_t hash() const override {
         size_t seed = primitive::hash();
+        seed = hash_combine(seed, variable_id);
+        seed = hash_combine(seed, user_specified_type.hash());
         return seed;
     }
 
     bool operator==(const primitive& rhs) const override {
-        return compare_common_params(rhs);
+        if (!compare_common_params(rhs))
+            return false;
+
+        auto rhs_casted = downcast<const linear_attention>(rhs);
+        return variable_id == rhs_casted.variable_id &&
+               user_specified_type == rhs_casted.user_specified_type;
     }
 
     void save(BinaryOutputBuffer& ob) const override {
         primitive_base<linear_attention>::save(ob);
-        // ob << k_head_size;
-        // ob << v_head_size;
-        // ob << k_heads_num;
-        // ob << v_heads_num;
+        ov::element::Type_t data_type = user_specified_type;
+        ob << variable_id;
+        ob << make_data(&data_type, sizeof(ov::element::Type_t));
     }
 
     void load(BinaryInputBuffer& ib) override {
         primitive_base<linear_attention>::load(ib);
-        // ib >> k_head_size;
-        // ib >> v_head_size;
-        // ib >> k_heads_num;
-        // ib >> v_heads_num;
+        ov::element::Type_t data_type = ov::element::Type_t::dynamic;
+        ib >> variable_id;
+        ib >> make_data(&data_type, sizeof(ov::element::Type_t));
+        user_specified_type = data_type;
     }
 
     // size_t k_head_size = 0;

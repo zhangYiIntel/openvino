@@ -54,6 +54,9 @@ std::string linear_attention_inst::to_string(linear_attention_node const& node) 
     linear_attention_info.add("value", node.input(2).id());
     linear_attention_info.add("g", node.input(3).id());
     linear_attention_info.add("beta", node.input(3).id());
+    if (!desc->variable_id.empty()) {
+        linear_attention_info.add("variable id", desc->variable_id);
+    }
 
     node_info->add("linear_attention_info", linear_attention_info);
     node_info->dump(primitive_description);
