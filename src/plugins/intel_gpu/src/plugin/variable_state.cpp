@@ -21,6 +21,7 @@ VariableState::VariableState(const VariableStateInfo& info, RemoteContextImpl::P
     , m_user_specified_type(info.m_user_specified_type)
     , m_shape_predictor(shape_predictor)
     , m_transpose_required(info.transpose_required)
+    , m_clear_in_reset(info.clear_in_reset)
     , m_initial_layout(info.m_layout) {
     update_device_buffer();
 }
@@ -28,7 +29,7 @@ VariableState::VariableState(const VariableStateInfo& info, RemoteContextImpl::P
 void VariableState::reset() {
     m_is_set = false;
     set_layout(m_initial_layout);
-}
+ }
 
 cldnn::memory::ptr VariableState::get_memory() const {
     return m_memory;
@@ -115,7 +116,8 @@ void VariableState::update_device_buffer() {
         ov::Shape current_shape(current_buf_size.begin(), current_buf_size.end());
         const auto alloc_shape = predict_shape(m_name, cldnn::layout(current_shape, m_layout.data_type, m_layout.format), *m_shape_predictor);
         const auto alloc_layout = cldnn::layout(alloc_shape, m_layout.data_type, m_layout.format);
-        m_memory = m_context->get_engine().allocate_memory(alloc_layout, alloc_type, false);
+        std::cout << "VariableState::update_device_buffer, name: " << m_name << "|" << m_transpose_required << ", clear in reset: " << m_clear_in_reset << std::endl;
+        m_memory = m_context->get_engine().allocate_memory(alloc_layout, alloc_type, m_clear_in_reset && actual_size == 0);
         actual_size = std::max(actual_size, alloc_layout.bytes_count());
     }
 

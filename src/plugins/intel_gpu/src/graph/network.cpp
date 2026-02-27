@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#include "intel_gpu/primitives/assign.hpp"
 #include "intel_gpu/plugin/variable_state.hpp"
 #include "intel_gpu/primitives/read_value.hpp"
+#include "intel_gpu/primitives/linear_attention.hpp"
 #include "intel_gpu/primitives/lora.hpp"
 #include "intel_gpu/primitives/data.hpp"
 #include "intel_gpu/primitives/mutable_data.hpp"
@@ -940,6 +942,7 @@ void network::allocate_primitive_instance(program_node const& node) {
     }
 
     bool is_lora_state = false;
+    bool is_ssm_state = false;
     if (node.is_type<read_value>()) {
         _read_values.push_back(inst);
         const auto& variable_id = node.as<read_value>().get_primitive()->variable_id;
@@ -951,6 +954,13 @@ void network::allocate_primitive_instance(program_node const& node) {
         const auto& users = node.get_users();
         if (!users.empty()) {
             is_lora_state = users.front()->is_type<lora>();
+            is_ssm_state = users.front()->is_type<linear_attention>();
+        }
+    }
+
+    if (node.is_type<assign>()) {
+        if (node.get_dependency(0).is_type<linear_attention>()) {
+            is_ssm_state = true;
         }
     }
 
@@ -964,10 +974,14 @@ void network::allocate_primitive_instance(program_node const& node) {
                 if (state_idx < lora_prim->input.size() &&
                     lora_prim->input[state_idx].pid == node.id()) {
                     transpose_required = lora_prim->transposed_states;
-                }
+               }
             }
         }
-        set_variables_state_info(state_prim->variable_id(), node.get_output_layout(0), state_prim->get_user_specified_type(), prim.get(), transpose_required);
+        if (is_ssm_state) {
+            transpose_required = true;
+            std::cout << "Transpose is required for SSM state: " << state_prim->variable_id() << "|" << transpose_required << "|" << is_ssm_state << std::endl;
+        }
+        set_variables_state_info(state_prim->variable_id(), node.get_output_layout(0), state_prim->get_user_specified_type(), prim.get(), transpose_required, is_ssm_state);
     }
 
     if (node.is_constant()) {
@@ -1052,11 +1066,14 @@ void network::set_variables_state_info(const std::string& variable_id,
                                        const layout& variable_layout,
                                        ov::element::Type user_specified_type,
                                        const primitive* p,
-                                       bool transpose_required) {
+                                       bool transpose_required,
+                                       bool clear_in_reset) {
     _variables_state_info.emplace(variable_id, ov::intel_gpu::VariableStateInfo{variable_id, variable_layout, user_specified_type});
 
     _variables_state_info.at(variable_id).m_primitives.insert(p);
     _variables_state_info.at(variable_id).transpose_required = transpose_required;
+    _variables_state_info.at(variable_id).clear_in_reset = clear_in_reset;
+    std::cout << "name|" << variable_id << "|" << _variables_state_info.at(variable_id).transpose_required << "|" << _variables_state_info.at(variable_id).clear_in_reset << std::endl;
 }
 
 void network::set_reuse_variable_mem(bool reuse) {
