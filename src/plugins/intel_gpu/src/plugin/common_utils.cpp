@@ -245,7 +245,7 @@ void convert_and_copy(const ov::ITensor* src, cldnn::memory::ptr dst, cldnn::str
     dst->copy_from(stream, tmp_tensor.data(), blocking);
 }
 
-void convert_and_copy(const cldnn::memory::ptr src, ov::ITensor* dst, const cldnn::stream& stream) {
+void convert_and_copy(const cldnn::memory::ptr src, ov::ITensor* dst, const cldnn::stream& stream, bool transpose) {
     auto src_et = src->get_layout().data_type;
     auto dst_et = dst->get_element_type();
 
@@ -265,7 +265,7 @@ void convert_and_copy(const cldnn::memory::ptr src, ov::ITensor* dst, const cldn
         dst_ptr = dst->data();
     }
 
-    return ::convert_and_copy(src_ptr, src_et, dst_ptr, dst_et, size, src->get_layout());
+    return ::convert_and_copy(src_ptr, src_et, dst_ptr, dst_et, size, src->get_layout(), transpose);
 }
 
 void convert_and_copy(const cldnn::memory::ptr src, cldnn::memory::ptr dst, cldnn::stream& stream) {

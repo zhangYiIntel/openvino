@@ -450,6 +450,14 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
             manager.register_pass<ov::intel_gpu::FuseMOE3GemmCompressed>();
         }
 
+        manager.register_pass<ov::pass::PrintModel>("11before_la_fusion.cpp");
+        manager.register_pass<ov::pass::LinearAttentionFusion>();
+        manager.register_pass<ov::pass::PrintModel>("22after_la_fusion.cpp");
+        if (getenv("ENABLE_LA_FUSE")) {
+            manager.register_pass<ov::intel_gpu::LinearAttentionVariableFusion>();
+        }
+        manager.register_pass<ov::pass::PrintModel>("33after_la_variable_fusion.cpp");
+
         manager.register_pass<ov::pass::InitNodeInfo>();
         manager.register_pass<EinsumDecomposition>();
 
@@ -567,10 +575,6 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
         // the "input -> reshape" subgraph is constant-folded in the above "CommonOptimizations"
         // To handle this case, "KeepConstPrecision" is executed again.
         manager.register_pass<ov::pass::KeepConstPrecision>(supported_woq_types, !device_info.supports_immad);
-        manager.register_pass<ov::pass::PrintModel>("before_la_fusion.cpp");
-        manager.register_pass<ov::pass::LinearAttentionFusion>();
-        manager.register_pass<ov::pass::PrintModel>("after_la_fusion.cpp");
-        manager.register_pass<ov::intel_gpu::LinearAttentionVariableFusion>();
 
         {
             // Disable XAttention if GPU Xe2/Xe3 architectures is unavaiable or IGC incompatiable.

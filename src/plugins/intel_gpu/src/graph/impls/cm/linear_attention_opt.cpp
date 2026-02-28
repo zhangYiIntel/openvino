@@ -89,11 +89,10 @@ protected:
             assert(!params.is_dynamic());
             auto desc = params.typed_desc<linear_attention>();
             const auto query_shape = params.get_input_layout(0).get_shape();
-            const auto value_shape = params.get_input_layout(2).get_shape();
             // B, T, H, K
             const size_t batch = query_shape[0];
             const size_t seq = query_shape[1];
-            const size_t head_nums = value_shape[2];
+            const size_t head_nums = query_shape[2];
 
             const auto& info = params.get_device_info();
             const size_t thread_nums = (info.arch <= gpu_arch::xe_hpc) ? 16 : 8;
@@ -153,10 +152,10 @@ public:
         auto ev = PrimitiveImplCM::execute(events, instance);
 
         auto& prim = instance.get_node().as<linear_attention>().get_primitive();
-        if (!prim->variable_id.empty() && instance.outputs_memory_count() > 1) {
+        if (!prim->variable_id.empty()) {
             auto& variable = instance.get_network().get_variable(prim->variable_id);
-            auto out_layout = instance.get_output_layout(1);
-            variable.set_memory(instance.output_memory_ptr(1), out_layout);
+            auto out_layout = instance.get_input_layout(5);
+            variable.set_memory(instance.input_memory_ptr(5), out_layout);
             variable.set();
         }
 

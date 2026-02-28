@@ -57,9 +57,11 @@ inline void input_check(const ov::Node* node,
 namespace ov::intel_gpu::op {
 
 LinearAttention::LinearAttention(const ov::OutputVector& args,
-                                 const std::shared_ptr<ov::op::util::Variable>& state_variable)
+                                 const std::shared_ptr<ov::op::util::Variable>& state_variable,
+                                 bool output_state)
     : ov::op::Op(args) {
     m_variable = state_variable;
+    m_output_state = output_state;
     constructor_validate_and_infer_types();
 }
 
@@ -87,12 +89,14 @@ void LinearAttention::validate_and_infer_types() {
         out_ps[1] = q_ps[1];
     }
     set_output_type(0, get_input_element_type(0), out_ps);
-    set_output_type(1, get_input_element_type(5), h_ps);
+    if (m_output_state) {
+        set_output_type(1, get_input_element_type(5), h_ps);
+    }
 }
 
 std::shared_ptr<ov::Node> LinearAttention::clone_with_new_inputs(const ov::OutputVector& new_args) const {
     check_new_args_count(this, new_args);
-    return std::make_shared<LinearAttention>(new_args, m_variable);
+    return std::make_shared<LinearAttention>(new_args, m_variable, m_output_state);
 }
 
 }  // namespace ov::intel_gpu::op

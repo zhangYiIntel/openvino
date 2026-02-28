@@ -17,7 +17,9 @@ public:
 
     LinearAttention() = default;
 
-    LinearAttention(const ov::OutputVector& args, const std::shared_ptr<ov::op::util::Variable>& state_variable);
+    LinearAttention(const ov::OutputVector& args,
+                    const std::shared_ptr<ov::op::util::Variable>& state_variable,
+                    bool output_state = true);
 
     void validate_and_infer_types() override;
     std::shared_ptr<ov::Node> clone_with_new_inputs(const ov::OutputVector& new_args) const override;
@@ -26,6 +28,9 @@ public:
         OPENVINO_ASSERT(m_variable, "Variable is not initialized. Variable_id is unavailable");
         return m_variable->get_info().variable_id;
     }
+
+private:
+    bool m_output_state = true;
 };
 
 }  // namespace ov::intel_gpu::op

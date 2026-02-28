@@ -76,8 +76,8 @@ void LinearAttention::validate_and_infer_types() {
     input_check(this, 0, "query", {4}, {});
     input_check(this, 1, "key", {4}, {});
     input_check(this, 2, "value", {4}, {});
-    input_check(this, 3, "beta", {3}, {});
-    input_check(this, 4, "g", {3}, {});
+    input_check(this, 3, "g", {3}, {});
+    input_check(this, 4, "beta", {3}, {});
     input_check(this, 5, "initial_states", {4}, {});
 
     // value head_size may be not same with key, output uses query head count
@@ -89,9 +89,23 @@ void LinearAttention::validate_and_infer_types() {
     if (out_ps.rank().is_static() && q_ps.rank().is_static() && out_ps.rank().get_length() == 4 && q_ps.rank().get_length() == 4) {
         out_ps[0] = q_ps[0];
         out_ps[1] = q_ps[1];
+        out_ps[2] = q_ps[2];
     }
     set_output_type(0, get_input_element_type(0), out_ps);
-    set_output_type(1, get_input_element_type(5), h_ps);
+    std::cout << "LinearAttention h_ps shape: " << h_ps << ", element type: " << get_input_element_type(1) << std::endl;
+    ov::PartialShape state_ps = h_ps;
+    if (q_ps.rank().is_static() && v_ps.rank().is_static() && q_ps.rank().get_length() == 4 && v_ps.rank().get_length() == 4) {
+        ov::PartialShape inferred_state{q_ps[0], v_ps[2], q_ps[3], v_ps[3]};
+        if (h_ps.rank().is_static()) {
+            NODE_VALIDATION_CHECK(this,
+                                  h_ps.compatible(inferred_state),
+                                  "Initial states shape is incompatible with inferred state shape ",
+                                  inferred_state,
+                                  ".");
+        }
+        state_ps = inferred_state;
+    }
+    set_output_type(1, get_input_element_type(5), state_ps);
 }
 
 std::shared_ptr<ov::Node> LinearAttention::clone_with_new_inputs(const ov::OutputVector& new_args) const {

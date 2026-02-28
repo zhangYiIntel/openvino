@@ -137,8 +137,9 @@ ov::SoPtr<ov::ITensor> VariableState::get_state() const {
     }
 
     auto tensor = m_context->create_host_tensor(get_user_specified_type(), m_memory->get_layout().get_shape());
-
-    convert_and_copy(m_memory, tensor._ptr.get(), m_context->get_engine().get_service_stream());
+    GPU_DEBUG_TRACE_DETAIL << m_name << " : get_state (Ptr : " << m_memory->buffer_ptr()
+                           << ", layout : " << m_memory->get_layout().to_short_string() << ")" << std::endl;
+    convert_and_copy(m_memory, tensor._ptr.get(), m_context->get_engine().get_service_stream(), m_transpose_required);
 
     return tensor;
 }
