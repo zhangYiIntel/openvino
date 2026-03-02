@@ -139,10 +139,10 @@ public:
         auto ev = PrimitiveImplOCL::execute(events, instance);
 
         auto& prim = instance.get_node().as<linear_attention>().get_primitive();
-        if (!prim->variable_id.empty() && instance.outputs_memory_count() > 1) {
+        if (!prim->variable_id.empty()) {
             auto& variable = instance.get_network().get_variable(prim->variable_id);
-            auto out_layout = instance.get_output_layout(1);
-            variable.set_memory(instance.output_memory_ptr(1), out_layout);
+            auto out_layout = instance.get_input_layout(5);
+            variable.set_memory(instance.input_memory_ptr(5), out_layout);
             variable.set();
         }
 

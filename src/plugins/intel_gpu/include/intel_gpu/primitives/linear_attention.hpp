@@ -26,20 +26,15 @@ struct linear_attention : public primitive_base<linear_attention> {
     /// @param inputs             A list of Input primitive ids (inputs).
     linear_attention(const primitive_id& id,
             const std::vector<input_info>& inputs,
-            const std::string& variable_id = "",
-            const ov::element::Type& user_specified_type = ov::element::dynamic)
+            const std::string& variable_id = "")
         : primitive_base(id, inputs)
-        , variable_id(variable_id)
-        , user_specified_type(user_specified_type) {
+        , variable_id(variable_id) {
     }
 
     std::string variable_id;
-    ov::element::Type user_specified_type;
 
     size_t hash() const override {
         size_t seed = primitive::hash();
-        seed = hash_combine(seed, variable_id);
-        seed = hash_combine(seed, user_specified_type.hash());
         return seed;
     }
 
@@ -47,24 +42,17 @@ struct linear_attention : public primitive_base<linear_attention> {
         if (!compare_common_params(rhs))
             return false;
 
-        auto rhs_casted = downcast<const linear_attention>(rhs);
-        return variable_id == rhs_casted.variable_id &&
-               user_specified_type == rhs_casted.user_specified_type;
+        return true;
     }
 
     void save(BinaryOutputBuffer& ob) const override {
         primitive_base<linear_attention>::save(ob);
-        ov::element::Type_t data_type = user_specified_type;
-        ob << variable_id;
-        ob << make_data(&data_type, sizeof(ov::element::Type_t));
+        // ob << variable_id;
     }
 
     void load(BinaryInputBuffer& ib) override {
         primitive_base<linear_attention>::load(ib);
-        ov::element::Type_t data_type = ov::element::Type_t::dynamic;
-        ib >> variable_id;
-        ib >> make_data(&data_type, sizeof(ov::element::Type_t));
-        user_specified_type = data_type;
+        // ib >> variable_id;
     }
 
     // size_t k_head_size = 0;

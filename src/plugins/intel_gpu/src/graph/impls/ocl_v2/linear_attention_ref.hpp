@@ -18,6 +18,21 @@ namespace ov::intel_gpu::ocl {
 struct LinearAttentionRef : public ImplementationManager {
     OV_GPU_PRIMITIVE_IMPL("ocl::linear_attention::ref")
     explicit LinearAttentionRef(shape_types shape_type, ValidateFunc vf = nullptr) : ImplementationManager(impl_types::ocl, shape_type, std::move(vf)) {}
+    [[nodiscard]] in_out_fmts_t query_formats(const program_node& node) const override {
+        assert(node.is_type<linear_attention>());
+        std::vector<format::type> in_fmts(node.get_dependencies().size(), format::any);
+        std::vector<format::type> out_fmts(node.get_outputs_count(), format::any);
+
+        for (size_t idx = 0; idx < node.get_dependencies().size(); idx++) {
+            in_fmts[idx] = format::bfyx;
+        }
+        out_fmts[0] = format::bfyx;
+        for (size_t idx = 1; idx < node.get_outputs_count(); idx++) {
+            out_fmts[idx] = format::bfyx;
+        }
+
+        return {in_fmts, out_fmts};
+    }
     [[nodiscard]] std::unique_ptr<primitive_impl> create_impl(const program_node& node, const RuntimeParams& params) const override;
 
     [[nodiscard]] bool validate_impl(const program_node& node) const override {
