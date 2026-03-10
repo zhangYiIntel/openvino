@@ -761,6 +761,7 @@ dot_product(TA* a, TB* b, size_t n, float* scale, float* zp, float* head_sum, [[
 
 #elif defined(OPENVINO_ARCH_ARM64)
 #    if defined(HAVE_SVE)
+    static_assert(std::is_same_v<TA, float> && std::is_same_v<TB, float>, "SVE path only supports float32 data type");
     svbool_t pg = svptrue_b32();
     svfloat32_t sum0 = svdup_n_f32(0.0f);
     svfloat32_t sum1 = svdup_n_f32(0.0f);
@@ -1479,6 +1480,7 @@ static float dot_product(TA* a, uint8_t* b, size_t n, float* scale, float* zp, f
     }
     return sum;
 #elif defined(OPENVINO_ARCH_ARM64)
+    static_assert(std::is_same_v<TA, float>, "Only support float16 and float32 for ARM64 dot product.");
     while (group_id < n / group_size) {
         size_t i = 0;
         float group_scale = *(scale + group_id * 2);
