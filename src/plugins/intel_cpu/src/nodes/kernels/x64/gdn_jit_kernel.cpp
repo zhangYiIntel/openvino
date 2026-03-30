@@ -4,8 +4,8 @@
 
 #include "gdn_jit_kernel.hpp"
 
-#include <cpu/x64/injectors/jit_uni_eltwise_injector.hpp>
 #include <common/utils.hpp>
+#include <cpu/x64/injectors/jit_uni_eltwise_injector.hpp>
 #include <type_traits>
 
 #include "emitters/plugin/x64/jit_load_store_emitters.hpp"
@@ -24,6 +24,7 @@ void jit_gdn_kernel<isa>::load(const Vmm& vmm_dst,
                                const int& elt_num,
                                bool fill,
                                size_t offset) {
+    // Typed load helper (src_prc -> f32 VMM via jit emitter)
     const auto seed = load_emitter_params(src_prc, ov::element::f32, elt_num, fill, "float_min").hash();
     if (!emitters[seed]) {
         emitters[seed] = std::make_unique<jit_load_emitter>(this,
@@ -47,6 +48,7 @@ void jit_gdn_kernel<isa>::store(const Xbyak::Reg64& reg_dst,
                                 ov::element::Type dst_prc,
                                 const int& elt_num,
                                 size_t offset) {
+    // Typed store helper (f32 VMM -> dst_prc via jit emitter)
     const auto seed = store_emitter_params(ov::element::f32, dst_prc, elt_num).hash();
     if (!emitters[seed]) {
         emitters[seed] = std::make_unique<jit_store_emitter>(this, isa, ov::element::f32, dst_prc, elt_num);
@@ -59,6 +61,7 @@ void jit_gdn_kernel<isa>::store(const Xbyak::Reg64& reg_dst,
 
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::reduce_zmm_f32_to_xmm_scalar(const Xbyak::Zmm& zmm_src, const Xbyak::Xmm& xmm_dst) {
+    // Horizontal reduce 16x f32 (ZMM) into scalar lane of xmm_dst
     vextractf32x8(Xbyak::Ymm(x_tmp1.getIdx()), zmm_src, 1);
     vaddps(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Ymm(zmm_src.getIdx()), Xbyak::Ymm(x_tmp1.getIdx()));
     vextractf128(x_tmp1, Xbyak::Ymm(x_tmp0.getIdx()), 1);
@@ -75,6 +78,7 @@ void jit_gdn_kernel<isa>::dot_product_scalar(const Xbyak::Xmm& xmm_dst,
                                              size_t tail_count,
                                              size_t base_off,
                                              size_t elem_size) {
+    // Scalar tail dot-product accumulation into xmm_dst
     for (size_t i = 0; i < tail_count; i++) {
         const size_t off = base_off + i * elem_size;
         load(v_tmp0, reg_a, m_jcp.data_prc, 1, false, off);
@@ -89,10 +93,12 @@ void jit_gdn_kernel<isa>::dot_product_to_scalar(const Xbyak::Xmm& xmm_dst,
                                                 const Xbyak::Reg64& reg_a,
                                                 const Xbyak::Reg64& reg_b,
                                                 const Xbyak::Reg64& reg_aux) {
+    // Dot product dispatcher (bf16/f16/f32/small fallback) -> scalar xmm_dst
     uni_vpxor(xmm_dst, xmm_dst, xmm_dst);
     const size_t qk = m_jcp.qk_head_size;
 
     if (m_jcp.data_prc == ov::element::bf16 && mayiuse(avx512_core_bf16)) {
+        // bf16 fast path (vdpbf16ps on 32 bf16 elems per vector)
         const size_t vec_elems = 32;
         const size_t vec_cnt = qk / vec_elems;
         const size_t tail = qk % vec_elems;
@@ -110,6 +116,7 @@ void jit_gdn_kernel<isa>::dot_product_to_scalar(const Xbyak::Xmm& xmm_dst,
 
         dot_product_scalar(xmm_dst, reg_a, reg_b, tail, vec_cnt * 64, sizeof(uint16_t));
     } else if (m_jcp.data_prc == ov::element::f16 && mayiuse(avx512_core_fp16)) {
+        // f16 fast path (vfmadd231ph + fp16->fp32 accumulation)
         const size_t vec_elems = 32;
         const size_t vec_cnt = qk / vec_elems;
         const size_t tail = qk % vec_elems;
@@ -136,6 +143,7 @@ void jit_gdn_kernel<isa>::dot_product_to_scalar(const Xbyak::Xmm& xmm_dst,
 
         dot_product_scalar(xmm_dst, reg_a, reg_b, tail, vec_cnt * 64, sizeof(uint16_t));
     } else {
+        // generic path (f32 vectorized, otherwise scalar)
         if (m_jcp.data_prc == ov::element::f32) {
             const size_t vec_cnt = qk / vec_size;
             const size_t tail = qk % vec_size;
@@ -168,6 +176,7 @@ void jit_gdn_kernel<isa>::dot_product_to_scalar(const Xbyak::Xmm& xmm_dst,
 
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::multiply_scalar(const Xbyak::Reg64& reg_vec, const Xbyak::Xmm& xmm_scalar) {
+    // In-place vector scale: reg_vec[i] *= xmm_scalar
     const int elt_num = static_cast<int>(vec_size);
     const size_t elem_size = m_jcp.data_prc.size();
     const size_t step = static_cast<size_t>(elt_num) * elem_size;
@@ -196,6 +205,7 @@ void jit_gdn_kernel<isa>::l2norm_inplace(const Xbyak::Reg64& reg_vec,
                                          const Xbyak::Xmm& xmm_tmp0,
                                          const Xbyak::Xmm& xmm_tmp1,
                                          const Xbyak::Xmm& xmm_sum) {
+    // In-place L2 normalization over one head vector (with eps)
     const size_t qk = m_jcp.qk_head_size;
     const size_t vec_cnt = qk / vec_size;
     const size_t tail = qk % vec_size;
@@ -211,9 +221,8 @@ void jit_gdn_kernel<isa>::l2norm_inplace(const Xbyak::Reg64& reg_vec,
     }
 
     if constexpr (std::is_same_v<Vmm, Xbyak::Ymm>) {
-        const Xbyak::Xmm x_hi(13);
-        vextractf128(x_hi, v_aux0, 1);
-        vaddps(xmm_sum, xmm_sum, x_hi);
+        vextractf128(x_tmp1, v_aux0, 1);
+        vaddps(xmm_sum, xmm_sum, x_tmp1);
         vhaddps(xmm_sum, xmm_sum, xmm_sum);
         vhaddps(xmm_sum, xmm_sum, xmm_sum);
     } else {
@@ -233,15 +242,13 @@ void jit_gdn_kernel<isa>::l2norm_inplace(const Xbyak::Reg64& reg_vec,
     vmovd(xmm_tmp1, reg_aux2.cvt32());
     vdivss(xmm_tmp1, xmm_tmp1, xmm_sum);
 
-    const Vmm v_data_scale(xmm_tmp0.getIdx());
-    const Vmm v_scale(xmm_tmp1.getIdx());
-    vbroadcastss(v_scale, xmm_tmp1);
+    vbroadcastss(v_tmp1, xmm_tmp1);
 
     for (size_t i = 0; i < vec_cnt; i++) {
         const size_t off = i * vec_bytes;
-        load(v_data_scale, reg_vec, ov::element::f32, static_cast<int>(vec_size), false, off);
-        vmulps(v_data_scale, v_data_scale, v_scale);
-        store(reg_vec, v_data_scale, ov::element::f32, static_cast<int>(vec_size), off);
+        load(v_tmp0, reg_vec, ov::element::f32, static_cast<int>(vec_size), false, off);
+        vmulps(v_tmp0, v_tmp0, v_tmp1);
+        store(reg_vec, v_tmp0, ov::element::f32, static_cast<int>(vec_size), off);
     }
 
     for (size_t i = 0; i < tail; i++) {
@@ -254,19 +261,20 @@ void jit_gdn_kernel<isa>::l2norm_inplace(const Xbyak::Reg64& reg_vec,
 
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::generate() {
+    // JIT codegen entry for one (B,H,V) sequence kernel
     auto exp_injector = std::make_shared<jit_uni_eltwise_injector_t<isa>>(this,
-                                                                           dnnl::impl::alg_kind::eltwise_exp,
-                                                                           0.F,
-                                                                           0.F,
-                                                                           1.F,
-                                                                           dnnl::impl::data_type::f32,
-                                                                           true,
-                                                                           Xbyak::Reg64(Xbyak::Operand::RCX),
-                                                                           Xbyak::Opmask(1),
-                                                                           true,
-                                                                           false,
-                                                                           false,
-                                                                           false);
+                                                                          dnnl::impl::alg_kind::eltwise_exp,
+                                                                          0.F,
+                                                                          0.F,
+                                                                          1.F,
+                                                                          dnnl::impl::data_type::f32,
+                                                                          true,
+                                                                          Xbyak::Reg64(Xbyak::Operand::RCX),
+                                                                          Xbyak::Opmask(1),
+                                                                          true,
+                                                                          false,
+                                                                          false,
+                                                                          false);
 
     this->preamble();
 
@@ -286,6 +294,7 @@ void jit_gdn_kernel<isa>::generate() {
     mov(reg_out_seq, ptr[reg_args + GET_OFF(output_seq)]);
     mov(reg_t, ptr[reg_args + GET_OFF(t_size)]);
 
+    // One-time setup before t-loop
     exp_injector->load_table_addr();
 
     test(reg_t, reg_t);
@@ -293,6 +302,7 @@ void jit_gdn_kernel<isa>::generate() {
 
     L(l_t_loop);
     {
+        // Per-step constants / pointers setup
         // Reload scalar constants each iteration, as helper injectors may clobber xmm regs.
         mov(reg_aux.cvt32(), float2int(m_jcp.k_l2_norm_eps));
         vmovd(x_eps_k, reg_aux.cvt32());
@@ -334,6 +344,7 @@ void jit_gdn_kernel<isa>::generate() {
         mov(reg_query_tmp, ptr[reg_args + GET_OFF(query_tmp)]);
 
         if (m_jcp.fuse_qk_l2norm) {
+            // Optional fused L2 norm for key/query
             l2norm_inplace(reg_key_tmp, x_eps_k, x_tmp0, x_tmp1, x_hk);
             l2norm_inplace(reg_query_tmp, x_eps_q, x_tmp0, x_tmp1, x_hk);
         }
