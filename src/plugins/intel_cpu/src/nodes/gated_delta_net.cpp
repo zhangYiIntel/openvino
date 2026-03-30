@@ -4,7 +4,9 @@
 
 #include "gated_delta_net.h"
 
+#include <common/utils.hpp>
 #include <cstddef>
+#include <cmath>
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
 #include <string>
@@ -24,11 +26,103 @@
 #include "openvino/op/gated_delta_net.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "utils/plain_tensor.hpp"
+#if defined(OPENVINO_ARCH_X86_64)
+#    include "cpu_parallel.hpp"
+#    include "kernels/x64/gdn_jit_kernel.hpp"
+#endif
 
 using namespace ov::Extensions::Cpu;
 using namespace ov::Extensions::Cpu::XARCH;
 
 namespace ov::intel_cpu::node {
+
+#if defined(OPENVINO_ARCH_X86_64)
+namespace {
+struct GatedDeltaNetKey {
+    ov::element::Type precision;
+    size_t qk_head_size;
+    bool fuse_qk_l2norm;
+    float q_l2_norm_eps;
+    float k_l2_norm_eps;
+
+    [[nodiscard]] size_t hash() const {
+        size_t seed = 0;
+        seed = dnnl::impl::hash_combine(seed, precision.hash());
+        seed = dnnl::impl::hash_combine(seed, qk_head_size);
+        seed = dnnl::impl::hash_combine(seed, fuse_qk_l2norm);
+        seed = dnnl::impl::hash_combine(seed, q_l2_norm_eps);
+        seed = dnnl::impl::hash_combine(seed, k_l2_norm_eps);
+        return seed;
+    }
+
+    bool operator==(const GatedDeltaNetKey& rhs) const {
+        return precision == rhs.precision && qk_head_size == rhs.qk_head_size &&
+               fuse_qk_l2norm == rhs.fuse_qk_l2norm && q_l2_norm_eps == rhs.q_l2_norm_eps &&
+               k_l2_norm_eps == rhs.k_l2_norm_eps;
+    }
+};
+
+void recurrent_linear_attn_jit(const ov::intel_cpu::PlainTensor& query,
+                               const ov::intel_cpu::PlainTensor& key,
+                               const ov::intel_cpu::PlainTensor& value,
+                               const ov::intel_cpu::PlainTensor& recurrent_state,
+                               const ov::intel_cpu::PlainTensor& gate,
+                               const ov::intel_cpu::PlainTensor& beta,
+                               ov::intel_cpu::PlainTensor& output_attn,
+                               ov::intel_cpu::PlainTensor& output_recurrent_state,
+                               float* temp_buffer,
+                               const ov::intel_cpu::CpuParallelPtr& cpu_parallel,
+                               const std::shared_ptr<kernel::JitKernelBase>& jit_kernel) {
+    OPENVINO_ASSERT(jit_kernel, "GDN JIT kernel is not created");
+
+    const size_t B = query.m_dims[0];
+    const size_t T = query.m_dims[1];
+    const size_t H = query.m_dims[2];
+    const size_t K = query.m_dims[3];
+    const size_t V = value.m_dims[3];
+    cpu_parallel->parallel_for3d(B, H, V, [&](size_t i_b, size_t i_h, size_t i_v) {
+        const size_t tid = parallel_get_thread_num();
+        float* init_state = temp_buffer + tid * 3 * K;
+        float* b_k = temp_buffer + tid * 3 * K + K;
+        float* b_q = temp_buffer + tid * 3 * K + 2 * K;
+
+        float* q_ptr = query.ptr<float>(i_b, 0, i_h);
+        float* k_ptr = key.ptr<float>(i_b, 0, i_h);
+        float* v_ptr = value.ptr<float>(i_b, 0, i_h);
+        float* out_ptr = output_attn.ptr<float>(i_b, 0, i_h) + i_v;
+
+        float* gate_ptr = gate.ptr<float>(i_b, 0, i_h);
+        float* beta_ptr = beta.ptr<float>(i_b, 0, i_h);
+
+        for (size_t j = 0; j < K; j++) {
+            init_state[j] = recurrent_state.at<float>({i_b, i_h, j, i_v});
+        }
+
+        kernel::jit_gdn_call_args args{};
+        args.state = reinterpret_cast<uint8_t*>(init_state);
+        args.key_seq = reinterpret_cast<const uint8_t*>(k_ptr);
+        args.query_seq = reinterpret_cast<const uint8_t*>(q_ptr);
+        args.value_seq = v_ptr + i_v;
+        args.gate_seq = gate_ptr;
+        args.beta_seq = beta_ptr;
+        args.t_size = T;
+        args.key_query_stride = H * K;
+        args.gate_beta_stride = H;
+        args.value_stride = H * V;
+        args.output_stride = H * V;
+        args.key_tmp = reinterpret_cast<uint8_t*>(b_k);
+        args.query_tmp = reinterpret_cast<uint8_t*>(b_q);
+        args.output_seq = out_ptr;
+        (*jit_kernel)(&args);
+
+        for (size_t j = 0; j < K; j++) {
+            output_recurrent_state.at<float>({i_b, i_h, j, i_v}) = init_state[j];
+        }
+    });
+}
+
+}  // namespace
+#endif
 
 GatedDeltaNet::GatedDeltaNet(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
     : Node(op, context, NgraphShapeInferFactory(op)) {
@@ -56,13 +150,29 @@ void GatedDeltaNet::initSupportedPrimitiveDescriptors() {
 }
 
 void GatedDeltaNet::createPrimitive() {
+    const auto precision = ov::element::f32;
     const auto queryDims = getInputShapeAtPort(0).getDims();
     auto headSize = *(queryDims.end() - 1);
     const auto numWorkerThreads = context->getCpuParallel()->get_num_worker_threads();
     auto newMemDesc = std::make_shared<CpuBlockedMemoryDesc>(
-        ov::element::f32,
+        precision,
         ov::intel_cpu::Shape{static_cast<size_t>(numWorkerThreads), 3 * headSize});
     m_tmpInpBuffer = context->getScratchPad()->createScratchPadMem(newMemDesc);
+#if defined(OPENVINO_ARCH_X86_64)
+    GatedDeltaNetKey key{precision, headSize, m_fuse_qk_l2norm, m_q_l2_norm_eps, m_k_l2_norm_eps};
+
+    auto builder = [&](const GatedDeltaNetKey& compile_key) -> std::shared_ptr<kernel::JitKernelBase> {
+        return kernel::create_gdn_jit_kernel(compile_key.precision,
+                                             compile_key.qk_head_size,
+                                             compile_key.fuse_qk_l2norm,
+                                             compile_key.q_l2_norm_eps,
+                                             compile_key.k_l2_norm_eps);
+    };
+
+    auto cache = context->getParamsCache();
+    auto result = cache->getOrCreate(key, builder);
+    m_gdnJitKernel = result.first;
+#endif
 }
 
 void GatedDeltaNet::execute([[maybe_unused]] const dnnl::stream& strm) {
@@ -87,6 +197,23 @@ void GatedDeltaNet::execute([[maybe_unused]] const dnnl::stream& strm) {
     PlainTensor output_recurrent_state(outputs[1]);
 
     auto* temp_buffer = m_tmpInpBuffer->getDataAs<float>();
+#if defined(OPENVINO_ARCH_X86_64)
+    if (m_gdnJitKernel) {
+        recurrent_linear_attn_jit(query,
+                                  key,
+                                  value,
+                                  recurrent_state,
+                                  gate,
+                                  beta,
+                                  output_attn,
+                                  output_recurrent_state,
+                                  temp_buffer,
+                                  context->getCpuParallel(),
+                                  m_gdnJitKernel);
+        return;
+    }
+#endif
+
     recurrent_linear_attn(query,
                           key,
                           value,
