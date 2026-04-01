@@ -222,7 +222,7 @@ void jit_gdn_kernel<isa>::l2norm_inplace(const Xbyak::Reg64& reg_vec,
 
     if constexpr (std::is_same_v<Vmm, Xbyak::Ymm>) {
         vextractf128(x_tmp1, v_aux0, 1);
-        vaddps(xmm_sum, xmm_sum, x_tmp1);
+        vaddps(xmm_sum, Xbyak::Xmm(v_aux0.getIdx()), x_tmp1);
         vhaddps(xmm_sum, xmm_sum, xmm_sum);
         vhaddps(xmm_sum, xmm_sum, xmm_sum);
     } else {
