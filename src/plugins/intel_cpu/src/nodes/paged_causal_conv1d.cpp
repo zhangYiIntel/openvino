@@ -69,15 +69,6 @@ void PagedCausalConv1D::initSupportedPrimitiveDescriptors() {
 }
 
 void PagedCausalConv1D::execute([[maybe_unused]] const dnnl::stream& strm) {
-    OPENVINO_ASSERT(getOriginalInputPrecisionAtPort(0) == ov::element::f32,
-                    "PagedCausalConv1D supports only f32 input_embeds precision in CPU plugin.");
-    OPENVINO_ASSERT(getOriginalInputPrecisionAtPort(1) == ov::element::f32,
-                    "PagedCausalConv1D supports only f32 conv_state_table precision in CPU plugin.");
-    OPENVINO_ASSERT(getOriginalInputPrecisionAtPort(2) == ov::element::f32,
-                    "PagedCausalConv1D supports only f32 conv_weight precision in CPU plugin.");
-    OPENVINO_ASSERT(getOriginalInputPrecisionAtPort(3) == ov::element::f32,
-                    "PagedCausalConv1D supports only f32 conv_bias precision in CPU plugin.");
-
     const auto input_embeds_shape = getSrcMemoryAtPort(0)->getStaticDims();
     const auto state_table_shape = getSrcMemoryAtPort(1)->getStaticDims();
     const auto weight_shape = getSrcMemoryAtPort(2)->getStaticDims();
