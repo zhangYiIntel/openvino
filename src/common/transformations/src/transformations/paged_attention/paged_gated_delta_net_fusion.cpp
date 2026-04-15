@@ -330,17 +330,17 @@ PagedGatedDeltaNetFusion::PagedGatedDeltaNetFusion() {
 bool PagedGatedDeltaNetFusion::run_on_model(const std::shared_ptr<ov::Model>& model) {
     SharedRuntimeInputs shared_inputs{
         create_or_get_named_parameter(model, "subsequence_begins", ov::element::i32, ov::PartialShape{-1}).parameter,
-        create_or_get_named_parameter(model, "la.block_indices", ov::element::i32, ov::PartialShape{-1})
+        create_or_get_named_parameter(model, "paged_gdn.block_indices", ov::element::i32, ov::PartialShape{-1})
             .parameter,
         create_or_get_named_parameter(model,
-                                      "la.block_indices_begins",
+                                      "paged_gdn.block_indices_begins",
                                       ov::element::i32,
                                       ov::PartialShape{-1})
             .parameter,
-        create_or_get_named_parameter(model, "la.past_lens", ov::element::i32, ov::PartialShape{-1})
+        create_or_get_named_parameter(model, "paged_gdn.past_lens", ov::element::i32, ov::PartialShape{-1})
             .parameter,
         create_or_get_named_parameter(model,
-                                      "la.cache_interval",
+                                      "paged_gdn.cache_interval",
                                       ov::element::i32,
                                       ov::PartialShape{-1})
             .parameter};
