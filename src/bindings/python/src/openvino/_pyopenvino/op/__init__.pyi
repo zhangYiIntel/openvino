@@ -8,7 +8,7 @@ import typing
 """
 Package ngraph.impl.op that wraps ov::op
 """
-__all__ = ['Constant', 'Parameter', 'Result', 'assign', 'if_op', 'loop', 'read_value', 'tensor_iterator', 'util']
+__all__: list[str] = ['Constant', 'Parameter', 'Result', 'assign', 'if_op', 'loop', 'read_value', 'tensor_iterator', 'util']
 class Constant(openvino._pyopenvino.Node):
     """
     openvino.op.Constant wraps ov::op::v0::Constant
@@ -182,21 +182,6 @@ class _PagedAttentionExtension(openvino._pyopenvino.Node):
     Experimental extention for PagedAttention operation. Use with care: no backward compatibility is guaranteed in future releases.
     """
     def __init__(self, arg0: collections.abc.Sequence[openvino._pyopenvino.Output]) -> None:
-        ...
-class _PagedGatedDeltaNet(openvino._pyopenvino.Node):
-    """
-    Experimental extention for PagedGatedDeltaNet operation. Use with care: no backward compatibility is guaranteed in future releases.
-    """
-    def __init__(self, args: collections.abc.Sequence[openvino._pyopenvino.Output], fuse_qk_l2norm: bool = False, q_l2_norm_eps: typing.SupportsFloat | typing.SupportsIndex = 9.999999974752427e-07, k_l2_norm_eps: typing.SupportsFloat | typing.SupportsIndex = 9.999999974752427e-07) -> None:
-        ...
-    @property
-    def fuse_qk_l2norm(self) -> bool:
-        ...
-    @property
-    def k_l2_norm_eps(self) -> float:
-        ...
-    @property
-    def q_l2_norm_eps(self) -> float:
         ...
 class assign(openvino._pyopenvino.Node):
     """
