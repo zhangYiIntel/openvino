@@ -147,7 +147,7 @@ void recurrent_linear_attn(const ov::intel_cpu::PlainTensor& query,
     });
 }
 
-template <typename T>
+template <typename T, typename CacheT>
 static void recurrent_linear_attn_paged_impl(const ov::intel_cpu::PlainTensor& query,
                                              const ov::intel_cpu::PlainTensor& key,
                                              const ov::intel_cpu::PlainTensor& value,
@@ -202,7 +202,7 @@ static void recurrent_linear_attn_paged_impl(const ov::intel_cpu::PlainTensor& q
         OPENVINO_ASSERT(seq_blocks > 0, "[CPU] paged_gdn: each sequence must have at least one cache block");
 
         const int32_t block_id = block_indices.at<int32_t>({static_cast<size_t>(block_begin)});
-        auto* initial_state_src = recurrent_state_table.ptr<T>(static_cast<size_t>(block_id), i_h, i_v);
+        auto* initial_state_src = recurrent_state_table.ptr<CacheT>(static_cast<size_t>(block_id), i_h, i_v);
         cvt_copy(init_state, initial_state_src, 1, k_head_dims, 0, 0);
 
         const size_t hk = i_h / group_size;
@@ -247,7 +247,7 @@ static void recurrent_linear_attn_paged_impl(const ov::intel_cpu::PlainTensor& q
                 const int32_t slot = (seq_interval > 0) ? (1 + (cached_tokens - 1) / seq_interval) : 1;
                 if (slot < seq_blocks) {
                     const int32_t block_id = block_indices.at<int32_t>({static_cast<size_t>(block_begin + slot)});
-                    auto* updated_state_dst = recurrent_state_table.ptr<T>(static_cast<size_t>(block_id), i_h, i_v);
+                    auto* updated_state_dst = recurrent_state_table.ptr<CacheT>(static_cast<size_t>(block_id), i_h, i_v);
                     cvt_copy(updated_state_dst, init_state, 1, k_head_dims, 0, 0);
                 }
             }
@@ -274,65 +274,181 @@ void recurrent_linear_attn_paged(const ov::intel_cpu::PlainTensor& query,
                                  float* temp_buffer,
                                  const ov::intel_cpu::CpuParallelPtr& cpu_parallel) {
     const auto data_prc = query.get_precision();
-    OPENVINO_ASSERT(key.get_precision() == data_prc && value.get_precision() == data_prc &&
-                        recurrent_state_table.get_precision() == data_prc && gate.get_precision() == data_prc &&
+    const auto cache_prc = recurrent_state_table.get_precision();
+    OPENVINO_ASSERT(key.get_precision() == data_prc && value.get_precision() == data_prc && gate.get_precision() == data_prc &&
                         beta.get_precision() == data_prc && output_attn.get_precision() == data_prc,
-                    "[CPU] paged_gdn: q/k/v/state/gate/beta/output precisions must match");
+                    "[CPU] paged_gdn: q/k/v/gate/beta/output precisions must match");
+    OPENVINO_ASSERT(cache_prc == ov::element::f32 || cache_prc == ov::element::f16 || cache_prc == ov::element::bf16,
+                    "[CPU] paged_gdn: recurrent_state_table precision must be f32/f16/bf16");
 
     if (data_prc == ov::element::f32) {
-        recurrent_linear_attn_paged_impl<float>(query,
-                                                key,
-                                                value,
-                                                recurrent_state_table,
-                                                gate,
-                                                beta,
-                                                subsequence_begins,
-                                                block_indices,
-                                                block_indices_begins,
-                                                past_lens,
-                                                cache_interval,
-                                                q_l2_norm_eps,
-                                                k_l2_norm_eps,
-                                                fuse_qk_l2norm,
-                                                output_attn,
-                                                temp_buffer,
-                                                cpu_parallel);
+        if (cache_prc == ov::element::f32) {
+            recurrent_linear_attn_paged_impl<float, float>(query,
+                                                           key,
+                                                           value,
+                                                           recurrent_state_table,
+                                                           gate,
+                                                           beta,
+                                                           subsequence_begins,
+                                                           block_indices,
+                                                           block_indices_begins,
+                                                           past_lens,
+                                                           cache_interval,
+                                                           q_l2_norm_eps,
+                                                           k_l2_norm_eps,
+                                                           fuse_qk_l2norm,
+                                                           output_attn,
+                                                           temp_buffer,
+                                                           cpu_parallel);
+        } else if (cache_prc == ov::element::f16) {
+            recurrent_linear_attn_paged_impl<float, ov::float16>(query,
+                                                                 key,
+                                                                 value,
+                                                                 recurrent_state_table,
+                                                                 gate,
+                                                                 beta,
+                                                                 subsequence_begins,
+                                                                 block_indices,
+                                                                 block_indices_begins,
+                                                                 past_lens,
+                                                                 cache_interval,
+                                                                 q_l2_norm_eps,
+                                                                 k_l2_norm_eps,
+                                                                 fuse_qk_l2norm,
+                                                                 output_attn,
+                                                                 temp_buffer,
+                                                                 cpu_parallel);
+        } else {
+            recurrent_linear_attn_paged_impl<float, ov::bfloat16>(query,
+                                                                  key,
+                                                                  value,
+                                                                  recurrent_state_table,
+                                                                  gate,
+                                                                  beta,
+                                                                  subsequence_begins,
+                                                                  block_indices,
+                                                                  block_indices_begins,
+                                                                  past_lens,
+                                                                  cache_interval,
+                                                                  q_l2_norm_eps,
+                                                                  k_l2_norm_eps,
+                                                                  fuse_qk_l2norm,
+                                                                  output_attn,
+                                                                  temp_buffer,
+                                                                  cpu_parallel);
+        }
     } else if (data_prc == ov::element::f16) {
-        recurrent_linear_attn_paged_impl<ov::float16>(query,
-                                                      key,
-                                                      value,
-                                                      recurrent_state_table,
-                                                      gate,
-                                                      beta,
-                                                      subsequence_begins,
-                                                      block_indices,
-                                                      block_indices_begins,
-                                                      past_lens,
-                                                      cache_interval,
-                                                      q_l2_norm_eps,
-                                                      k_l2_norm_eps,
-                                                      fuse_qk_l2norm,
-                                                      output_attn,
-                                                      temp_buffer,
-                                                      cpu_parallel);
+        if (cache_prc == ov::element::f32) {
+            recurrent_linear_attn_paged_impl<ov::float16, float>(query,
+                                                                 key,
+                                                                 value,
+                                                                 recurrent_state_table,
+                                                                 gate,
+                                                                 beta,
+                                                                 subsequence_begins,
+                                                                 block_indices,
+                                                                 block_indices_begins,
+                                                                 past_lens,
+                                                                 cache_interval,
+                                                                 q_l2_norm_eps,
+                                                                 k_l2_norm_eps,
+                                                                 fuse_qk_l2norm,
+                                                                 output_attn,
+                                                                 temp_buffer,
+                                                                 cpu_parallel);
+        } else if (cache_prc == ov::element::f16) {
+            recurrent_linear_attn_paged_impl<ov::float16, ov::float16>(query,
+                                                                       key,
+                                                                       value,
+                                                                       recurrent_state_table,
+                                                                       gate,
+                                                                       beta,
+                                                                       subsequence_begins,
+                                                                       block_indices,
+                                                                       block_indices_begins,
+                                                                       past_lens,
+                                                                       cache_interval,
+                                                                       q_l2_norm_eps,
+                                                                       k_l2_norm_eps,
+                                                                       fuse_qk_l2norm,
+                                                                       output_attn,
+                                                                       temp_buffer,
+                                                                       cpu_parallel);
+        } else {
+            recurrent_linear_attn_paged_impl<ov::float16, ov::bfloat16>(query,
+                                                                        key,
+                                                                        value,
+                                                                        recurrent_state_table,
+                                                                        gate,
+                                                                        beta,
+                                                                        subsequence_begins,
+                                                                        block_indices,
+                                                                        block_indices_begins,
+                                                                        past_lens,
+                                                                        cache_interval,
+                                                                        q_l2_norm_eps,
+                                                                        k_l2_norm_eps,
+                                                                        fuse_qk_l2norm,
+                                                                        output_attn,
+                                                                        temp_buffer,
+                                                                        cpu_parallel);
+        }
     } else if (data_prc == ov::element::bf16) {
-        recurrent_linear_attn_paged_impl<ov::bfloat16>(query,
-                                                       key,
-                                                       value,
-                                                       recurrent_state_table,
-                                                       gate,
-                                                       beta,
-                                                       subsequence_begins,
-                                                       block_indices,
-                                                       block_indices_begins,
-                                                       past_lens,
-                                                       cache_interval,
-                                                       q_l2_norm_eps,
-                                                       k_l2_norm_eps,
-                                                       fuse_qk_l2norm,
-                                                       output_attn,
-                                                       temp_buffer,
-                                                       cpu_parallel);
+        if (cache_prc == ov::element::f32) {
+            recurrent_linear_attn_paged_impl<ov::bfloat16, float>(query,
+                                                                  key,
+                                                                  value,
+                                                                  recurrent_state_table,
+                                                                  gate,
+                                                                  beta,
+                                                                  subsequence_begins,
+                                                                  block_indices,
+                                                                  block_indices_begins,
+                                                                  past_lens,
+                                                                  cache_interval,
+                                                                  q_l2_norm_eps,
+                                                                  k_l2_norm_eps,
+                                                                  fuse_qk_l2norm,
+                                                                  output_attn,
+                                                                  temp_buffer,
+                                                                  cpu_parallel);
+        } else if (cache_prc == ov::element::f16) {
+            recurrent_linear_attn_paged_impl<ov::bfloat16, ov::float16>(query,
+                                                                        key,
+                                                                        value,
+                                                                        recurrent_state_table,
+                                                                        gate,
+                                                                        beta,
+                                                                        subsequence_begins,
+                                                                        block_indices,
+                                                                        block_indices_begins,
+                                                                        past_lens,
+                                                                        cache_interval,
+                                                                        q_l2_norm_eps,
+                                                                        k_l2_norm_eps,
+                                                                        fuse_qk_l2norm,
+                                                                        output_attn,
+                                                                        temp_buffer,
+                                                                        cpu_parallel);
+        } else {
+            recurrent_linear_attn_paged_impl<ov::bfloat16, ov::bfloat16>(query,
+                                                                         key,
+                                                                         value,
+                                                                         recurrent_state_table,
+                                                                         gate,
+                                                                         beta,
+                                                                         subsequence_begins,
+                                                                         block_indices,
+                                                                         block_indices_begins,
+                                                                         past_lens,
+                                                                         cache_interval,
+                                                                         q_l2_norm_eps,
+                                                                         k_l2_norm_eps,
+                                                                         fuse_qk_l2norm,
+                                                                         output_attn,
+                                                                         temp_buffer,
+                                                                         cpu_parallel);
+        }
     } else {
         OPENVINO_ASSERT(false, "[CPU] paged_gdn: unsupported precision");
     }

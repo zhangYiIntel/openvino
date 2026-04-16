@@ -48,8 +48,13 @@ void PagedGatedDeltaNet::initSupportedPrimitiveDescriptors() {
     auto dataPrecision = ov::element::f32;
     std::vector<PortConfigurator> inPortConfigs;
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
+        if(i == 3) { // recurrent state can have different precision
+            dataPrecision = getOriginalInputPrecisionAtPort(i);
+        }
+        // current genai PipeLine only feed f32 cache
+        dataPrecision = i != 3 ? getOriginalInputPrecisionAtPort(i) : ov::element::f32;
         inPortConfigs.emplace_back(LayoutType::ncsp,
-                                   getOriginalInputPrecisionAtPort(i),
+                                   dataPrecision,
                                    getInputShapeAtPort(i),
                                    false,
                                    -1);
