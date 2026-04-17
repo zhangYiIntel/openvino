@@ -9,12 +9,15 @@
 
 #include "itt.hpp"
 #include "openvino/core/rt_info.hpp"
+#include "openvino/core/graph_util.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/constant.hpp"
+#include "openvino/op/convert.hpp"
 #include "openvino/op/paged_gated_delta_net.hpp"
 #include "openvino/op/paged_causal_conv1d.hpp"
 #include "openvino/pass/pattern/op/pattern.hpp"
 #include "openvino/pass/pattern/op/or.hpp"
+#include "openvino/pass/pattern/op/optional.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "openvino/util/log.hpp"
 #include "transformations/utils/utils.hpp"
@@ -34,6 +37,7 @@ ConvertPagedLAInputs::ConvertPagedLAInputs(ov::element::Type cache_precision)
     auto key = pattern::any_input(pattern::has_static_rank());
     auto value = pattern::any_input(pattern::has_static_rank());
     auto recurrent_state_table = pattern::wrap_type<v0::Parameter>({});
+    auto convert_cache = pattern::optional<v0::Convert>({recurrent_state_table});
     auto gate = pattern::any_input(pattern::has_static_rank());
     auto beta = pattern::any_input(pattern::has_static_rank());
     auto subsequence_begins = pattern::any_input(pattern::has_static_rank());
@@ -55,7 +59,7 @@ ConvertPagedLAInputs::ConvertPagedLAInputs(ov::element::Type cache_precision)
     auto paged_gated_delta_net = pattern::wrap_type<ov::op::internal::PagedGatedDeltaNet>({query,
                                                                                            key,
                                                                                            value,
-                                                                                           recurrent_state_table,
+                                                                                           convert_cache,
                                                                                            gate,
                                                                                            beta,
                                                                                            subsequence_begins,
@@ -64,7 +68,7 @@ ConvertPagedLAInputs::ConvertPagedLAInputs(ov::element::Type cache_precision)
                                                                                            past_lens,
                                                                                            cache_interval});
     auto paged_causal_conv1d = pattern::wrap_type<ov::op::internal::PagedCausalConv1D>({input_embeds,
-                                                                                        conv_state_table,
+                                                                                        convert_cache,
                                                                                         conv_weight,
                                                                                         conv_bias,
                                                                                         conv_subsequence_begins,
@@ -76,27 +80,38 @@ ConvertPagedLAInputs::ConvertPagedLAInputs(ov::element::Type cache_precision)
 
     ov::matcher_pass_callback callback = [OV_CAPTURE_CPY_AND_THIS](pattern::Matcher& m) {
         const auto root = m.get_match_root();
+        auto pattern_map = m.get_pattern_value_map();
         if (const auto gdn = ov::as_type_ptr<ov::op::internal::PagedGatedDeltaNet>(root)) {
-            auto recurrent_state_table_param =
-                ov::as_type_ptr<v0::Parameter>(gdn->get_input_node_shared_ptr(3));
+            auto cache_node = pattern_map.at(recurrent_state_table);
+            auto recurrent_state_table_param = ov::as_type_ptr<v0::Parameter>(cache_node.get_node_shared_ptr());
             if (!recurrent_state_table_param) {
                 return false;
             }
             recurrent_state_table_param->set_element_type(m_cache_precision);
             recurrent_state_table_param->validate_and_infer_types();
+            if (pattern_map.count(convert_cache)) {
+                auto cache_node = pattern_map.at(convert_cache).get_node_shared_ptr();
+                ov::replace_output_update_name(cache_node->output(0), cache_node->input_value(0));
+            }
             std::cout << "Goding to change PagedGatedDeltaNet precision|m_cache_precision|" << m_cache_precision << std::endl;
             return true;
         }
 
-        // if (const auto conv = ov::as_type_ptr<ov::op::internal::PagedCausalConv1D>(root)) {
-        //     auto conv_state_table_param = ov::as_type_ptr<v0::Parameter>(conv->get_input_node_shared_ptr(1));
-        //     if (!conv_state_table_param) {
-        //         return false;
-        //     }
-        //     conv_state_table_param->set_element_type(m_cache_precision);
-        //     conv_state_table_param->validate_and_infer_types();
-        //     return true;
-        // }
+        if (const auto conv = ov::as_type_ptr<ov::op::internal::PagedCausalConv1D>(root)) {
+            auto cache_node = pattern_map.at(recurrent_state_table);
+            auto conv_state_table_param = ov::as_type_ptr<v0::Parameter>(cache_node.get_node_shared_ptr());
+            if (!conv_state_table_param) {
+                return false;
+            }
+            conv_state_table_param->set_element_type(m_cache_precision);
+            conv_state_table_param->validate_and_infer_types();
+            if (pattern_map.count(convert_cache)) {
+                auto cache_node = pattern_map.at(convert_cache).get_node_shared_ptr();
+                ov::replace_output_update_name(cache_node->output(0), cache_node->input_value(0));
+            }
+            std::cout << "Goding to change PagedCausalConv1D precision|m_cache_precision|" << m_cache_precision << std::endl;
+            return true;
+        }
 
         return false;
     };
