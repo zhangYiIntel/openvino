@@ -52,7 +52,7 @@ void PagedGatedDeltaNet::initSupportedPrimitiveDescriptors() {
             dataPrecision = getOriginalInputPrecisionAtPort(i);
         }
         // current genai PipeLine only feed f32 cache
-        dataPrecision = i != 3 ? getOriginalInputPrecisionAtPort(i) : ov::element::f32;
+        dataPrecision = getOriginalInputPrecisionAtPort(i); //ov::element::f32;
         inPortConfigs.emplace_back(LayoutType::ncsp,
                                    dataPrecision,
                                    getInputShapeAtPort(i),
