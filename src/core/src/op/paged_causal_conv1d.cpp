@@ -8,7 +8,7 @@
 #include "openvino/core/validation_util.hpp"
 #include "paged_causal_conv1d_shape_inference.hpp"
 
-namespace {
+namespace paged_causal_conv1d_internal {
 
 inline void input_check(const ov::Node* node,
                         size_t idx,
@@ -47,7 +47,7 @@ inline void input_check(const ov::Node* node,
                           tp,
                           ".");
 }
-}  // namespace
+}  // namespace paged_causal_conv1d_internal
 
 namespace ov::op::internal {
 
@@ -86,6 +86,7 @@ void PagedCausalConv1D::validate_and_infer_types() {
 
     const std::vector<ov::element::Type> float_types = {ov::element::f32, ov::element::f16, ov::element::bf16};
 
+    using paged_causal_conv1d_internal::input_check;
     input_check(this, 0, "input_embeds", {2}, float_types);
     input_check(this, 1, "conv_state_table", {3}, float_types);
     input_check(this, 2, "conv_weight", {3}, float_types);
