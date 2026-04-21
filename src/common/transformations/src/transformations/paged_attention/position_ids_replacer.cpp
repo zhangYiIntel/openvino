@@ -147,6 +147,16 @@ ov::pass::PositionIDsReplacerQwen::PositionIDsReplacerQwen(const Output<Node>& p
 // max_context_len - prev_seq_len -> start, start + current_len -> end, Range(start, end, step).
 // Replace this Range output with explicit position_ids so PagedAttention can process tokens
 // in non-sequential order.
+//
+// Additionally, the cos/sin layout must be adjusted for Paged Attention.
+// In the original model the pos_emb chain produces cos/sin with shape [1, seq, dim].
+// A downstream Unsqueeze/Reshape converts it to [1, 1, seq, dim] before feeding the
+// fused RoPE node.  The RoPE executor indexes cos/sin as:
+//   t_cos.at({batch, head, seq_pos, 0}, broadcast=true)
+// In PA mode tokens are expanded to the batch dimension (seq_len_per_token == 1),
+// so seq_pos is always 0, and all tokens share position-0 cos/sin values.
+// The fix transposes the cos/sin to [seq, 1, 1, dim] so that the batch index
+// selects the correct per-token position.
 ov::pass::PositionIDsReplacerLFM2::PositionIDsReplacerLFM2(const Output<Node>& position_ids) {
     MATCHER_SCOPE(PositionIDsReplacerLFM2);
 
@@ -184,6 +194,59 @@ ov::pass::PositionIDsReplacerLFM2::PositionIDsReplacerLFM2(const Output<Node>& p
 
         replace_node(range, replacement_node);
         copy_runtime_info(range, replacement_node);
+
+        // Fix cos/sin layout for PA mode.
+        // The pos_emb chain produces cos/sin with shape [1, seq, dim] (rank 3).
+        // A downstream Unsqueeze/Reshape converts it to [1, 1, seq, dim] (rank 4).
+        // In PA mode the RoPE node receives input [seq_tokens, heads, 1, dim] where
+        // seq_tokens are in the batch dimension and the seq axis is always 1.
+        // The RoPE executor uses cos_pos = seq_index (always 0), so all tokens
+        // get position-0 cos/sin values.
+        // Replace the downstream Unsqueeze/Reshape with Transpose + Unsqueeze to
+        // produce [seq, 1, 1, dim] instead of [1, 1, seq, dim].
+        // This way the batch index selects the correct per-token cos/sin values.
+        //
+        // The pattern root matches one Sin or Cos node, but the sibling trig node
+        // sharing the same Concat parent also needs the layout fix.  After Range is
+        // replaced the pattern can no longer match the sibling, so both must be
+        // handled in a single callback invocation.
+        const auto concat_node = pattern_map.at(p_concat).get_node_shared_ptr();
+
+        // Collect all Sin/Cos consumers of the Concat (covers both siblings).
+        std::vector<std::shared_ptr<Node>> trig_nodes;
+        for (const auto& target_input : concat_node->output(0).get_target_inputs()) {
+            auto node = target_input.get_node()->shared_from_this();
+            if (ov::is_type<v0::Sin>(node) || ov::is_type<v0::Cos>(node)) {
+                trig_nodes.push_back(node);
+            }
+        }
+
+        for (const auto& trig_node : trig_nodes) {
+            // Collect rank-4 consumers before modifying the graph.
+            std::vector<std::shared_ptr<Node>> rank4_consumers;
+            for (const auto& target_input : trig_node->output(0).get_target_inputs()) {
+                auto consumer = target_input.get_node()->shared_from_this();
+                const auto& out_pshape = consumer->get_output_partial_shape(0);
+                if (out_pshape.rank().is_static() && out_pshape.rank().get_length() == 4) {
+                    rank4_consumers.push_back(consumer);
+                }
+            }
+
+            for (const auto& consumer : rank4_consumers) {
+                // Transpose [1, seq, dim] → [seq, 1, dim]
+                auto transpose_order = v0::Constant::create(element::i64, Shape{3}, std::vector<int64_t>{1, 0, 2});
+                auto transpose = std::make_shared<v1::Transpose>(trig_node->output(0), transpose_order);
+
+                // Unsqueeze at axis=2: [seq, 1, dim] → [seq, 1, 1, dim]
+                auto unsqueeze_axis = v0::Constant::create(element::i64, Shape{1}, std::vector<int64_t>{2});
+                auto unsqueeze = std::make_shared<v0::Unsqueeze>(transpose, unsqueeze_axis);
+                unsqueeze->set_friendly_name(consumer->get_friendly_name());
+
+                copy_runtime_info(consumer, NodeVector{transpose, unsqueeze});
+                replace_node(consumer, unsqueeze);
+            }
+        }
+
         return true;
     };
 

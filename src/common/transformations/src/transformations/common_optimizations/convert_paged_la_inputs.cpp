@@ -93,7 +93,7 @@ ConvertPagedLAInputs::ConvertPagedLAInputs(ov::element::Type cache_precision)
                 auto cache_node = pattern_map.at(convert_cache).get_node_shared_ptr();
                 ov::replace_output_update_name(cache_node->output(0), cache_node->input_value(0));
             }
-            std::cout << "Goding to change PagedGatedDeltaNet precision|m_cache_precision|" << m_cache_precision << std::endl;
+            // std::cout << "Goding to change PagedGatedDeltaNet precision|m_cache_precision|" << m_cache_precision << std::endl;
             return true;
         }
 
@@ -109,7 +109,7 @@ ConvertPagedLAInputs::ConvertPagedLAInputs(ov::element::Type cache_precision)
                 auto cache_node = pattern_map.at(convert_cache).get_node_shared_ptr();
                 ov::replace_output_update_name(cache_node->output(0), cache_node->input_value(0));
             }
-            std::cout << "Goding to change PagedCausalConv1D precision|m_cache_precision|" << m_cache_precision << std::endl;
+            // std::cout << "Goding to change PagedCausalConv1D precision|m_cache_precision|" << m_cache_precision << std::endl;
             return true;
         }
 
