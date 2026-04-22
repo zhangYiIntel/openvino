@@ -7,6 +7,7 @@
 #include "include/batch_headers/int4_utils.cl"
 
 #define UINT4_RANGE 15
+#define KV_DBG_PRINT_BAD_SCALE_ZP 1
 
 inline void FUNC(quantize_and_save_per_token)(__global const INPUT0_TYPE* in_data,
                                     const uint in_data_offset,
@@ -23,9 +24,10 @@ inline void FUNC(quantize_and_save_per_token)(__global const INPUT0_TYPE* in_dat
     INPUT0_TYPE min_value = INPUT0_VAL_MAX;
 
     unroll_for (uint i = 0; i < num_groups; i++) {
-        input_data[i] = BLOCK_READN(INPUT0_TYPE, 1, in_data, in_data_offset + i * SUBGROUP_SIZE);
-        max_value = fmax(max_value, input_data[i]);
-        min_value = fmin(min_value, input_data[i]);
+        INPUT0_TYPE in_val = BLOCK_READN(INPUT0_TYPE, 1, in_data, in_data_offset + i * SUBGROUP_SIZE);
+        input_data[i] = in_val;
+        max_value = fmax(max_value, in_val);
+        min_value = fmin(min_value, in_val);
     }
 
     min_value = sub_group_reduce_min(min_value);
@@ -34,6 +36,16 @@ inline void FUNC(quantize_and_save_per_token)(__global const INPUT0_TYPE* in_dat
     // If the range of input data is zero, it is adjusted to the minimum value(0.001).
     #define ACCUMULATOR_TYPE float
     ACCUMULATOR_TYPE diff_value = max_value == min_value ? (grp_max) : (max_value - min_value);
+    if (!isfinite(diff_value) || diff_value <= (ACCUMULATOR_TYPE)0.0f) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+        if (sglid == 0) {
+            printf("[KV_UPD_GUARD][PER_TOKEN_DIFF] in_off=%u out_off=%u tok=%u min=%f max=%f diff=%f -> %f\n",
+                   in_data_offset, out_data_offset, token_pos_in_block,
+                   (float)min_value, (float)max_value, (float)diff_value, (float)grp_max);
+        }
+#endif
+        diff_value = (ACCUMULATOR_TYPE)grp_max;
+    }
 
     #if IS_INT4_COMPRESSED
     ACCUMULATOR_TYPE scale_tmp = (ACCUMULATOR_TYPE)((UINT4_RANGE) / diff_value);
@@ -42,6 +54,26 @@ inline void FUNC(quantize_and_save_per_token)(__global const INPUT0_TYPE* in_dat
     ACCUMULATOR_TYPE scale_tmp = (ACCUMULATOR_TYPE)((CHAR_MAX - CHAR_MIN) / diff_value);
     ACCUMULATOR_TYPE zp_tmp = (ACCUMULATOR_TYPE)(-min_value * scale_tmp) + CHAR_MIN;
     #endif
+    if (!isfinite(scale_tmp) || scale_tmp <= (ACCUMULATOR_TYPE)0.0f) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+        if (sglid == 0) {
+            printf("[KV_UPD_GUARD][PER_TOKEN_SCALE] in_off=%u out_off=%u tok=%u min=%f max=%f diff=%f scale=%f -> 1.0\n",
+                   in_data_offset, out_data_offset, token_pos_in_block,
+                   (float)min_value, (float)max_value, (float)diff_value, (float)scale_tmp);
+        }
+#endif
+        scale_tmp = (ACCUMULATOR_TYPE)1.0f;
+    }
+    if (!isfinite(zp_tmp)) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+        if (sglid == 0) {
+            printf("[KV_UPD_GUARD][PER_TOKEN_ZP] in_off=%u out_off=%u tok=%u scale=%f zp=%f -> 0.0\n",
+                   in_data_offset, out_data_offset, token_pos_in_block,
+                   (float)scale_tmp, (float)zp_tmp);
+        }
+#endif
+        zp_tmp = (ACCUMULATOR_TYPE)0.0f;
+    }
     INPUT0_TYPE scale = (INPUT1_TYPE)(scale_tmp);
     INPUT0_TYPE zp = (INPUT1_TYPE)(zp_tmp);
 
@@ -67,7 +99,14 @@ inline void FUNC(quantize_and_save_per_token)(__global const INPUT0_TYPE* in_dat
 
     INPUT0_TYPE* comp_ptr = out_data + comp_offset;
     if (sglid == 0) {
-        comp_ptr[token_pos_in_block] = 1.0 / scale;
+        const INPUT0_TYPE safe_scale = fabs(scale) > (INPUT0_TYPE)0 ? scale : (INPUT0_TYPE)1;
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+        if (!(fabs(scale) > (INPUT0_TYPE)0)) {
+            printf("[KV_UPD_GUARD][PER_TOKEN_INV] comp_off=%u tok=%u scale=%f -> safe_scale=%f\n",
+                   comp_offset, token_pos_in_block, (float)scale, (float)safe_scale);
+        }
+#endif
+        comp_ptr[token_pos_in_block] = 1.0 / safe_scale;
         comp_ptr[PAGED_ATTENTION_BLOCK_SIZE + token_pos_in_block] = zp;
     }
 }
@@ -92,8 +131,26 @@ inline void FUNC(quantize_and_save_by_channel_block_with_requantize)(__global co
         const uint out_offset_per_wi = out_data_offset + hidden_idx * out_data_pitch;
         // Read original scale and zp
         INPUT0_TYPE* comp_ptr = (INPUT0_TYPE*) (&out_data[out_offset_per_wi + COMP_K_OFFSET]);
-        const INPUT0_TYPE orig_scale = comp_ptr[0];
-        const INPUT0_TYPE orig_zp = comp_ptr[1];
+        INPUT0_TYPE orig_scale = comp_ptr[0];
+        INPUT0_TYPE orig_zp = comp_ptr[1];
+        if (!isfinite((float)orig_scale) || fabs(orig_scale) <= (INPUT0_TYPE)0) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+            if (sglid == 0) {
+                printf("[KV_UPD_GUARD][BY_CH_ORIG_SCALE] out_off=%u hidden=%d orig_scale=%f -> 1.0\n",
+                       out_offset_per_wi, hidden_idx, (float)orig_scale);
+            }
+#endif
+            orig_scale = (INPUT0_TYPE)1;
+        }
+        if (!isfinite((float)orig_zp)) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+            if (sglid == 0) {
+                printf("[KV_UPD_GUARD][BY_CH_ORIG_ZP] out_off=%u hidden=%d orig_zp=%f -> 0.0\n",
+                       out_offset_per_wi, hidden_idx, (float)orig_zp);
+            }
+#endif
+            orig_zp = (INPUT0_TYPE)0;
+        }
         INPUT0_TYPE max_value = INPUT0_VAL_MIN;
         INPUT0_TYPE min_value = INPUT0_VAL_MAX;
         // Read new input
@@ -134,6 +191,24 @@ inline void FUNC(quantize_and_save_by_channel_block_with_requantize)(__global co
             }
             ACCUMULATOR_TYPE scale_tmp = (ACCUMULATOR_TYPE)((CHAR_MAX - CHAR_MIN) / range);
             ACCUMULATOR_TYPE zp_tmp = (ACCUMULATOR_TYPE)(-min_value * scale_tmp) + CHAR_MIN;
+            if (!isfinite(scale_tmp) || scale_tmp <= (ACCUMULATOR_TYPE)0.0f) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+                if (sglid == 0) {
+                    printf("[KV_UPD_GUARD][BY_CH_SCALE] out_off=%u hidden=%d min=%f max=%f range=%f scale=%f -> 1.0\n",
+                           out_offset_per_wi, hidden_idx, (float)min_value, (float)max_value, (float)range, (float)scale_tmp);
+                }
+#endif
+                scale_tmp = (ACCUMULATOR_TYPE)1.0f;
+            }
+            if (!isfinite(zp_tmp)) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+                if (sglid == 0) {
+                    printf("[KV_UPD_GUARD][BY_CH_ZP] out_off=%u hidden=%d scale=%f zp=%f -> 0.0\n",
+                           out_offset_per_wi, hidden_idx, (float)scale_tmp, (float)zp_tmp);
+                }
+#endif
+                zp_tmp = (ACCUMULATOR_TYPE)0.0f;
+            }
             INPUT0_TYPE scale = (INPUT1_TYPE)(scale_tmp);
             INPUT0_TYPE zp = (INPUT1_TYPE)(zp_tmp);
             #undef ACCUMULATOR_TYPE
@@ -142,7 +217,14 @@ inline void FUNC(quantize_and_save_by_channel_block_with_requantize)(__global co
                 OUTPUT_TYPE quantized = convert_char_rte(cache_data_vec_decompressed[token] * scale + zp);
                 out_data[out_offset_per_wi + token] = quantized;
             }
-            comp_ptr[0] = 1.0/scale;
+            const INPUT0_TYPE safe_scale = fabs(scale) > (INPUT0_TYPE)0 ? scale : (INPUT0_TYPE)1;
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+            if (sglid == 0 && !(fabs(scale) > (INPUT0_TYPE)0)) {
+                printf("[KV_UPD_GUARD][BY_CH_INV] out_off=%u hidden=%d scale=%f -> safe_scale=%f\n",
+                       out_offset_per_wi, hidden_idx, (float)scale, (float)safe_scale);
+            }
+#endif
+            comp_ptr[0] = 1.0/safe_scale;
             comp_ptr[1] = zp;
         }
     }
@@ -317,9 +399,10 @@ inline void FUNC(quantize_and_save_by_channel_prefill)(__global const INPUT0_TYP
         INPUT0_TYPE min_value = INPUT0_VAL_MAX;
         // Read 16 tokens x 16 hidden
         unroll_for (uint token_num = 0; token_num < tokens_num; token_num++) {
-            input_data[token_num] = BLOCK_READN(INPUT0_TYPE, 1, in_data, key_in_offset_tmp + sglid);
-            max_value = fmax(max_value, input_data[token_num]);
-            min_value = fmin(min_value, input_data[token_num]);
+            INPUT0_TYPE in_val = BLOCK_READN(INPUT0_TYPE, 1, in_data, key_in_offset_tmp + sglid);
+            input_data[token_num] = in_val;
+            max_value = fmax(max_value, in_val);
+            min_value = fmin(min_value, in_val);
             key_in_offset_tmp += in_data_pitch;
         }
         #define ACCUMULATOR_TYPE float
@@ -337,6 +420,26 @@ inline void FUNC(quantize_and_save_by_channel_prefill)(__global const INPUT0_TYP
             ACCUMULATOR_TYPE scale_tmp = (ACCUMULATOR_TYPE)((CHAR_MAX - CHAR_MIN) / range);
             ACCUMULATOR_TYPE zp_tmp = (ACCUMULATOR_TYPE)(-min_value * scale_tmp) + CHAR_MIN;
         #endif
+        if (!isfinite(scale_tmp) || scale_tmp <= (ACCUMULATOR_TYPE)0.0f) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+            if (sglid == 0) {
+          printf("[KV_UPD_GUARD][PREFILL_SCALE] in_off=%u out_base=%u i=%u min=%f max=%f range=%f scale=%f -> 1.0\n",
+              in_data_offset, out_offset, i,
+                       (float)min_value, (float)max_value, (float)range, (float)scale_tmp);
+            }
+#endif
+            scale_tmp = (ACCUMULATOR_TYPE)1.0f;
+        }
+        if (!isfinite(zp_tmp)) {
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+            if (sglid == 0) {
+          printf("[KV_UPD_GUARD][PREFILL_ZP] in_off=%u out_base=%u i=%u scale=%f zp=%f -> 0.0\n",
+              in_data_offset, out_offset, i,
+                       (float)scale_tmp, (float)zp_tmp);
+            }
+#endif
+            zp_tmp = (ACCUMULATOR_TYPE)0.0f;
+        }
         INPUT0_TYPE scale = (INPUT1_TYPE)(scale_tmp);
         INPUT0_TYPE zp = (INPUT1_TYPE)(zp_tmp);
         #undef ACCUMULATOR_TYPE
@@ -348,10 +451,24 @@ inline void FUNC(quantize_and_save_by_channel_prefill)(__global const INPUT0_TYP
 
         #if IS_INT4_COMPRESSED
             const uint order_in_packed = i % U4_ELEMS_PER_BYTE;
-            comp_ptr[2 * order_in_packed] = 1.0 / scale;
+            const INPUT0_TYPE safe_scale = fabs(scale) > (INPUT0_TYPE)0 ? scale : (INPUT0_TYPE)1;
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+            if (sglid == 0 && !(fabs(scale) > (INPUT0_TYPE)0)) {
+                printf("[KV_UPD_GUARD][PREFILL_INV_INT4] out_off=%u i=%u scale=%f -> safe_scale=%f\n",
+                       out_offset_per_wi, i, (float)scale, (float)safe_scale);
+            }
+#endif
+            comp_ptr[2 * order_in_packed] = 1.0 / safe_scale;
             comp_ptr[2 * order_in_packed + 1] = zp;
         #else
-            comp_ptr[0] = 1.0 / scale;
+            const INPUT0_TYPE safe_scale = fabs(scale) > (INPUT0_TYPE)0 ? scale : (INPUT0_TYPE)1;
+#if defined(KV_DBG_PRINT_BAD_SCALE_ZP)
+            if (sglid == 0 && !(fabs(scale) > (INPUT0_TYPE)0)) {
+                printf("[KV_UPD_GUARD][PREFILL_INV] out_off=%u i=%u scale=%f -> safe_scale=%f\n",
+                       out_offset_per_wi, i, (float)scale, (float)safe_scale);
+            }
+#endif
+            comp_ptr[0] = 1.0 / safe_scale;
             comp_ptr[1] = zp;
         #endif
 
