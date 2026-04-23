@@ -4,23 +4,25 @@
 
 #include "paged_causal_conv1d.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <utility>
+#include <memory>
+#include <oneapi/dnnl/dnnl_common.hpp>
+#include <string>
 #include <vector>
 
-#include "cpu_types.h"
 #include "graph_context.h"
 #include "memory_desc/cpu_memory_desc.h"
 #include "node.h"
 #include "nodes/kernels/paged_causal_conv1d.hpp"
-#include "nodes/node_config.h"
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/except.hpp"
 #include "openvino/core/node.hpp"
+#include "openvino/core/type.hpp"
+#include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/element_type.hpp"
+#include "openvino/core/type/float16.hpp"
 #include "openvino/op/paged_causal_conv1d.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 
@@ -50,10 +52,11 @@ void PagedCausalConv1D::initSupportedPrimitiveDescriptors() {
     }
 
     const auto data_precision = ov::element::f32;
+    const auto state_precision = getOriginalInputPrecisionAtPort(1);
     std::vector<PortConfigurator> input_configs;
     input_configs.reserve(getParentEdges().size());
     input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(0), false, -1);
-    input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(1), false, -1);
+    input_configs.emplace_back(LayoutType::ncsp, state_precision, getInputShapeAtPort(1), false, -1);
     input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(2), false, -1);
     input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(3), false, -1);
     input_configs.emplace_back(LayoutType::ncsp, ov::element::i32, getInputShapeAtPort(4), false, -1);
@@ -74,48 +77,35 @@ void PagedCausalConv1D::execute([[maybe_unused]] const dnnl::stream& strm) {
     const auto weight_shape = getSrcMemoryAtPort(2)->getStaticDims();
     const auto bias_shape = getSrcMemoryAtPort(3)->getStaticDims();
 
-    OPENVINO_ASSERT(input_embeds_shape.size() == 2,
-                    "PagedCausalConv1D expects input_embeds rank 2, got ",
-                    input_embeds_shape.size());
-    OPENVINO_ASSERT(state_table_shape.size() == 3,
-                    "PagedCausalConv1D expects conv_state_table rank 3, got ",
-                    state_table_shape.size());
-    OPENVINO_ASSERT(weight_shape.size() == 3,
-                    "PagedCausalConv1D expects conv_weight rank 3, got ",
-                    weight_shape.size());
-
     const size_t batch_size_in_tokens = input_embeds_shape[0];
     const size_t hidden_size = input_embeds_shape[1];
     const size_t num_blocks = state_table_shape[0];
-    const size_t state_hidden_size = state_table_shape[1];
     const size_t kernel_size = state_table_shape[2];
 
-    OPENVINO_ASSERT(hidden_size == state_hidden_size,
-                    "PagedCausalConv1D expects hidden size match between input_embeds and conv_state_table. Got ",
+    OPENVINO_ASSERT(state_table_shape[1] == hidden_size,
+                    "PagedCausalConv1D: conv_state_table hidden_size (",
+                    state_table_shape[1],
+                    ") != input_embeds hidden_size (",
                     hidden_size,
-                    " and ",
-                    state_hidden_size);
-    OPENVINO_ASSERT(weight_shape[0] == hidden_size,
-                    "PagedCausalConv1D expects conv_weight out_channels equal hidden_size. Got ",
+                    ").");
+
+    // Linear attention models use depthwise convolution where group_size == hidden_size,
+    // i.e. conv_weight[1] (in_channels per group) must be 1.
+    OPENVINO_ASSERT(weight_shape.size() == 3 && weight_shape[1] == 1,
+                    "PagedCausalConv1D only supports depthwise convolution (conv_weight[1] must be 1). "
+                    "Got conv_weight shape [",
                     weight_shape[0],
-                    " and ",
-                    hidden_size);
-    OPENVINO_ASSERT(weight_shape[2] == kernel_size,
-                    "PagedCausalConv1D expects conv_weight kernel size equal conv_state_table kernel size. Got ",
+                    ", ",
+                    weight_shape[1],
+                    ", ",
                     weight_shape[2],
-                    " and ",
-                    kernel_size);
-    OPENVINO_ASSERT(bias_shape.size() == 1, "PagedCausalConv1D expects conv_bias rank 1, got ", bias_shape.size());
+                    "].");
 
     const bool has_bias = bias_shape[0] != 0;
-    OPENVINO_ASSERT(!has_bias || bias_shape[0] == hidden_size,
-                    "PagedCausalConv1D expects conv_bias shape[0] to be 0 (optional) or hidden_size. Got ",
-                    bias_shape[0],
-                    " and hidden_size=",
-                    hidden_size);
 
     const auto* input_embeds = getSrcDataAtPortAs<const float>(0);
-    auto* conv_state_table = getSrcMemoryAtPort(1)->getDataAs<float>();
+    const auto state_precision = getSrcMemoryAtPort(1)->getDescPtr()->getPrecision();
+    auto* conv_state_raw = getSrcMemoryAtPort(1)->getData();
     const auto* conv_weight = getSrcDataAtPortAs<const float>(2);
     const float* conv_bias = has_bias ? getSrcDataAtPortAs<const float>(3) : nullptr;
     const auto* subsequence_begins = getSrcDataAtPortAs<const int32_t>(4);
@@ -134,23 +124,38 @@ void PagedCausalConv1D::execute([[maybe_unused]] const dnnl::stream& strm) {
     const size_t state_stride = hidden_size * kernel_size;
     std::vector<float> local_state(state_stride);
 
-    kernels::paged_causal_conv1d_optimized(input_embeds,
-                                           conv_state_table,
-                                           conv_weight,
-                                           conv_bias,
-                                           has_bias,
-                                           subsequence_begins,
-                                           block_indices,
-                                           block_indices_begins,
-                                           past_lens,
-                                           cache_interval,
-                                           output_embeds,
-                                           batch_size_in_tokens,
-                                           hidden_size,
-                                           kernel_size,
-                                           num_blocks,
-                                           seq_count,
-                                           local_state.data());
+    auto dispatch_kernel = [&](auto* conv_state_table) {
+        kernels::paged_causal_conv1d_optimized(input_embeds,
+                                               conv_state_table,
+                                               conv_weight,
+                                               conv_bias,
+                                               has_bias,
+                                               subsequence_begins,
+                                               block_indices,
+                                               block_indices_begins,
+                                               past_lens,
+                                               cache_interval,
+                                               output_embeds,
+                                               batch_size_in_tokens,
+                                               hidden_size,
+                                               kernel_size,
+                                               num_blocks,
+                                               seq_count,
+                                               local_state.data());
+    };
+
+    if (state_precision == ov::element::f32) {
+        dispatch_kernel(static_cast<float*>(conv_state_raw));
+    } else if (state_precision == ov::element::f16) {
+        dispatch_kernel(static_cast<ov::float16*>(conv_state_raw));
+    } else if (state_precision == ov::element::bf16) {
+        dispatch_kernel(static_cast<ov::bfloat16*>(conv_state_raw));
+    } else {
+        OPENVINO_ASSERT(false,
+                        "PagedCausalConv1D: unsupported conv_state_table precision ",
+                        state_precision,
+                        ". Expected f32, f16, or bf16.");
+    }
 }
 
 }  // namespace ov::intel_cpu::node

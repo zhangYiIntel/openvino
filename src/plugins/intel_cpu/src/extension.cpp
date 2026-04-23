@@ -202,9 +202,8 @@ OPENVINO_CREATE_EXTENSIONS(std::vector<ov::Extension::Ptr>({
     std::make_shared<ov::OpExtension<ov::op::PagedAttentionExtension>>(),
     std::make_shared<ov::OpExtension<ov::op::internal::GatedDeltaNet>>(),
     std::make_shared<ov::OpExtension<ov::op::internal::PagedGatedDeltaNet>>(),
+    // clang-format off
     OP_EXTENSION_X64(std::make_shared<ov::OpExtension<ov::intel_cpu::InteractionNode>>())
-    OP_EXTENSION_X64(std::make_shared<ov::OpExtension<ov::intel_cpu::QKVProjectionNode>>())
-    OP_EXTENSION_X64(std::make_shared<ov::OpExtension<ov::intel_cpu::ScaledDotProductAttentionWithKVCache>>())
     OP_EXTENSION_X64(std::make_shared<ov::OpExtension<ov::intel_cpu::LoadConvertSaturation>>())
     OP_EXTENSION_X64(std::make_shared<ov::OpExtension<ov::intel_cpu::LoadConvertTruncation>>())
     OP_EXTENSION_X64(std::make_shared<ov::OpExtension<ov::intel_cpu::StoreConvertSaturation>>())
