@@ -38,9 +38,18 @@ ConvertPagedAttnInputs::ConvertPagedAttnInputs(const KVCacheConfig& config,
                                      ov::op::internal::PagedGatedDeltaNet>();
     ov::matcher_pass_callback callback = [OV_CAPTURE_CPY_AND_THIS](pattern::Matcher& m) {
         const auto root = m.get_match_root();
-
+        auto resolve_parent_parameter = [](const std::shared_ptr<ov::Node>& node) -> std::shared_ptr<v0::Parameter> {
+            if (const auto param = ov::as_type_ptr<v0::Parameter>(node)) {
+                return param;
+            }
+            if (const auto convert = ov::as_type_ptr<v0::Convert>(node)) {
+                return ov::as_type_ptr<v0::Parameter>(convert->get_input_node_shared_ptr(0));
+            }
+            return nullptr;
+        };
         if (const auto paged_conv = ov::as_type_ptr<ov::op::internal::PagedCausalConv1D>(root)) {
-            auto conv_state_table = ov::as_type_ptr<v0::Parameter>(paged_conv->get_input_node_shared_ptr(1));
+            const auto conv_state_input = paged_conv->get_input_node_shared_ptr(1);
+            auto conv_state_table = resolve_parent_parameter(conv_state_input);
             if (!conv_state_table) {
                 return false;
             }
@@ -49,14 +58,14 @@ ConvertPagedAttnInputs::ConvertPagedAttnInputs(const KVCacheConfig& config,
             if (m_update_precision_func) {
                 m_update_precision_func(conv_cache_precision);
             }
-
             conv_state_table->set_element_type(conv_cache_precision);
             conv_state_table->validate_and_infer_types();
             return true;
         }
 
         if (const auto paged_gdn = ov::as_type_ptr<ov::op::internal::PagedGatedDeltaNet>(root)) {
-            auto gated_delta_state_table = ov::as_type_ptr<v0::Parameter>(paged_gdn->get_input_node_shared_ptr(3));
+            const auto gdn_state_input = paged_gdn->get_input_node_shared_ptr(3);
+            auto gated_delta_state_table = resolve_parent_parameter(gdn_state_input);
             if (!gated_delta_state_table) {
                 return false;
             }
@@ -65,7 +74,6 @@ ConvertPagedAttnInputs::ConvertPagedAttnInputs(const KVCacheConfig& config,
             if (m_update_precision_func) {
                 m_update_precision_func(gated_delta_cache_precision);
             }
-
             gated_delta_state_table->set_element_type(gated_delta_cache_precision);
             gated_delta_state_table->validate_and_infer_types();
             return true;
