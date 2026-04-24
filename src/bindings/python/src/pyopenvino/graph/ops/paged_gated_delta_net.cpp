@@ -22,7 +22,7 @@ void regclass_graph_op_PagedGatedDeltaNet(py::module m) {
             py::arg("fuse_qk_l2norm") = false,
             py::arg("q_l2_norm_eps") = 1e-6F,
             py::arg("k_l2_norm_eps") = 1e-6F);
-    cls.def_property_readonly("fuse_qk_l2norm", &PagedGatedDeltaNet::get_fuse_qk_l2norm);
+    cls.def_property_readonly("fuse_qk_l2norm", &PagedGatedDeltaNet::get_use_qk_l2norm);
     cls.def_property_readonly("q_l2_norm_eps", &PagedGatedDeltaNet::get_q_l2_norm_eps);
     cls.def_property_readonly("k_l2_norm_eps", &PagedGatedDeltaNet::get_k_l2_norm_eps);
 }
