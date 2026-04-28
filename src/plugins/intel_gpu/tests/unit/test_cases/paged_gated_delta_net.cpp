@@ -246,12 +246,12 @@ struct paged_gated_delta_net_gpu_test : public ::testing::TestWithParam<paged_ga
         auto past_lens_mem = engine.allocate_memory(past_lens_layout);
         auto cache_interval_mem = engine.allocate_memory(cache_interval_layout);
 
-        auto query = rg.generate_random_1d<T>(q_mem->count(), -1, 1, 127);
-        auto key = rg.generate_random_1d<T>(k_mem->count(), -1, 1, 127);
-        auto value = rg.generate_random_1d<T>(v_mem->count(), -1, 1, 127);
-        auto gate = rg.generate_random_1d<T>(gate_mem->count(), -1, 1, 127);
-        auto beta = rg.generate_random_1d<T>(beta_mem->count(), 0, 1, 127);
-        auto state = rg.generate_random_1d<T>(state_mem->count(), -1, 1, 127);
+        auto query = rg.generate_random_1d<T>(q_mem->count(), -1, 1, 1024);
+        auto key = rg.generate_random_1d<T>(k_mem->count(), -1, 1, 256);
+        auto value = rg.generate_random_1d<T>(v_mem->count(), -1, 1, 256);
+        auto gate = rg.generate_random_1d<T>(gate_mem->count(), -1, 1, 256);
+        auto beta = rg.generate_random_1d<T>(beta_mem->count(), 0, 1, 256);
+        auto state = rg.generate_random_1d<T>(state_mem->count(), -1, 1, 256);
 
         set_values(q_mem, query);
         set_values(k_mem, key);
