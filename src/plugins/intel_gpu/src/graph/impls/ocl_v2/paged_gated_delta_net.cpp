@@ -14,6 +14,7 @@ namespace ov::intel_gpu::ocl {
 namespace {
 
 size_t get_v_block_size(size_t v_head_dims) {
+    // v_block_size is determined by GRF size and performance data
     return 4;
 }
 

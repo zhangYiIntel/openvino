@@ -50,6 +50,10 @@ static void CreatePagedGatedDeltaNetOp(ProgramBuilder& p, const std::shared_ptr<
             if (v_heads_num_dim.is_static())
                 prim.v_heads_num = v_heads_num_dim.get_length();
         }
+        OPENVINO_ASSERT(prim.k_head_size > 0, "PagedGatedDeltaNet must have k_head_size > 0");
+        OPENVINO_ASSERT(prim.v_head_size > 0, "PagedGatedDeltaNet must have v_head_size > 0");
+        OPENVINO_ASSERT(prim.k_heads_num > 0, "PagedGatedDeltaNet must have k_heads_num > 0");
+        OPENVINO_ASSERT(prim.v_heads_num > 0, "PagedGatedDeltaNet must have v_heads_num > 0");
     }
 
     prim.num_outputs = 1;
