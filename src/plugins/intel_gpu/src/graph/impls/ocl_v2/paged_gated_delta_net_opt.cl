@@ -157,13 +157,13 @@ KERNEL(paged_gated_delta_net_opt)
         int g_idx = token * V_HEAD_NUM + h;
 
         for (; token < chunk_end; token++, q_base += q_token_stride, k_base += k_token_stride, v_base += v_token_stride, g_idx += V_HEAD_NUM) {
-            float q_sum_local = 0.0f;
-            float k_sum_local = 0.0f;
 #if (K_VEC_SIZE == 8) && (K_VEC_COUNT == 1)
             q_norm[0] = K_VEC_LOAD_Q(query, q_base);
             k_norm[0] = K_VEC_LOAD_K(key, k_base);
             FUNC(normalize_kq_128)(&k_norm[0], &q_norm[0]);
 #else
+            float q_sum_local = 0.0f;
+            float k_sum_local = 0.0f;
 #    pragma unroll
             for (int kc = 0; kc < K_VEC_COUNT; kc++) {
                 const int offset = kc * K_VEC_SIZE * SUBGROUP_SIZE;
@@ -172,9 +172,7 @@ KERNEL(paged_gated_delta_net_opt)
                 q_sum_local += K_VEC_SUM_SQ(q_norm[kc]);
                 k_sum_local += K_VEC_SUM_SQ(k_norm[kc]);
             }
-#endif
 
-#if !((K_VEC_SIZE == 8) && (K_VEC_COUNT == 1))
             float q_scale = SCALE_FACTOR;
             float k_scale = 1.0f;
 #    if FUSE_QK_L2NORM
