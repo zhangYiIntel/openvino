@@ -299,6 +299,102 @@ IncreasePositionIdsPrecisionForQwen3VL::IncreasePositionIdsPrecisionForQwen3VL()
     this->register_matcher(m, callback);
 }
 
+IncreasePositionIdsPrecisionForQwen35::IncreasePositionIdsPrecisionForQwen35() {
+    using namespace ov::pass::pattern;
+    // Strictly follow new_pattern.cpp:
+    // Convert(position_ids->i32) -> Reshape(Unsqueeze_124589) -> StridedSlice -> Reshape(unsqueeze_3)
+    // -> Convert(to f16) -> MatMul(expand_Broadcast, ...)
+    auto position_ids = any_input();
+    auto convert_pos_id_to_i32 = wrap_type<ov::op::v0::Convert>({position_ids});
+    auto unsqueeze_124589 = wrap_type<ov::op::v1::Reshape>({convert_pos_id_to_i32, any_input()});
+    auto slice_pos_id = wrap_type<ov::op::v1::StridedSlice>({unsqueeze_124589, any_input(), any_input(), any_input()});
+    auto unsqueeze_3 = wrap_type<ov::op::v1::Reshape>({slice_pos_id, any_input()});
+    auto convert_pos_id_to_f16 = wrap_type<ov::op::v0::Convert>({unsqueeze_3});
+
+    auto expand_broadcast = wrap_type<ov::op::v3::Broadcast>({any_input(), any_input()});
+    auto matmul = wrap_type<ov::op::v0::MatMul>({expand_broadcast, convert_pos_id_to_f16});
+    auto reshape_matmul = wrap_type<ov::op::v1::Reshape>({matmul, any_input()});
+
+    ov::matcher_pass_callback callback = [OV_CAPTURE_CPY_AND_THIS](ov::pass::pattern::Matcher& m) {
+        const auto& pattern_map = m.get_pattern_value_map();
+
+        auto convert_pos_id_to_f16_node =
+            ov::as_type_ptr<ov::op::v0::Convert>(pattern_map.at(convert_pos_id_to_f16).get_node_shared_ptr());
+        auto unsqueeze_124589_node = ov::as_type_ptr<ov::op::v1::Reshape>(pattern_map.at(unsqueeze_124589).get_node_shared_ptr());
+        auto expand_broadcast_node = pattern_map.at(expand_broadcast).get_node_shared_ptr();
+        auto matmul_node = ov::as_type_ptr<ov::op::v0::MatMul>(pattern_map.at(matmul).get_node_shared_ptr());
+
+        if (!convert_pos_id_to_f16_node || !unsqueeze_124589_node || !expand_broadcast_node || !matmul_node ||
+            transformation_callback(matmul_node))
+            return false;
+
+        const auto desired_et = ov::element::f32;
+        const auto original_et = convert_pos_id_to_f16_node->get_output_element_type(0);
+        size_t input_idx = 0;
+        bool changed = false;
+
+        // Promote position_ids-side Convert output to f32 to keep MatMul input types aligned.
+        if (convert_pos_id_to_f16_node->get_output_element_type(0) != desired_et) {
+            auto new_convert = std::make_shared<ov::op::v0::Convert>(convert_pos_id_to_f16_node->input_value(0), desired_et);
+            new_convert->set_friendly_name(convert_pos_id_to_f16_node->get_friendly_name() + "_increase_precision");
+            copy_runtime_info(convert_pos_id_to_f16_node, new_convert);
+            ov::replace_node(convert_pos_id_to_f16_node, new_convert);
+            changed = true;
+        }
+
+        // Insert Convert before Unsqueeze_124589(Reshape) data input.
+        changed = insert_converts_before_if_needed(unsqueeze_124589_node, desired_et, input_idx, {1}) || changed;
+
+        // Insert Convert before expand_Broadcast data input (skip shape input).
+        changed = insert_converts_before_if_needed(expand_broadcast_node, desired_et, input_idx, {1}) || changed;
+
+        // Restore original precision after Sin/Cos on this path.
+        std::shared_ptr<ov::op::v0::Sin> sin_node;
+        std::shared_ptr<ov::op::v0::Cos> cos_node;
+        std::vector<ov::Node*> stack;
+        std::set<ov::Node*> visited;
+        stack.push_back(matmul_node.get());
+        constexpr size_t max_nodes = 64;
+        size_t nodes_visited = 0;
+
+        while (!stack.empty() && nodes_visited < max_nodes && (!sin_node || !cos_node)) {
+            auto* current = stack.back();
+            stack.pop_back();
+
+            for (auto& output : current->outputs()) {
+                if (!output.get_element_type().is_real())
+                    continue;
+                for (auto& target_input : output.get_target_inputs()) {
+                    auto consumer = target_input.get_node()->shared_from_this();
+                    if (!visited.insert(consumer.get()).second)
+                        continue;
+                    nodes_visited++;
+
+                    if (auto sin_ptr = ov::as_type_ptr<ov::op::v0::Sin>(consumer)) {
+                        sin_node = sin_ptr;
+                    } else if (auto cos_ptr = ov::as_type_ptr<ov::op::v0::Cos>(consumer)) {
+                        cos_node = cos_ptr;
+                    } else {
+                        stack.push_back(consumer.get());
+                    }
+                }
+            }
+        }
+
+        if (sin_node && cos_node && original_et != desired_et) {
+            size_t output_idx = 0;
+            insert_converts_after_if_needed(sin_node, original_et, output_idx);
+            insert_converts_after_if_needed(cos_node, original_et, output_idx);
+            changed = true;
+        }
+
+        return changed;
+    };
+
+    auto m = std::make_shared<ov::pass::pattern::Matcher>(reshape_matmul, "IncreasePositionIdsPrecisionForQwen35");
+    this->register_matcher(m, callback);
+}
+
 IncreasePositionIdsPrecisionForLtxVideo::IncreasePositionIdsPrecisionForLtxVideo() {
     using namespace ov::pass::pattern;
     using ov::pass::pattern::op::Or;
@@ -452,6 +548,7 @@ bool IncreasePositionIdsPrecision::run_on_model(const std::shared_ptr<ov::Model>
     symbolic_ctx_manager->register_pass<IncreasePositionIdsPrecisionForRoPE>();
     symbolic_ctx_manager->register_pass<IncreasePositionIdsPrecisionForQwen25VL>();
     symbolic_ctx_manager->register_pass<IncreasePositionIdsPrecisionForQwen3VL>();
+    symbolic_ctx_manager->register_pass<IncreasePositionIdsPrecisionForQwen35>();
     symbolic_ctx_manager->register_pass<IncreasePositionIdsPrecisionForLtxVideo>();
     symbolic_ctx_manager->register_pass<IncreasePositionIdsPrecisionForGPTOSS>();
     return symbolic_optimizations.run_on_model(model);

@@ -26,6 +26,12 @@ public:
     IncreasePositionIdsPrecisionForQwen3VL();
 };
 
+class IncreasePositionIdsPrecisionForQwen35 : public ov::pass::MatcherPass {
+public:
+    OPENVINO_MATCHER_PASS_RTTI("IncreasePositionIdsPrecisionForQwen35");
+    IncreasePositionIdsPrecisionForQwen35();
+};
+
 class IncreasePositionIdsPrecisionForLtxVideo : public ov::pass::MatcherPass {
 public:
     OPENVINO_MATCHER_PASS_RTTI("IncreasePositionIdsPrecisionForLtxVideo");
