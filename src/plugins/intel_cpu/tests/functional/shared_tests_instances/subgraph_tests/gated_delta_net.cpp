@@ -30,10 +30,10 @@ std::vector<gated_delta_net_params> test_cases = {
     // {1, 1, 1, 1, 16, 1, ov::element::f16, "CPU"},  // Simplest case for debugging
     // {1, 1, 1, 1, 32, 1, ov::element::f16, "CPU"},
     // {1, 1, 1, 1, 64, 1, ov::element::f16, "CPU"},
-    // {1, 16, 2, 2, 128, 128, ov::element::f16, "CPU"},
-    // {1, 16, 2, 2, 64, 128, ov::element::f16, "CPU"},
-    {1, 1, 1, 1, 128, 1, ov::element::f16, "CPU"},  // Simplest: 1 timestep, 1 head, 1 value
-    {1, 31, 2, 2, 128, 128, ov::element::f16, "CPU"},
+    {1, 32, 2, 2, 128, 128, ov::element::f16, "CPU"},
+    {1, 32, 4, 4, 128, 128, ov::element::f16, "CPU"},
+    {1, 32, 2, 4, 128, 128, ov::element::f16, "CPU"},
+    {1, 16, 2, 2, 64, 128, ov::element::f16, "CPU"},
 };
 INSTANTIATE_TEST_SUITE_P(smoke_GatedDeltaNet,
                          GatedDeltaNet,

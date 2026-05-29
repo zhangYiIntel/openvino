@@ -27,8 +27,9 @@ void jit_gdn_kernel<isa>::load(const Vmm& vmm_dst,
     // Typed load helper (src_prc -> f32 VMM via jit emitter)
     const auto seed = load_emitter_params(src_prc, ov::element::f32, elt_num, fill, "float_min").hash();
     if (!emitters[seed]) {
+        constexpr cpu_isa_t load_isa = ((isa & zmm_bit) != 0) ? avx512_core : isa;
         emitters[seed] = std::make_unique<jit_load_emitter>(this,
-                                                            isa,
+                                                            load_isa,
                                                             src_prc,
                                                             ov::element::f32,
                                                             elt_num,
@@ -51,7 +52,8 @@ void jit_gdn_kernel<isa>::store(const Xbyak::Reg64& reg_dst,
     // Typed store helper (f32 VMM -> dst_prc via jit emitter)
     const auto seed = store_emitter_params(ov::element::f32, dst_prc, elt_num).hash();
     if (!emitters[seed]) {
-        emitters[seed] = std::make_unique<jit_store_emitter>(this, isa, ov::element::f32, dst_prc, elt_num);
+        constexpr cpu_isa_t store_isa = ((isa & zmm_bit) != 0) ? avx512_core : isa;
+        emitters[seed] = std::make_unique<jit_store_emitter>(this, store_isa, ov::element::f32, dst_prc, elt_num);
     }
     emitters[seed]->emit_code({static_cast<size_t>(vmm_src.getIdx())},
                               {static_cast<size_t>(reg_dst.getIdx()), offset},
@@ -60,15 +62,18 @@ void jit_gdn_kernel<isa>::store(const Xbyak::Reg64& reg_dst,
 }
 
 template <cpu_isa_t isa>
-void jit_gdn_kernel<isa>::reduce_zmm_f32_to_xmm_scalar(const Xbyak::Zmm& zmm_src, const Xbyak::Xmm& xmm_dst) {
+void jit_gdn_kernel<isa>::reduce_zmm_f32_to_xmm_scalar(const Xbyak::Zmm& zmm_src,
+                                                       const Xbyak::Xmm& xmm_dst,
+                                                       const Xbyak::Xmm& xmm_tmp0,
+                                                       const Xbyak::Xmm& xmm_tmp1) {
     // Horizontal reduce 16x f32 (ZMM) into scalar lane of xmm_dst
-    vextractf32x8(Xbyak::Ymm(x_tmp1.getIdx()), zmm_src, 1);
-    vaddps(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Ymm(zmm_src.getIdx()), Xbyak::Ymm(x_tmp1.getIdx()));
-    vextractf128(x_tmp1, Xbyak::Ymm(x_tmp0.getIdx()), 1);
-    vaddps(x_tmp0, x_tmp0, x_tmp1);
-    vhaddps(x_tmp0, x_tmp0, x_tmp0);
-    vhaddps(x_tmp0, x_tmp0, x_tmp0);
-    vaddss(xmm_dst, xmm_dst, x_tmp0);
+    vextractf32x8(Xbyak::Ymm(xmm_tmp1.getIdx()), zmm_src, 1);
+    vaddps(Xbyak::Ymm(xmm_tmp0.getIdx()), Xbyak::Ymm(zmm_src.getIdx()), Xbyak::Ymm(xmm_tmp1.getIdx()));
+    vextractf128(xmm_tmp1, Xbyak::Ymm(xmm_tmp0.getIdx()), 1);
+    vaddps(xmm_tmp0, xmm_tmp0, xmm_tmp1);
+    vhaddps(xmm_tmp0, xmm_tmp0, xmm_tmp0);
+    vhaddps(xmm_tmp0, xmm_tmp0, xmm_tmp0);
+    vaddss(xmm_dst, xmm_dst, xmm_tmp0);
 }
 
 template <cpu_isa_t isa>
@@ -77,14 +82,19 @@ void jit_gdn_kernel<isa>::dot_product_scalar(const Xbyak::Xmm& xmm_dst,
                                              const Xbyak::Reg64& reg_b,
                                              size_t tail_count,
                                              size_t base_off,
-                                             size_t elem_size) {
+                                             size_t elem_size,
+                                             const Xbyak::Xmm& xmm_tmp0,
+                                             const Xbyak::Xmm& xmm_tmp1) {
     // Scalar tail dot-product accumulation into xmm_dst
+    const Vmm vmm_tmp0 = Vmm(xmm_tmp0.getIdx());
+    const Vmm vmm_tmp1 = Vmm(xmm_tmp1.getIdx());
+
     for (size_t i = 0; i < tail_count; i++) {
         const size_t off = base_off + i * elem_size;
-        load(v_tmp0, reg_a, m_jcp.data_prc, 1, false, off);
-        load(v_tmp1, reg_b, m_jcp.data_prc, 1, false, off);
-        vmulss(x_tmp0, x_tmp0, x_tmp1);
-        vaddss(xmm_dst, xmm_dst, x_tmp0);
+        load(vmm_tmp0, reg_a, m_jcp.data_prc, 1, false, off);
+        load(vmm_tmp1, reg_b, m_jcp.data_prc, 1, false, off);
+        vmulss(xmm_tmp0, xmm_tmp0, xmm_tmp1);
+        vaddss(xmm_dst, xmm_dst, xmm_tmp0);
     }
 }
 
@@ -93,84 +103,36 @@ void jit_gdn_kernel<isa>::dot_product_to_scalar(const Xbyak::Xmm& xmm_dst,
                                                 const Xbyak::Reg64& reg_a,
                                                 const Xbyak::Reg64& reg_b,
                                                 const Xbyak::Reg64& reg_aux) {
-    // Dot product dispatcher (bf16/f16/f32/small fallback) -> scalar xmm_dst
+    // Dot product dispatcher (f32 vectorized, otherwise scalar) -> scalar xmm_dst
     uni_vpxor(xmm_dst, xmm_dst, xmm_dst);
     const size_t qk = m_jcp.qk_head_size;
 
-    if (m_jcp.data_prc == ov::element::bf16 && mayiuse(avx512_core_bf16)) {
-        // bf16 fast path (vdpbf16ps on 32 bf16 elems per vector)
-        const size_t vec_elems = 32;
-        const size_t vec_cnt = qk / vec_elems;
-        const size_t tail = qk % vec_elems;
+    if (m_jcp.data_prc == ov::element::f32) {
+        const size_t vec_cnt = qk / vec_size;
+        const size_t tail = qk % vec_size;
 
         uni_vpxor(v_aux0, v_aux0, v_aux0);
 
         for (size_t i = 0; i < vec_cnt; i++) {
-            const size_t off = i * 64;
-            vmovups(v_aux1, ptr[reg_a + off]);
-            vmovups(v_aux2, ptr[reg_b + off]);
-            vdpbf16ps(v_aux0, v_aux1, v_aux2);
+            const size_t off = i * vec_bytes;
+            load(v_aux1, reg_a, ov::element::f32, static_cast<int>(vec_size), false, off);
+            load(v_aux2, reg_b, ov::element::f32, static_cast<int>(vec_size), false, off);
+            vfmadd231ps(v_aux0, v_aux1, v_aux2);
         }
 
-        reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst);
-
-        dot_product_scalar(xmm_dst, reg_a, reg_b, tail, vec_cnt * 64, sizeof(uint16_t));
-    } else if (m_jcp.data_prc == ov::element::f16 && mayiuse(avx512_core_fp16)) {
-        // f16 fast path (vfmadd231ph + fp16->fp32 accumulation)
-        const size_t vec_elems = 32;
-        const size_t vec_cnt = qk / vec_elems;
-        const size_t tail = qk % vec_elems;
-
-        uni_vpxor(v_aux0, v_aux0, v_aux0);
-
-        for (size_t i = 0; i < vec_cnt; i++) {
-            const size_t off = i * 64;
-            vmovups(v_aux1, ptr[reg_a + off]);
-            vmovups(v_aux2, ptr[reg_b + off]);
-            uni_vpxor(v_tmp0, v_tmp0, v_tmp0);
-            vfmadd231ph(v_tmp0, v_aux1, v_aux2);
-
-            vextractf32x8(Xbyak::Ymm(v_aux2.getIdx()), Xbyak::Zmm(v_tmp0.getIdx()), 0);
-            vcvtph2ps(v_aux1, Xbyak::Ymm(v_aux2.getIdx()));
-            vaddps(v_aux0, v_aux0, v_aux1);
-
-            vextractf32x8(Xbyak::Ymm(v_aux2.getIdx()), Xbyak::Zmm(v_tmp0.getIdx()), 1);
-            vcvtph2ps(v_aux1, Xbyak::Ymm(v_aux2.getIdx()));
-            vaddps(v_aux0, v_aux0, v_aux1);
-        }
-
-        reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst);
-
-        dot_product_scalar(xmm_dst, reg_a, reg_b, tail, vec_cnt * 64, sizeof(uint16_t));
-    } else {
-        // generic path (f32 vectorized, otherwise scalar)
-        if (m_jcp.data_prc == ov::element::f32) {
-            const size_t vec_cnt = qk / vec_size;
-            const size_t tail = qk % vec_size;
-
-            uni_vpxor(v_aux0, v_aux0, v_aux0);
-
-            for (size_t i = 0; i < vec_cnt; i++) {
-                const size_t off = i * vec_bytes;
-                load(v_aux1, reg_a, ov::element::f32, static_cast<int>(vec_size), false, off);
-                load(v_aux2, reg_b, ov::element::f32, static_cast<int>(vec_size), false, off);
-                vfmadd231ps(v_aux0, v_aux1, v_aux2);
-            }
-
-            if constexpr (std::is_same_v<Vmm, Xbyak::Ymm>) {
-                vextractf128(x_tmp0, v_aux0, 1);
-                vaddps(Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()), x_tmp0);
-                vhaddps(Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()));
-                vhaddps(Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()));
-                vaddss(xmm_dst, xmm_dst, Xbyak::Xmm(v_aux0.getIdx()));
-            } else {
-                reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst);
-            }
-
-            dot_product_scalar(xmm_dst, reg_a, reg_b, tail, vec_cnt * vec_bytes, sizeof(float));
+        if constexpr (std::is_same_v<Vmm, Xbyak::Ymm>) {
+            vextractf128(x_tmp0, v_aux0, 1);
+            vaddps(Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()), x_tmp0);
+            vhaddps(Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()));
+            vhaddps(Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()), Xbyak::Xmm(v_aux0.getIdx()));
+            vaddss(xmm_dst, xmm_dst, Xbyak::Xmm(v_aux0.getIdx()));
         } else {
-            dot_product_scalar(xmm_dst, reg_a, reg_b, qk, 0, m_jcp.data_prc.size());
+            reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst, x_tmp0, x_tmp1);
         }
+
+        dot_product_scalar(xmm_dst, reg_a, reg_b, tail, vec_cnt * vec_bytes, sizeof(float), x_tmp0, x_tmp1);
+    } else {
+        dot_product_scalar(xmm_dst, reg_a, reg_b, qk, 0, m_jcp.data_prc.size(), x_tmp0, x_tmp1);
     }
 }
 
@@ -226,7 +188,7 @@ void jit_gdn_kernel<isa>::l2norm_inplace(const Xbyak::Reg64& reg_vec,
         vhaddps(xmm_sum, xmm_sum, xmm_sum);
         vhaddps(xmm_sum, xmm_sum, xmm_sum);
     } else {
-        reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_sum);
+        reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_sum, xmm_tmp0, xmm_tmp1);
     }
 
     for (size_t i = 0; i < tail; i++) {
@@ -260,339 +222,102 @@ void jit_gdn_kernel<isa>::l2norm_inplace(const Xbyak::Reg64& reg_vec,
 }
 
 // ============================================
-// Native xf16 (FP16/BF16) helpers - Combined implementation
+// Native xf16 helpers - FP16-only implementation
 // ============================================
 
 template <cpu_isa_t isa>
-void jit_gdn_kernel<isa>::load_vector_native_xf16(Vmm* vmm_array, const Xbyak::Reg64& reg_src, int num_regs, int tail_elems) {
-    // Load xf16 vector (up to 4 ZMMs) directly from memory
-    // Same instruction for both fp16 and bf16
+void jit_gdn_kernel<isa>::load_vector_native_xf16(Vmm* vmm_array, const Xbyak::Reg64& reg_src, int num_regs) {
+    // Load fp16 vector (up to 4 ZMMs) directly from memory
     for (int i = 0; i < num_regs; i++) {
-        if (i == num_regs - 1 && tail_elems > 0) {
-            // Tail handling with mask - use T_z to zero unused lanes
-            Xbyak::Opmask kmask = k2;
-            mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-            kmovd(kmask, reg_aux.cvt32());
-            vmovdqu16(vmm_array[i] | kmask | T_z, ptr[reg_src + i * 64]);  // Load with zeroing
-        } else {
-            vmovups(vmm_array[i], ptr[reg_src + i * 64]);
-        }
+        vmovups(vmm_array[i], ptr[reg_src + i * 64]);
     }
 }
 
 template <cpu_isa_t isa>
-void jit_gdn_kernel<isa>::store_vector_native_xf16(const Xbyak::Reg64& reg_dst, Vmm* vmm_array, int num_regs, int tail_elems) {
-    // Store xf16 vector (up to 4 ZMMs) to memory
-    // Same instruction for both fp16 and bf16
+void jit_gdn_kernel<isa>::store_vector_native_xf16(const Xbyak::Reg64& reg_dst, Vmm* vmm_array, int num_regs) {
+    // Store fp16 vector (up to 4 ZMMs) to memory
     for (int i = 0; i < num_regs; i++) {
-        if (i == num_regs - 1 && tail_elems > 0) {
-            // Tail handling with mask
-            Xbyak::Opmask kmask = k2;
-            mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-            kmovd(kmask, reg_aux.cvt32());
-            vmovdqu16(ptr[reg_dst + i * 64], vmm_array[i] | kmask);
-        } else {
-            vmovups(ptr[reg_dst + i * 64], vmm_array[i]);
-        }
+        vmovups(ptr[reg_dst + i * 64], vmm_array[i]);
     }
 }
 
 template <cpu_isa_t isa>
-void jit_gdn_kernel<isa>::dot_product_native_xf16(const Xbyak::Xmm& xmm_dst, Vmm* vmm_a, Vmm* vmm_b, int num_regs, int tail_elems) {
-    // Compute dot product with FP32 accumulation for precision
-    uni_vpxor(v_aux0, v_aux0, v_aux0);  // fp32 accumulator
+void jit_gdn_kernel<isa>::dot_product_native_xf16(const Xbyak::Xmm& xmm_dst, Vmm* vmm_a, Vmm* vmm_b, int num_regs) {
+    // Compute dot-product with native fp16 accumulation, then reduce to scalar
+    // Similar to: sum_vec = fmadd_ph(a, b, sum_vec); result = reduce_add_ph(sum_vec)
+    uni_vpxor(v_tmp0, v_tmp0, v_tmp0);  // fp16 accumulator (32 lanes)
 
-    if (m_jcp.data_prc == ov::element::f16) {
-        // FP16 path: convert to fp32 and accumulate in fp32 for better numerical stability
-        for (int i = 0; i < num_regs; i++) {
-            bool is_tail = (i == num_regs - 1 && tail_elems > 0);
-
-            if (is_tail) {
-                Xbyak::Opmask kmask = k2;
-                mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-                kmovd(kmask, reg_aux.cvt32());
-                vmovdqu16(v_tmp0 | kmask | T_z, vmm_a[i]);
-                vmovdqu16(v_tmp1 | kmask | T_z, vmm_b[i]);
-
-                // lower 16 fp16 lanes
-                vcvtph2ps(v_aux1, Xbyak::Ymm(v_tmp0.getIdx()));
-                vcvtph2ps(v_aux2, Xbyak::Ymm(v_tmp1.getIdx()));
-                vfmadd231ps(v_aux0, v_aux1, v_aux2);
-
-                // upper 16 fp16 lanes
-                vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(v_tmp0.getIdx()), 1);
-                vextractf32x8(Xbyak::Ymm(x_tmp1.getIdx()), Xbyak::Zmm(v_tmp1.getIdx()), 1);
-                vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
-                vcvtph2ps(v_aux2, Xbyak::Ymm(x_tmp1.getIdx()));
-                vfmadd231ps(v_aux0, v_aux1, v_aux2);
-            } else {
-                // lower 16 fp16 lanes
-                vcvtph2ps(v_aux1, Xbyak::Ymm(vmm_a[i].getIdx()));
-                vcvtph2ps(v_aux2, Xbyak::Ymm(vmm_b[i].getIdx()));
-                vfmadd231ps(v_aux0, v_aux1, v_aux2);
-
-                // upper 16 fp16 lanes
-                vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(vmm_a[i].getIdx()), 1);
-                vextractf32x8(Xbyak::Ymm(x_tmp1.getIdx()), Xbyak::Zmm(vmm_b[i].getIdx()), 1);
-                vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
-                vcvtph2ps(v_aux2, Xbyak::Ymm(x_tmp1.getIdx()));
-                vfmadd231ps(v_aux0, v_aux1, v_aux2);
-            }
-        }
-    } else {
-        // BF16 path: vdpbf16ps directly accumulates to fp32
-        for (int i = 0; i < num_regs; i++) {
-            bool is_tail = (i == num_regs - 1 && tail_elems > 0);
-
-            if (is_tail) {
-                // For tail, we need to zero out garbage elements before dot product
-                // Load with mask to avoid garbage
-                Xbyak::Opmask kmask = k2;
-                mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-                kmovd(kmask, reg_aux.cvt32());
-                uni_vpxor(v_tmp0, v_tmp0, v_tmp0);
-                vmovdqu16(v_tmp0 | kmask | T_z, vmm_a[i]);
-                uni_vpxor(v_tmp1, v_tmp1, v_tmp1);
-                vmovdqu16(v_tmp1 | kmask | T_z, vmm_b[i]);
-                vdpbf16ps(v_aux0, v_tmp0, v_tmp1);
-            } else {
-                vdpbf16ps(v_aux0, vmm_a[i], vmm_b[i]);
-            }
-        }
+    for (int i = 0; i < num_regs; i++) {
+        vfmadd231ph(v_tmp0, vmm_a[i], vmm_b[i]);
     }
+
+    // Convert fp16 accumulator to fp32 and fold upper/lower halves
+    vcvtph2ps(v_aux0, Xbyak::Ymm(v_tmp0.getIdx()));
+    vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(v_tmp0.getIdx()), 1);
+    vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
+    vaddps(v_aux0, v_aux0, v_aux1);
 
     // Horizontal reduction: 16 fp32 → scalar in xmm_dst
     uni_vpxor(xmm_dst, xmm_dst, xmm_dst);
-    reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst);
+    reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst, x_tmp0, x_tmp1);
 }
 
 template <cpu_isa_t isa>
-void jit_gdn_kernel<isa>::scale_vector_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_scalar, int num_regs, int tail_elems) {
-    // Multiply vector by FP32 scalar: vmm_array *= scalar
+void jit_gdn_kernel<isa>::scale_vector_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_scalar, int num_regs) {
+    // Multiply vector by scalar in native fp16: vmm_array *= scalar
+    vcvtps2ph(x_tmp0, xmm_scalar, 0);
+    vpbroadcastw(v_aux2, x_tmp0);
 
-    if (m_jcp.data_prc == ov::element::f16) {
-        // FP16 path: fp32 multiply + convert back
-        vbroadcastss(v_aux2, xmm_scalar);
-
-        for (int i = 0; i < num_regs; i++) {
-            bool is_tail = (i == num_regs - 1 && tail_elems > 0);
-
-            if (is_tail) {
-                Xbyak::Opmask kmask = k2;
-                mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-                kmovd(kmask, reg_aux.cvt32());
-
-                vmovdqu16(v_tmp0 | kmask | T_z, vmm_array[i]);
-
-                // lower 16 fp16 lanes
-                vcvtph2ps(v_aux0, Xbyak::Ymm(v_tmp0.getIdx()));
-                vmulps(v_aux0, v_aux0, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux0.getIdx()), v_aux0, 0);
-
-                // upper 16 fp16 lanes
-                vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(v_tmp0.getIdx()), 1);
-                vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
-                vmulps(v_aux1, v_aux1, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux1.getIdx()), v_aux1, 0);
-
-                vinsertf32x8(Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Ymm(v_aux1.getIdx()), 1);
-                vmovdqu16(vmm_array[i] | kmask, v_aux0);
-            } else {
-                // lower 16 fp16 lanes
-                vcvtph2ps(v_aux0, Xbyak::Ymm(vmm_array[i].getIdx()));
-                vmulps(v_aux0, v_aux0, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux0.getIdx()), v_aux0, 0);
-
-                // upper 16 fp16 lanes
-                vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(vmm_array[i].getIdx()), 1);
-                vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
-                vmulps(v_aux1, v_aux1, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux1.getIdx()), v_aux1, 0);
-
-                vinsertf32x8(Xbyak::Zmm(vmm_array[i].getIdx()), Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Ymm(v_aux1.getIdx()), 1);
-            }
-        }
-    } else {
-        // BF16 path: convert to fp32, multiply, convert back
-        // BF16 to FP32 conversion: zero-extend from 16-bit to 32-bit, then shift left by 16
-        vbroadcastss(v_aux2, xmm_scalar);  // Broadcast scalar to 16 lanes of FP32
-
-        for (int i = 0; i < num_regs; i++) {
-            // Convert BF16 (32 elements in ZMM) to FP32 (16 elements in ZMM) - lower half
-            vpmovzxwd(v_aux0, Xbyak::Ymm(vmm_array[i].getIdx()));  // Zero-extend 16x BF16 -> 16x DWORD
-            vpslld(v_aux0, v_aux0, 16);  // Shift left to get FP32
-            vmulps(v_aux0, v_aux0, v_aux2);  // Multiply by scalar
-            vcvtneps2bf16(Xbyak::Ymm(v_aux0.getIdx()), v_aux0);  // Convert back to BF16
-
-            // Convert BF16 - upper half
-            vextractf32x8(Xbyak::Ymm(v_aux1.getIdx()), Xbyak::Zmm(vmm_array[i].getIdx()), 1);
-            vpmovzxwd(v_tmp0, Xbyak::Ymm(v_aux1.getIdx()));
-            vpslld(v_tmp0, v_tmp0, 16);
-            vmulps(v_tmp0, v_tmp0, v_aux2);
-            vcvtneps2bf16(Xbyak::Ymm(v_tmp0.getIdx()), v_tmp0);
-
-            // Combine lower and upper halves back into ZMM
-            if (i == num_regs - 1 && tail_elems > 0) {
-                // For tail, need to preserve original values outside the mask
-                vinsertf32x8(Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Ymm(v_tmp0.getIdx()), 1);
-                Xbyak::Opmask kmask = k2;
-                mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-                kmovd(kmask, reg_aux.cvt32());
-                vmovdqu16(vmm_array[i] | kmask, v_aux0);
-            } else {
-                vinsertf32x8(Xbyak::Zmm(vmm_array[i].getIdx()), Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Ymm(v_tmp0.getIdx()), 1);
-            }
-        }
+    for (int i = 0; i < num_regs; i++) {
+        vmulph(vmm_array[i], vmm_array[i], v_aux2);
     }
 }
 
 template <cpu_isa_t isa>
-void jit_gdn_kernel<isa>::fmadd_vector_native_xf16(Vmm* vmm_dst, Vmm* vmm_src, const Xbyak::Xmm& xmm_scalar, int num_regs, int tail_elems) {
-    // Fused multiply-add: vmm_dst += vmm_src * scalar
+void jit_gdn_kernel<isa>::fmadd_vector_native_xf16(Vmm* vmm_dst,
+                                                   Vmm* vmm_src,
+                                                   const Xbyak::Xmm& xmm_scalar,
+                                                   int num_regs) {
+    // Fused multiply-add in native fp16: vmm_dst += vmm_src * scalar
+    vcvtps2ph(x_tmp0, xmm_scalar, 0);
+    vpbroadcastw(v_aux2, x_tmp0);
 
-    if (m_jcp.data_prc == ov::element::f16) {
-        // FP16 path: fp32 FMA + convert back
-        vbroadcastss(v_aux2, xmm_scalar);
-
-        for (int i = 0; i < num_regs; i++) {
-            bool is_tail = (i == num_regs - 1 && tail_elems > 0);
-
-            if (is_tail) {
-                Xbyak::Opmask kmask = k2;
-                mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-                kmovd(kmask, reg_aux.cvt32());
-
-                vmovdqu16(v_tmp0 | kmask | T_z, vmm_src[i]);
-                vmovdqu16(v_tmp1 | kmask | T_z, vmm_dst[i]);
-
-                // lower 16 lanes
-                vcvtph2ps(v_aux0, Xbyak::Ymm(v_tmp0.getIdx()));
-                vcvtph2ps(v_aux1, Xbyak::Ymm(v_tmp1.getIdx()));
-                vfmadd231ps(v_aux1, v_aux0, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux0.getIdx()), v_aux1, 0);
-
-                // upper 16 lanes
-                vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(v_tmp0.getIdx()), 1);
-                vextractf32x8(Xbyak::Ymm(x_tmp1.getIdx()), Xbyak::Zmm(v_tmp1.getIdx()), 1);
-                vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
-                vcvtph2ps(v_tmp1, Xbyak::Ymm(x_tmp1.getIdx()));
-                vfmadd231ps(v_tmp1, v_aux1, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux1.getIdx()), v_tmp1, 0);
-
-                vinsertf32x8(Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Ymm(v_aux1.getIdx()), 1);
-                vmovdqu16(vmm_dst[i] | kmask, v_aux0);
-            } else {
-                // lower 16 lanes
-                vcvtph2ps(v_aux0, Xbyak::Ymm(vmm_src[i].getIdx()));
-                vcvtph2ps(v_aux1, Xbyak::Ymm(vmm_dst[i].getIdx()));
-                vfmadd231ps(v_aux1, v_aux0, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux0.getIdx()), v_aux1, 0);
-
-                // upper 16 lanes
-                vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(vmm_src[i].getIdx()), 1);
-                vextractf32x8(Xbyak::Ymm(x_tmp1.getIdx()), Xbyak::Zmm(vmm_dst[i].getIdx()), 1);
-                vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
-                vcvtph2ps(v_tmp1, Xbyak::Ymm(x_tmp1.getIdx()));
-                vfmadd231ps(v_tmp1, v_aux1, v_aux2);
-                vcvtps2ph(Xbyak::Ymm(v_aux1.getIdx()), v_tmp1, 0);
-
-                vinsertf32x8(Xbyak::Zmm(vmm_dst[i].getIdx()), Xbyak::Zmm(v_aux0.getIdx()), Xbyak::Ymm(v_aux1.getIdx()), 1);
-            }
-        }
-    } else {
-        // BF16 path: convert to fp32, compute FMA, convert back
-        vbroadcastss(v_aux2, xmm_scalar);  // Broadcast scalar to FP32
-
-        for (int i = 0; i < num_regs; i++) {
-            // Convert src BF16 to FP32 - lower half
-            vpmovzxwd(v_aux0, Xbyak::Ymm(vmm_src[i].getIdx()));
-            vpslld(v_aux0, v_aux0, 16);
-
-            // Convert dst BF16 to FP32 - lower half
-            vpmovzxwd(v_aux1, Xbyak::Ymm(vmm_dst[i].getIdx()));
-            vpslld(v_aux1, v_aux1, 16);
-
-            // FMA: dst += src * scalar
-            vfmadd231ps(v_aux1, v_aux0, v_aux2);
-            vcvtneps2bf16(Xbyak::Ymm(v_aux1.getIdx()), v_aux1);
-
-            // Convert src BF16 to FP32 - upper half
-            vextractf32x8(Xbyak::Ymm(v_tmp0.getIdx()), Xbyak::Zmm(vmm_src[i].getIdx()), 1);
-            vpmovzxwd(v_aux0, Xbyak::Ymm(v_tmp0.getIdx()));
-            vpslld(v_aux0, v_aux0, 16);
-
-            // Convert dst BF16 to FP32 - upper half
-            vextractf32x8(Xbyak::Ymm(v_tmp0.getIdx()), Xbyak::Zmm(vmm_dst[i].getIdx()), 1);
-            vpmovzxwd(v_tmp1, Xbyak::Ymm(v_tmp0.getIdx()));
-            vpslld(v_tmp1, v_tmp1, 16);
-
-            // FMA: dst += src * scalar
-            vfmadd231ps(v_tmp1, v_aux0, v_aux2);
-            vcvtneps2bf16(Xbyak::Ymm(v_tmp1.getIdx()), v_tmp1);
-
-            // Combine lower and upper halves
-            if (i == num_regs - 1 && tail_elems > 0) {
-                vinsertf32x8(Xbyak::Zmm(v_aux1.getIdx()), Xbyak::Zmm(v_aux1.getIdx()), Xbyak::Ymm(v_tmp1.getIdx()), 1);
-                Xbyak::Opmask kmask = k2;
-                mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-                kmovd(kmask, reg_aux.cvt32());
-                vmovdqu16(vmm_dst[i] | kmask, v_aux1);
-            } else {
-                vinsertf32x8(Xbyak::Zmm(vmm_dst[i].getIdx()), Xbyak::Zmm(v_aux1.getIdx()), Xbyak::Ymm(v_tmp1.getIdx()), 1);
-            }
-        }
+    for (int i = 0; i < num_regs; i++) {
+        vfmadd231ph(vmm_dst[i], vmm_src[i], v_aux2);
     }
 }
 
 template <cpu_isa_t isa>
-void jit_gdn_kernel<isa>::l2norm_inplace_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_eps, int num_regs, int tail_elems) {
+void jit_gdn_kernel<isa>::l2norm_inplace_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_eps, int num_regs) {
     // L2 normalization: vmm /= sqrt(sum(vmm^2) + eps)
 
     uni_vpxor(v_aux0, v_aux0, v_aux0);  // fp32 accumulator
 
-    if (m_jcp.data_prc == ov::element::f16) {
-        // FP16 path: accumulate squares in FP32 to avoid fp16 overflow-to-inf
-        for (int i = 0; i < num_regs; i++) {
-            // lower 16 fp16 lanes
-            vcvtph2ps(v_aux1, Xbyak::Ymm(vmm_array[i].getIdx()));
-            vfmadd231ps(v_aux0, v_aux1, v_aux1);
+    for (int i = 0; i < num_regs; i++) {
+        // lower 16 fp16 lanes
+        vcvtph2ps(v_aux1, Xbyak::Ymm(vmm_array[i].getIdx()));
+        vfmadd231ps(v_aux0, v_aux1, v_aux1);
 
-            // upper 16 fp16 lanes
-            vextractf32x8(Xbyak::Ymm(v_tmp0.getIdx()), Xbyak::Zmm(vmm_array[i].getIdx()), 1);
-            vcvtph2ps(v_aux1, Xbyak::Ymm(v_tmp0.getIdx()));
-            vfmadd231ps(v_aux0, v_aux1, v_aux1);
-        }
-    } else {
-        // BF16 path: vdpbf16ps for x^2
-        for (int i = 0; i < num_regs; i++) {
-            bool is_tail = (i == num_regs - 1 && tail_elems > 0);
-
-            if (is_tail) {
-                // Zero out garbage elements before computing
-                Xbyak::Opmask kmask = k2;
-                mov(reg_aux.cvt32(), (1ULL << tail_elems) - 1);
-                kmovd(kmask, reg_aux.cvt32());
-                uni_vpxor(v_tmp0, v_tmp0, v_tmp0);
-                vmovdqu16(v_tmp0 | kmask | T_z, vmm_array[i]);
-                vdpbf16ps(v_aux0, v_tmp0, v_tmp0);
-            } else {
-                vdpbf16ps(v_aux0, vmm_array[i], vmm_array[i]);
-            }
-        }
+        // upper 16 fp16 lanes
+        vextractf32x8(Xbyak::Ymm(v_tmp0.getIdx()), Xbyak::Zmm(vmm_array[i].getIdx()), 1);
+        vcvtph2ps(v_aux1, Xbyak::Ymm(v_tmp0.getIdx()));
+        vfmadd231ps(v_aux0, v_aux1, v_aux1);
     }
 
     // Reduce to scalar: sqrt(sum + eps), then compute reciprocal
-    uni_vpxor(x_tmp0, x_tmp0, x_tmp0);
-    reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), x_tmp0);
-    vaddss(x_tmp0, x_tmp0, xmm_eps);
-    vsqrtss(x_tmp0, x_tmp0, x_tmp0);
+    // NOTE: do not use x_tmp0 as destination of reduce_zmm_f32_to_xmm_scalar,
+    // because x_tmp0 is used internally as a scratch register in that helper.
+    uni_vpxor(x_hk, x_hk, x_hk);
+    reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), x_hk, x_tmp0, x_tmp1);
+    vaddss(x_hk, x_hk, xmm_eps);
+    vsqrtss(x_hk, x_hk, x_hk);
 
     mov(reg_aux.cvt32(), float2int(1.0F));
     vmovd(x_tmp1, reg_aux.cvt32());
-    vdivss(x_tmp1, x_tmp1, x_tmp0);  // reciprocal
+    vdivss(x_tmp1, x_tmp1, x_hk);  // reciprocal
 
     // Scale vector by reciprocal
-    scale_vector_native_xf16(vmm_array, x_tmp1, num_regs, tail_elems);
+    scale_vector_native_xf16(vmm_array, x_tmp1, num_regs);
 }
 
 // ============================================
@@ -634,14 +359,13 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
     mov(reg_t, ptr[reg_args + GET_OFF(t_size)]);
 
     // Get register allocation info
-    int num_regs, tail_elems;
-    get_vec_regs_info(num_regs, tail_elems);
+    const int num_regs = static_cast<int>(m_jcp.qk_head_size / XF16_ELEMS_PER_ZMM);
 
     // One-time setup
     exp_injector->load_table_addr();
 
     // Load H once at kernel start (persistent across timesteps)
-    load_vector_native_xf16(const_cast<Vmm*>(v_h), reg_state, num_regs, tail_elems);
+    load_vector_native_xf16(const_cast<Vmm*>(v_h), reg_state, num_regs);
 
     test(reg_t, reg_t);
     jz(l_end, T_NEAR);
@@ -657,17 +381,17 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
         vmovd(x_qscale, reg_aux.cvt32());
 
         // Load K, Q directly into registers (NO temp buffer!)
-        load_vector_native_xf16(const_cast<Vmm*>(v_k), reg_key_seq, num_regs, tail_elems);
-        load_vector_native_xf16(const_cast<Vmm*>(v_q), reg_query_seq, num_regs, tail_elems);
+        load_vector_native_xf16(const_cast<Vmm*>(v_k), reg_key_seq, num_regs);
+        load_vector_native_xf16(const_cast<Vmm*>(v_q), reg_query_seq, num_regs);
 
         // Optional L2 normalization
         if (m_jcp.fuse_qk_l2norm) {
-            l2norm_inplace_native_xf16(const_cast<Vmm*>(v_k), x_eps_k, num_regs, tail_elems);
-            l2norm_inplace_native_xf16(const_cast<Vmm*>(v_q), x_eps_q, num_regs, tail_elems);
+            l2norm_inplace_native_xf16(const_cast<Vmm*>(v_k), x_eps_k, num_regs);
+            l2norm_inplace_native_xf16(const_cast<Vmm*>(v_q), x_eps_q, num_regs);
         }
 
         // Scale query
-        scale_vector_native_xf16(const_cast<Vmm*>(v_q), x_qscale, num_regs, tail_elems);
+        scale_vector_native_xf16(const_cast<Vmm*>(v_q), x_qscale, num_regs);
 
         // Scale hidden state by exp(gate)
         // Scalar f16 load -> fp32
@@ -675,10 +399,10 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
         vmovd(x_tmp0, reg_aux.cvt32());
         vcvtph2ps(x_gate, x_tmp0);
         exp_injector->compute_vector_range(x_gate.getIdx(), x_gate.getIdx() + 1);
-        scale_vector_native_xf16(const_cast<Vmm*>(v_h), x_gate, num_regs, tail_elems);
+        scale_vector_native_xf16(const_cast<Vmm*>(v_h), x_gate, num_regs);
 
         // Compute hk = dot(H, K)
-        dot_product_native_xf16(x_hk, const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_k), num_regs, tail_elems);
+        dot_product_native_xf16(x_hk, const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_k), num_regs);
 
         // delta = (value - hk) * beta
         // Scalar f16 loads -> fp32
@@ -693,10 +417,10 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
         vmulss(x_delta, x_delta, x_beta);
 
         // Update: H += K * delta
-        fmadd_vector_native_xf16(const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_k), x_delta, num_regs, tail_elems);
+        fmadd_vector_native_xf16(const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_k), x_delta, num_regs);
 
         // Output: out = dot(H, Q), scalar fp32 -> f16 store
-        dot_product_native_xf16(x_out, const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_q), num_regs, tail_elems);
+        dot_product_native_xf16(x_out, const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_q), num_regs);
         vcvtps2ph(x_tmp0, x_out, 0);
         vpextrw(reg_aux.cvt32(), x_tmp0, 0);
         mov(ptr[reg_out_seq], reg_aux.cvt16());
@@ -727,7 +451,7 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
     L(l_end);
 
     // Store H back to state
-    store_vector_native_xf16(reg_state, const_cast<Vmm*>(v_h), num_regs, tail_elems);
+    store_vector_native_xf16(reg_state, const_cast<Vmm*>(v_h), num_regs);
 
     this->postamble();
 
@@ -736,14 +460,13 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
 
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::generate() {
-    // Dispatcher: Use native xf16 path for supported head_dims with FP16/BF16
+    // Dispatcher: Use native xf16 path for supported head_dims with FP16
     const size_t qk = m_jcp.qk_head_size;
-    const bool is_xf16_eligible = (qk % 16 == 0) && (qk <= 128);  // Multiples of 16, up to 128
+    const bool is_xf16_eligible = (qk % 32 == 0) && (qk <= 128);  // Multiples of 32, up to 128
 
     if (is_xf16_eligible) {
-        if ((m_jcp.data_prc == ov::element::f16 && isa == avx512_core_fp16) ||
-            (m_jcp.data_prc == ov::element::bf16 && isa == avx512_core_bf16)) {
-            // Use optimized native xf16 path (no temp buffers, register-resident)
+        if (m_jcp.data_prc == ov::element::f16 && isa == avx512_core_fp16) {
+            // Use optimized native fp16 path (no temp buffers, register-resident)
             generate_native_xf16();
             return;
         }

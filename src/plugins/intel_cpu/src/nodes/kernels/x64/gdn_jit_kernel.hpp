@@ -93,8 +93,8 @@ private:
     const Vmm v_aux1 = Vmm(12);
     const Vmm v_aux2 = Vmm(13);
 
-    // Register-based Q/K/H storage for native xf16 (fp16/bf16)
-    // Supports head_dims: 16, 32, 48, 64, 80, 96, 112, 128 (multiples of 16, up to 128)
+    // Register-based Q/K/H storage for native f16
+    // Supports head_dims that are multiples of 32, up to 128
     static constexpr int XF16_ELEMS_PER_ZMM = 32;  // 32 xf16 elements per ZMM register
     static constexpr int MAX_REGS_PER_VEC = 4;     // Max ZMMs per vector (for head_dims=128)
 
@@ -103,21 +103,16 @@ private:
     const Vmm v_h[MAX_REGS_PER_VEC] = {Vmm(22), Vmm(23), Vmm(24), Vmm(25)};  // Hidden state
 
     void generate() override;
-    void generate_native_xf16();  // Combined fp16/bf16 path (no temp buffer, register-based)
+    void generate_native_xf16();  // fp16-only path (no temp buffer, register-based)
 
-    // Native xf16 helpers - work for both fp16 and bf16, dynamic head_dims
-    void load_vector_native_xf16(Vmm* vmm_array, const Xbyak::Reg64& reg_src, int num_regs, int tail_elems);
-    void store_vector_native_xf16(const Xbyak::Reg64& reg_dst, Vmm* vmm_array, int num_regs, int tail_elems);
-    void dot_product_native_xf16(const Xbyak::Xmm& xmm_dst, Vmm* vmm_a, Vmm* vmm_b, int num_regs, int tail_elems);
-    void scale_vector_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_scalar, int num_regs, int tail_elems);
-    void fmadd_vector_native_xf16(Vmm* vmm_dst, Vmm* vmm_src, const Xbyak::Xmm& xmm_scalar, int num_regs, int tail_elems);
-    void l2norm_inplace_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_eps, int num_regs, int tail_elems);
+    // Native xf16 helpers - fp16 only, head_dims must be multiple of 32
+    void load_vector_native_xf16(Vmm* vmm_array, const Xbyak::Reg64& reg_src, int num_regs);
+    void store_vector_native_xf16(const Xbyak::Reg64& reg_dst, Vmm* vmm_array, int num_regs);
+    void dot_product_native_xf16(const Xbyak::Xmm& xmm_dst, Vmm* vmm_a, Vmm* vmm_b, int num_regs);
+    void scale_vector_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_scalar, int num_regs);
+    void fmadd_vector_native_xf16(Vmm* vmm_dst, Vmm* vmm_src, const Xbyak::Xmm& xmm_scalar, int num_regs);
+    void l2norm_inplace_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_eps, int num_regs);
 
-    // Helper to get number of registers and tail elements
-    inline void get_vec_regs_info(int& num_regs, int& tail_elems) const {
-        num_regs = (m_jcp.qk_head_size + XF16_ELEMS_PER_ZMM - 1) / XF16_ELEMS_PER_ZMM;
-        tail_elems = m_jcp.qk_head_size % XF16_ELEMS_PER_ZMM;
-    }
     void load(const Vmm& vmm_dst,
               const Xbyak::Reg64& reg_src,
               ov::element::Type src_prc,
@@ -129,19 +124,25 @@ private:
                ov::element::Type dst_prc,
                const int& elt_num,
                size_t offset = 0);
-    void reduce_zmm_f32_to_xmm_scalar(const Xbyak::Zmm& zmm_src, const Xbyak::Xmm& xmm_dst);
+    void reduce_zmm_f32_to_xmm_scalar(const Xbyak::Zmm& zmm_src,
+                                      const Xbyak::Xmm& xmm_dst,
+                                      const Xbyak::Xmm& xmm_tmp0,
+                                      const Xbyak::Xmm& xmm_tmp1);
     void dot_product_scalar(const Xbyak::Xmm& xmm_dst,
                             const Xbyak::Reg64& reg_a,
                             const Xbyak::Reg64& reg_b,
                             size_t tail_count,
                             size_t base_off,
-                            size_t elem_size);
+                            size_t elem_size,
+                            const Xbyak::Xmm& xmm_tmp0,
+                            const Xbyak::Xmm& xmm_tmp1);
     void dot_product_to_scalar(const Xbyak::Xmm& xmm_dst,
                                const Xbyak::Reg64& reg_a,
                                const Xbyak::Reg64& reg_b,
                                const Xbyak::Reg64& reg_aux);
     void multiply_scalar(const Xbyak::Reg64& reg_vec, const Xbyak::Xmm& xmm_scalar);
-    void l2norm_inplace(const Xbyak::Reg64& reg_vec, const Xbyak::Xmm& xmm_eps,
+    void l2norm_inplace(const Xbyak::Reg64& reg_vec,
+                        const Xbyak::Xmm& xmm_eps,
                         const Xbyak::Xmm& xmm_tmp0,
                         const Xbyak::Xmm& xmm_tmp1,
                         const Xbyak::Xmm& xmm_sum);
