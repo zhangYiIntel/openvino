@@ -243,28 +243,59 @@ void jit_gdn_kernel<isa>::store_vector_native_xf16(const Xbyak::Reg64& reg_dst, 
 
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::dot_product_native_xf16(const Xbyak::Xmm& xmm_dst, Vmm* vmm_a, Vmm* vmm_b, int num_regs) {
-    // Compute dot-product with native fp16 accumulation, then reduce to scalar
-    // Similar to: sum_vec = fmadd_ph(a, b, sum_vec); result = reduce_add_ph(sum_vec)
+    if (m_jcp.data_prc == ov::element::bf16) {
+        // bf16 path: accumulate directly in fp32 with vdpbf16ps
+        uni_vpxor(v_aux0, v_aux0, v_aux0);
+        for (int i = 0; i < num_regs; i++) {
+            vdpbf16ps(v_aux0, vmm_a[i], vmm_b[i]);
+        }
+        uni_vpxor(xmm_dst, xmm_dst, xmm_dst);
+        reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst, x_tmp0, x_tmp1);
+        return;
+    }
+
+    // f16 path: native fp16 accumulation then fp32 reduction
     uni_vpxor(v_tmp0, v_tmp0, v_tmp0);  // fp16 accumulator (32 lanes)
 
     for (int i = 0; i < num_regs; i++) {
         vfmadd231ph(v_tmp0, vmm_a[i], vmm_b[i]);
     }
 
-    // Convert fp16 accumulator to fp32 and fold upper/lower halves
     vcvtph2ps(v_aux0, Xbyak::Ymm(v_tmp0.getIdx()));
     vextractf32x8(Xbyak::Ymm(x_tmp0.getIdx()), Xbyak::Zmm(v_tmp0.getIdx()), 1);
     vcvtph2ps(v_aux1, Xbyak::Ymm(x_tmp0.getIdx()));
     vaddps(v_aux0, v_aux0, v_aux1);
 
-    // Horizontal reduction: 16 fp32 → scalar in xmm_dst
     uni_vpxor(xmm_dst, xmm_dst, xmm_dst);
     reduce_zmm_f32_to_xmm_scalar(Xbyak::Zmm(v_aux0.getIdx()), xmm_dst, x_tmp0, x_tmp1);
 }
 
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::scale_vector_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_scalar, int num_regs) {
-    // Multiply vector by scalar in native fp16: vmm_array *= scalar
+    if (m_jcp.data_prc == ov::element::bf16) {
+        // bf16 path: unpack->fp32 mul->pack bf16 per half
+        vbroadcastss(v_aux2, xmm_scalar);
+
+        for (int i = 0; i < num_regs; i++) {
+            // lower 16 bf16 -> fp32
+            vpmovzxwd(v_aux0, Xbyak::Ymm(vmm_array[i].getIdx()));
+            vpslld(v_aux0, v_aux0, 16);
+            vmulps(v_aux0, v_aux0, v_aux2);
+            vcvtneps2bf16(Xbyak::Ymm(x_tmp0.getIdx()), v_aux0);
+
+            // upper 16 bf16 -> fp32
+            vextractf32x8(Xbyak::Ymm(v_aux1.getIdx()), Xbyak::Zmm(vmm_array[i].getIdx()), 1);
+            vpmovzxwd(v_aux1, Xbyak::Ymm(v_aux1.getIdx()));
+            vpslld(v_aux1, v_aux1, 16);
+            vmulps(v_aux1, v_aux1, v_aux2);
+            vcvtneps2bf16(Xbyak::Ymm(x_tmp1.getIdx()), v_aux1);
+
+            vinsertf32x8(Xbyak::Zmm(vmm_array[i].getIdx()), Xbyak::Zmm(x_tmp0.getIdx()), Xbyak::Ymm(x_tmp1.getIdx()), 1);
+        }
+        return;
+    }
+
+    // f16 path
     vcvtps2ph(x_tmp0, xmm_scalar, 0);
     vpbroadcastw(v_aux2, x_tmp0);
 
@@ -278,7 +309,35 @@ void jit_gdn_kernel<isa>::fmadd_vector_native_xf16(Vmm* vmm_dst,
                                                    Vmm* vmm_src,
                                                    const Xbyak::Xmm& xmm_scalar,
                                                    int num_regs) {
-    // Fused multiply-add in native fp16: vmm_dst += vmm_src * scalar
+    if (m_jcp.data_prc == ov::element::bf16) {
+        // bf16 path: unpack dst/src -> fp32 fma -> pack bf16 per half
+        vbroadcastss(v_aux2, xmm_scalar);
+
+        for (int i = 0; i < num_regs; i++) {
+            // lower half
+            vpmovzxwd(v_aux0, Xbyak::Ymm(vmm_dst[i].getIdx()));
+            vpslld(v_aux0, v_aux0, 16);
+            vpmovzxwd(v_aux1, Xbyak::Ymm(vmm_src[i].getIdx()));
+            vpslld(v_aux1, v_aux1, 16);
+            vfmadd231ps(v_aux0, v_aux1, v_aux2);
+            vcvtneps2bf16(Xbyak::Ymm(x_tmp0.getIdx()), v_aux0);
+
+            // upper half
+            vextractf32x8(Xbyak::Ymm(v_aux0.getIdx()), Xbyak::Zmm(vmm_dst[i].getIdx()), 1);
+            vpmovzxwd(v_aux0, Xbyak::Ymm(v_aux0.getIdx()));
+            vpslld(v_aux0, v_aux0, 16);
+            vextractf32x8(Xbyak::Ymm(v_aux1.getIdx()), Xbyak::Zmm(vmm_src[i].getIdx()), 1);
+            vpmovzxwd(v_aux1, Xbyak::Ymm(v_aux1.getIdx()));
+            vpslld(v_aux1, v_aux1, 16);
+            vfmadd231ps(v_aux0, v_aux1, v_aux2);
+            vcvtneps2bf16(Xbyak::Ymm(x_tmp1.getIdx()), v_aux0);
+
+            vinsertf32x8(Xbyak::Zmm(vmm_dst[i].getIdx()), Xbyak::Zmm(x_tmp0.getIdx()), Xbyak::Ymm(x_tmp1.getIdx()), 1);
+        }
+        return;
+    }
+
+    // f16 path
     vcvtps2ph(x_tmp0, xmm_scalar, 0);
     vpbroadcastw(v_aux2, x_tmp0);
 
@@ -290,18 +349,23 @@ void jit_gdn_kernel<isa>::fmadd_vector_native_xf16(Vmm* vmm_dst,
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::l2norm_inplace_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_eps, int num_regs) {
     // L2 normalization: vmm /= sqrt(sum(vmm^2) + eps)
-
     uni_vpxor(v_aux0, v_aux0, v_aux0);  // fp32 accumulator
 
-    for (int i = 0; i < num_regs; i++) {
-        // lower 16 fp16 lanes
-        vcvtph2ps(v_aux1, Xbyak::Ymm(vmm_array[i].getIdx()));
-        vfmadd231ps(v_aux0, v_aux1, v_aux1);
+    if (m_jcp.data_prc == ov::element::bf16) {
+        for (int i = 0; i < num_regs; i++) {
+            vdpbf16ps(v_aux0, vmm_array[i], vmm_array[i]);
+        }
+    } else {
+        for (int i = 0; i < num_regs; i++) {
+            // lower 16 fp16 lanes
+            vcvtph2ps(v_aux1, Xbyak::Ymm(vmm_array[i].getIdx()));
+            vfmadd231ps(v_aux0, v_aux1, v_aux1);
 
-        // upper 16 fp16 lanes
-        vextractf32x8(Xbyak::Ymm(v_tmp0.getIdx()), Xbyak::Zmm(vmm_array[i].getIdx()), 1);
-        vcvtph2ps(v_aux1, Xbyak::Ymm(v_tmp0.getIdx()));
-        vfmadd231ps(v_aux0, v_aux1, v_aux1);
+            // upper 16 fp16 lanes
+            vextractf32x8(Xbyak::Ymm(v_tmp0.getIdx()), Xbyak::Zmm(vmm_array[i].getIdx()), 1);
+            vcvtph2ps(v_aux1, Xbyak::Ymm(v_tmp0.getIdx()));
+            vfmadd231ps(v_aux0, v_aux1, v_aux1);
+        }
     }
 
     // Reduce to scalar: sqrt(sum + eps), then compute reciprocal
@@ -394,10 +458,14 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
         scale_vector_native_xf16(const_cast<Vmm*>(v_q), x_qscale, num_regs);
 
         // Scale hidden state by exp(gate)
-        // Scalar f16 load -> fp32
         movzx(reg_aux.cvt32(), word[reg_gate_seq]);
-        vmovd(x_tmp0, reg_aux.cvt32());
-        vcvtph2ps(x_gate, x_tmp0);
+        if (m_jcp.data_prc == ov::element::bf16) {
+            shl(reg_aux.cvt32(), 16);
+            vmovd(x_gate, reg_aux.cvt32());
+        } else {
+            vmovd(x_tmp0, reg_aux.cvt32());
+            vcvtph2ps(x_gate, x_tmp0);
+        }
         exp_injector->compute_vector_range(x_gate.getIdx(), x_gate.getIdx() + 1);
         scale_vector_native_xf16(const_cast<Vmm*>(v_h), x_gate, num_regs);
 
@@ -405,13 +473,22 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
         dot_product_native_xf16(x_hk, const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_k), num_regs);
 
         // delta = (value - hk) * beta
-        // Scalar f16 loads -> fp32
         movzx(reg_aux.cvt32(), word[reg_value_seq]);
-        vmovd(x_tmp0, reg_aux.cvt32());
-        vcvtph2ps(x_value, x_tmp0);
+        if (m_jcp.data_prc == ov::element::bf16) {
+            shl(reg_aux.cvt32(), 16);
+            vmovd(x_value, reg_aux.cvt32());
+        } else {
+            vmovd(x_tmp0, reg_aux.cvt32());
+            vcvtph2ps(x_value, x_tmp0);
+        }
         movzx(reg_aux.cvt32(), word[reg_beta_seq]);
-        vmovd(x_tmp0, reg_aux.cvt32());
-        vcvtph2ps(x_beta, x_tmp0);
+        if (m_jcp.data_prc == ov::element::bf16) {
+            shl(reg_aux.cvt32(), 16);
+            vmovd(x_beta, reg_aux.cvt32());
+        } else {
+            vmovd(x_tmp0, reg_aux.cvt32());
+            vcvtph2ps(x_beta, x_tmp0);
+        }
 
         vsubss(x_delta, x_value, x_hk);
         vmulss(x_delta, x_delta, x_beta);
@@ -419,10 +496,17 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
         // Update: H += K * delta
         fmadd_vector_native_xf16(const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_k), x_delta, num_regs);
 
-        // Output: out = dot(H, Q), scalar fp32 -> f16 store
+        // Output: out = dot(H, Q), scalar fp32 -> xf16 store
         dot_product_native_xf16(x_out, const_cast<Vmm*>(v_h), const_cast<Vmm*>(v_q), num_regs);
-        vcvtps2ph(x_tmp0, x_out, 0);
-        vpextrw(reg_aux.cvt32(), x_tmp0, 0);
+        if (m_jcp.data_prc == ov::element::bf16) {
+            uni_vpxor(v_aux0, v_aux0, v_aux0);
+            vmovss(Xbyak::Xmm(v_aux0.getIdx()), x_out);
+            vcvtneps2bf16(Xbyak::Ymm(x_tmp0.getIdx()), v_aux0);
+            vpextrw(reg_aux.cvt32(), x_tmp0, 0);
+        } else {
+            vcvtps2ph(x_tmp0, x_out, 0);
+            vpextrw(reg_aux.cvt32(), x_tmp0, 0);
+        }
         mov(ptr[reg_out_seq], reg_aux.cvt16());
 
         // Advance pointers using stride parameters
@@ -432,16 +516,16 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
         add(reg_query_seq, reg_aux2);
 
         mov(reg_aux2, ptr[reg_args + GET_OFF(value_stride)]);
-        imul(reg_aux2, reg_aux2, m_jcp.data_prc.size());  // F16 = 2 bytes
+        imul(reg_aux2, reg_aux2, m_jcp.data_prc.size());
         add(reg_value_seq, reg_aux2);
 
         mov(reg_aux2, ptr[reg_args + GET_OFF(gate_beta_stride)]);
-        imul(reg_aux2, reg_aux2, m_jcp.data_prc.size());  // F16 = 2 bytes
+        imul(reg_aux2, reg_aux2, m_jcp.data_prc.size());
         add(reg_gate_seq, reg_aux2);
         add(reg_beta_seq, reg_aux2);
 
         mov(reg_aux2, ptr[reg_args + GET_OFF(output_stride)]);
-        imul(reg_aux2, reg_aux2, m_jcp.data_prc.size());  // F16 = 2 bytes
+        imul(reg_aux2, reg_aux2, m_jcp.data_prc.size());
         add(reg_out_seq, reg_aux2);
 
         dec(reg_t);
@@ -460,13 +544,14 @@ void jit_gdn_kernel<isa>::generate_native_xf16() {
 
 template <cpu_isa_t isa>
 void jit_gdn_kernel<isa>::generate() {
-    // Dispatcher: Use native xf16 path for supported head_dims with FP16
+    // Dispatcher: Use native xf16 path for supported head_dims with f16/bf16
     const size_t qk = m_jcp.qk_head_size;
     const bool is_xf16_eligible = (qk % 32 == 0) && (qk <= 128);  // Multiples of 32, up to 128
 
     if (is_xf16_eligible) {
-        if (m_jcp.data_prc == ov::element::f16 && isa == avx512_core_fp16) {
-            // Use optimized native fp16 path (no temp buffers, register-resident)
+        if ((m_jcp.data_prc == ov::element::f16 && isa == avx512_core_fp16) ||
+            (m_jcp.data_prc == ov::element::bf16 && isa == avx512_core_bf16)) {
+            // Use optimized native xf16 path (no temp buffers, register-resident)
             generate_native_xf16();
             return;
         }

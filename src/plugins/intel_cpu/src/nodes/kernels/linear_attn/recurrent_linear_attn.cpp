@@ -182,7 +182,6 @@ void recurrent_linear_attn(const ov::intel_cpu::PlainTensor& query,
                                           temp_buffer,
                                           cpu_parallel);
     } else if (data_prc == ov::element::f16) {
-        std::cout << "use f16 recurrent linear attn impl" << std::endl;
         recurrent_linear_attn_impl<ov::float16>(query,
                                                 key,
                                                 value,

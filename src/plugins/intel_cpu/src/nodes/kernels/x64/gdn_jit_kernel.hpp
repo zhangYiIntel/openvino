@@ -103,9 +103,9 @@ private:
     const Vmm v_h[MAX_REGS_PER_VEC] = {Vmm(22), Vmm(23), Vmm(24), Vmm(25)};  // Hidden state
 
     void generate() override;
-    void generate_native_xf16();  // fp16-only path (no temp buffer, register-based)
+    void generate_native_xf16();  // f16/bf16 path (no temp buffer, register-based)
 
-    // Native xf16 helpers - fp16 only, head_dims must be multiple of 32
+    // Native xf16 helpers - f16/bf16, head_dims must be multiple of 32
     void load_vector_native_xf16(Vmm* vmm_array, const Xbyak::Reg64& reg_src, int num_regs);
     void store_vector_native_xf16(const Xbyak::Reg64& reg_dst, Vmm* vmm_array, int num_regs);
     void dot_product_native_xf16(const Xbyak::Xmm& xmm_dst, Vmm* vmm_a, Vmm* vmm_b, int num_regs);
