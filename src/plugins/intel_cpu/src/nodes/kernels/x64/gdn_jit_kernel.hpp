@@ -32,9 +32,9 @@ struct jit_gdn_call_args {
     uint8_t* state;
     const uint8_t* key_seq;
     const uint8_t* query_seq;
-    const float* value_seq;
-    const float* gate_seq;
-    const float* beta_seq;
+    const uint8_t* value_seq;
+    const uint8_t* gate_seq;
+    const uint8_t* beta_seq;
     size_t t_size;
     size_t key_query_stride;
     size_t gate_beta_stride;
@@ -42,7 +42,7 @@ struct jit_gdn_call_args {
     size_t output_stride;
     uint8_t* key_tmp;
     uint8_t* query_tmp;
-    float* output_seq;
+    uint8_t* output_seq;
 };
 
 template <dnnl::impl::cpu::x64::cpu_isa_t isa>
@@ -93,7 +93,31 @@ private:
     const Vmm v_aux1 = Vmm(12);
     const Vmm v_aux2 = Vmm(13);
 
+    // Register-based Q/K/H storage for native xf16 (fp16/bf16)
+    // Supports head_dims: 16, 32, 48, 64, 80, 96, 112, 128 (multiples of 16, up to 128)
+    static constexpr int XF16_ELEMS_PER_ZMM = 32;  // 32 xf16 elements per ZMM register
+    static constexpr int MAX_REGS_PER_VEC = 4;     // Max ZMMs per vector (for head_dims=128)
+
+    const Vmm v_q[MAX_REGS_PER_VEC] = {Vmm(14), Vmm(15), Vmm(16), Vmm(17)};  // Query
+    const Vmm v_k[MAX_REGS_PER_VEC] = {Vmm(18), Vmm(19), Vmm(20), Vmm(21)};  // Key
+    const Vmm v_h[MAX_REGS_PER_VEC] = {Vmm(22), Vmm(23), Vmm(24), Vmm(25)};  // Hidden state
+
     void generate() override;
+    void generate_native_xf16();  // Combined fp16/bf16 path (no temp buffer, register-based)
+
+    // Native xf16 helpers - work for both fp16 and bf16, dynamic head_dims
+    void load_vector_native_xf16(Vmm* vmm_array, const Xbyak::Reg64& reg_src, int num_regs, int tail_elems);
+    void store_vector_native_xf16(const Xbyak::Reg64& reg_dst, Vmm* vmm_array, int num_regs, int tail_elems);
+    void dot_product_native_xf16(const Xbyak::Xmm& xmm_dst, Vmm* vmm_a, Vmm* vmm_b, int num_regs, int tail_elems);
+    void scale_vector_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_scalar, int num_regs, int tail_elems);
+    void fmadd_vector_native_xf16(Vmm* vmm_dst, Vmm* vmm_src, const Xbyak::Xmm& xmm_scalar, int num_regs, int tail_elems);
+    void l2norm_inplace_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_eps, int num_regs, int tail_elems);
+
+    // Helper to get number of registers and tail elements
+    inline void get_vec_regs_info(int& num_regs, int& tail_elems) const {
+        num_regs = (m_jcp.qk_head_size + XF16_ELEMS_PER_ZMM - 1) / XF16_ELEMS_PER_ZMM;
+        tail_elems = m_jcp.qk_head_size % XF16_ELEMS_PER_ZMM;
+    }
     void load(const Vmm& vmm_dst,
               const Xbyak::Reg64& reg_src,
               ov::element::Type src_prc,
