@@ -77,20 +77,23 @@ void recurrent_linear_attn_jit(const ov::intel_cpu::PlainTensor& query,
 
     const size_t B = query.m_dims[0];
     const size_t T = query.m_dims[1];
-    const size_t H = query.m_dims[2];
+    const size_t qk_heads = query.m_dims[2];
     const size_t K = query.m_dims[3];
+    const size_t v_heads = value.m_dims[2];
     const size_t V = value.m_dims[3];
     const auto data_prc = query.m_dt;
     const size_t elem_size = ov::element::Type(data_prc).size();
-    cpu_parallel->parallel_for3d(B, H, V, [&](size_t i_b, size_t i_h, size_t i_v) {
+    const size_t group_size = v_heads / qk_heads;
+    cpu_parallel->parallel_for3d(B, v_heads, V, [&](size_t i_b, size_t i_h, size_t i_v) {
         const size_t tid = parallel_get_thread_num();
         // Use correct precision for state buffer based on data type
         uint8_t* state_buffer = temp_buffer + tid * 3 * K * elem_size;
         uint8_t* b_k = temp_buffer + tid * 3 * K * elem_size + K * elem_size;
         uint8_t* b_q = temp_buffer + tid * 3 * K * elem_size + 2 * K * elem_size;
 
-        auto* q_ptr = query.ptr_v(i_b, 0, i_h);
-        auto* k_ptr = key.ptr_v(i_b, 0, i_h);
+        const size_t hk = i_h / group_size;
+        auto* q_ptr = query.ptr_v(i_b, 0, hk);
+        auto* k_ptr = key.ptr_v(i_b, 0, hk);
         auto* v_ptr = value.ptr_v(i_b, 0, i_h, i_v);
         auto* out_ptr = output_attn.ptr_v(i_b, 0, i_h, i_v);
 
@@ -123,10 +126,10 @@ void recurrent_linear_attn_jit(const ov::intel_cpu::PlainTensor& query,
         args.gate_seq = reinterpret_cast<const uint8_t*>(gate_ptr);
         args.beta_seq = reinterpret_cast<const uint8_t*>(beta_ptr);
         args.t_size = T;
-        args.key_query_stride = H * K;
-        args.gate_beta_stride = H;
-        args.value_stride = H * V;
-        args.output_stride = H * V;
+        args.key_query_stride = qk_heads * K;
+        args.gate_beta_stride = v_heads;
+        args.value_stride = v_heads * V;
+        args.output_stride = v_heads * V;
         args.key_tmp = b_k;
         args.query_tmp = b_q;
         args.output_seq = reinterpret_cast<uint8_t*>(out_ptr);
@@ -168,7 +171,8 @@ GatedDeltaNet::GatedDeltaNet(const std::shared_ptr<ov::Node>& op, const GraphCon
 
 void GatedDeltaNet::initSupportedPrimitiveDescriptors() {
     // TODO: support other precision CVS-182464
-    auto dataPrecision = getOriginalOutputPrecisionAtPort(0);
+    bool use_f32 = getenv("USE_F32");
+    auto dataPrecision = use_f32 ? ov::element::f32 : getOriginalOutputPrecisionAtPort(0);
     std::vector<PortConfigurator> inPortConfigs;
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
         inPortConfigs.emplace_back(LayoutType::ncsp, dataPrecision, getInputShapeAtPort(i), false, -1);
@@ -183,20 +187,24 @@ void GatedDeltaNet::createPrimitive() {
     const auto precision = getOriginalOutputPrecisionAtPort(0);
     const auto queryDims = getInputShapeAtPort(0).getDims();
     auto headSize = *(queryDims.end() - 1);
+    bool enable_jit = getenv("ENABLE_GDN_JIT");
 #if defined(OPENVINO_ARCH_X86_64)
-    GatedDeltaNetKey key{precision, headSize, m_fuse_qk_l2norm, m_q_l2_norm_eps, m_k_l2_norm_eps};
+    if (enable_jit) {
+        std::cout << "ENABLE GDN JIT!!!!" << std::endl;
+        GatedDeltaNetKey key{precision, headSize, m_fuse_qk_l2norm, m_q_l2_norm_eps, m_k_l2_norm_eps};
 
-    auto builder = [&](const GatedDeltaNetKey& compile_key) -> std::shared_ptr<kernel::JitKernelBase> {
-        return kernel::create_gdn_jit_kernel(compile_key.precision,
-                                             compile_key.qk_head_size,
-                                             compile_key.fuse_qk_l2norm,
-                                             compile_key.q_l2_norm_eps,
-                                             compile_key.k_l2_norm_eps);
-    };
+        auto builder = [&](const GatedDeltaNetKey& compile_key) -> std::shared_ptr<kernel::JitKernelBase> {
+            return kernel::create_gdn_jit_kernel(compile_key.precision,
+                                                compile_key.qk_head_size,
+                                                compile_key.fuse_qk_l2norm,
+                                                compile_key.q_l2_norm_eps,
+                                                compile_key.k_l2_norm_eps);
+        };
 
-    auto cache = context->getParamsCache();
-    auto result = cache->getOrCreate(key, builder);
-    m_gdnJitKernel = result.first;
+        auto cache = context->getParamsCache();
+        auto result = cache->getOrCreate(key, builder);
+        m_gdnJitKernel = result.first;
+    }
 #endif
 
     const auto numWorkerThreads = context->getCpuParallel()->get_num_worker_threads();
