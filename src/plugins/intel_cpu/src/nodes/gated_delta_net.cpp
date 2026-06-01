@@ -26,6 +26,7 @@
 #include "openvino/op/gated_delta_net.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "utils/plain_tensor.hpp"
+#include "utils/general_utils.h"
 #if defined(OPENVINO_ARCH_X86_64)
 #    include "cpu_parallel.hpp"
 #    include "kernels/x64/gdn_jit_kernel.hpp"
@@ -33,6 +34,7 @@
 
 using namespace ov::Extensions::Cpu;
 using namespace ov::Extensions::Cpu::XARCH;
+using namespace dnnl::impl::cpu::x64;
 
 namespace ov::intel_cpu::node {
 
@@ -171,8 +173,15 @@ GatedDeltaNet::GatedDeltaNet(const std::shared_ptr<ov::Node>& op, const GraphCon
 
 void GatedDeltaNet::initSupportedPrimitiveDescriptors() {
     // TODO: support other precision CVS-182464
-    bool use_f32 = getenv("USE_F32");
-    auto dataPrecision = use_f32 ? ov::element::f32 : getOriginalOutputPrecisionAtPort(0);
+    auto dataPrecision = getOriginalOutputPrecisionAtPort(0);
+    const auto queryDims = getInputShapeAtPort(0).getDims();
+    auto headSize = *(queryDims.end() - 1);
+    auto implType = impl_desc_type::ref_any;
+    if (ov::intel_cpu::any_of(getOriginalOutputPrecisionAtPort(0), ov::element::f16, ov::element::bf16) &&
+        (mayiuse(avx512_core_bf16) || mayiuse(avx512_core_fp16)) && headSize % 32 == 0) {
+        implType = impl_desc_type::jit_avx512;
+    }
+    
     std::vector<PortConfigurator> inPortConfigs;
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
         inPortConfigs.emplace_back(LayoutType::ncsp, dataPrecision, getInputShapeAtPort(i), false, -1);
@@ -180,7 +189,7 @@ void GatedDeltaNet::initSupportedPrimitiveDescriptors() {
     std::vector<PortConfigurator> outPortConfigs = {
         PortConfigurator{LayoutType::ncsp, dataPrecision, getOutputShapeAtPort(0), false, -1},
         PortConfigurator{LayoutType::ncsp, dataPrecision, getOutputShapeAtPort(1), false, -1}};
-    addSupportedPrimDesc(inPortConfigs, outPortConfigs, impl_desc_type::ref_any);
+    addSupportedPrimDesc(inPortConfigs, outPortConfigs, implType);
 }
 
 void GatedDeltaNet::createPrimitive() {
@@ -190,7 +199,7 @@ void GatedDeltaNet::createPrimitive() {
     bool enable_jit = getenv("ENABLE_GDN_JIT");
 #if defined(OPENVINO_ARCH_X86_64)
     if (enable_jit) {
-        std::cout << "ENABLE GDN JIT!!!!" << std::endl;
+        std::cout << "ENABLE GDN JIT!!!!|prec|" << precision << std::endl;
         GatedDeltaNetKey key{precision, headSize, m_fuse_qk_l2norm, m_q_l2_norm_eps, m_k_l2_norm_eps};
 
         auto builder = [&](const GatedDeltaNetKey& compile_key) -> std::shared_ptr<kernel::JitKernelBase> {
