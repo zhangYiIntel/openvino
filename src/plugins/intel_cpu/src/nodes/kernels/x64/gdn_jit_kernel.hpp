@@ -113,6 +113,18 @@ private:
     void fmadd_vector_native_xf16(Vmm* vmm_dst, Vmm* vmm_src, const Xbyak::Xmm& xmm_scalar, int num_regs);
     void l2norm_inplace_native_xf16(Vmm* vmm_array, const Xbyak::Xmm& xmm_eps, int num_regs);
 
+    // Buffer-based helpers for qk_head_size > 128
+    void l2norm_buffer_compute_scale_native_xf16(const Xbyak::Reg64& reg_buffer,
+                                                   const Xbyak::Xmm& xmm_eps,
+                                                   const Xbyak::Xmm& xmm_scale_out,
+                                                   int num_regs,
+                                                   int num_chunks);
+    void scale_buffer_native_xf16(const Xbyak::Reg64& reg_buffer,
+                                   const Xbyak::Xmm& xmm_scale,
+                                   Vmm* vmm_temp,
+                                   int num_regs,
+                                   int num_chunks);
+
     void load(const Vmm& vmm_dst,
               const Xbyak::Reg64& reg_src,
               ov::element::Type src_prc,

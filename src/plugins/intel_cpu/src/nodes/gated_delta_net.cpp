@@ -196,9 +196,10 @@ void GatedDeltaNet::createPrimitive() {
     const auto precision = getOriginalOutputPrecisionAtPort(0);
     const auto queryDims = getInputShapeAtPort(0).getDims();
     auto headSize = *(queryDims.end() - 1);
-    bool enable_jit = getenv("ENABLE_GDN_JIT");
+    bool enableJit = ov::intel_cpu::any_of(precision, ov::element::f16, ov::element::bf16) &&
+                      (mayiuse(avx512_core_bf16) || mayiuse(avx512_core_fp16)) && headSize % 32 == 0;
 #if defined(OPENVINO_ARCH_X86_64)
-    if (enable_jit) {
+    if (enableJit) {
         std::cout << "ENABLE GDN JIT!!!!|prec|" << precision << std::endl;
         GatedDeltaNetKey key{precision, headSize, m_fuse_qk_l2norm, m_q_l2_norm_eps, m_k_l2_norm_eps};
 
