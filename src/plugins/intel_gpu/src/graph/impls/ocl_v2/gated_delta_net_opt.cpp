@@ -8,6 +8,7 @@
 #include <cmath>
 #include <string_view>
 
+#include "gated_delta_net_dpas_common.hpp"
 #include "gated_delta_net_ref_generator.hpp"
 #include "intel_gpu/primitives/gated_delta_net.hpp"
 #include "primitive_ocl_base.hpp"
@@ -18,14 +19,7 @@ namespace {
 
 using cldnn::BufferDescriptor;
 
-// Kernel configuration, passed to gated_delta_net_opt.cl as JIT constants (the kernel derives all tile counts from them).
-constexpr size_t chunk_size = 64;      // GDN_CHUNK: tokens per chunk
-constexpr size_t v_block = 64;         // GDN_V_BLOCK: value columns per fwd_h workgroup (tuned: 64)
-constexpr size_t subgroup_size = 16;   // SUBGROUP_SIZE
-constexpr size_t wg_subgroups = 8;     // GDN_SUBGROUPS: subgroups per workgroup
-constexpr size_t slm_pad = 4;          // GDN_SLM_PAD: padding (halves) of SLM tile rows
-constexpr size_t prefetch_chunks = 1;  // GDN_PREFETCH_CHUNKS: fwd_h prefetch distance
-constexpr size_t wg_lanes = subgroup_size * wg_subgroups;
+using namespace gdn_dpas;
 
 // The chunked path pads every sequence to 64-token chunks, so it only pays off from a few chunks on. Measured on a
 // Xe2 dGPU (32 heads, K = V = 128, f16): break-even is around 128-192 tokens, and from 256 tokens on the chunked
@@ -33,9 +27,6 @@ constexpr size_t wg_lanes = subgroup_size * wg_subgroups;
 // Shorter calls (decode included) run the ref kernel.
 // TODO: tune on other devices and head configurations.
 constexpr size_t min_opt_seq_len = 256;
-
-// Stage ids; they match GDN_STAGE in gated_delta_net_opt.cl and the order of make_stage().
-enum GdnStage : size_t { PREP = 0, KKT_SOLVE, WY, FWD_H, FWD_O };
 
 // Internal scratch buffers.
 enum GdnScratch : uint32_t { QN = 0, KN, XINV, W, UT, HBUF, VNEWT };
@@ -101,12 +92,7 @@ protected:
         auto desc = params.typed_desc<gated_delta_net>();
         const Dims d(params);
 
-        jit.make("GDN_STAGE", m_stage);
-        jit.make("GDN_CHUNK", chunk_size);
-        jit.make("GDN_V_BLOCK", v_block);
-        jit.make("GDN_SUBGROUPS", wg_subgroups);
-        jit.make("GDN_SLM_PAD", slm_pad);
-        jit.make("GDN_PREFETCH_CHUNKS", prefetch_chunks);
+        make_jit_constants(jit, m_stage);
         jit.make("K_HEAD_NUM", d.hk);
         jit.make("V_HEAD_NUM", d.hv);
         jit.make("K_HEAD_DIM", d.dk);
@@ -120,13 +106,8 @@ protected:
         return jit;
     }
 
-    // The GEMM-heavy stages keep many accumulator tiles in registers; they are built for the large register file.
     [[nodiscard]] std::string get_build_options(const RuntimeParams& params) const override {
-        auto options = KernelGenerator::get_build_options(params);
-        if ((m_stage == WY || m_stage == FWD_H || m_stage == FWD_O) && gdn_ref_subgroup_size(params.get_device_info().arch) == subgroup_size) {
-            options += " -cl-intel-256-GRF-per-thread";
-        }
-        return options;
+        return add_build_options(KernelGenerator::get_build_options(params), m_stage);
     }
 
     [[nodiscard]] Arguments get_arguments_desc(const RuntimeParams& params) const override {

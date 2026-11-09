@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "intel_gpu/primitives/paged_gated_delta_net.hpp"
+#include "paged_gated_delta_net_dpas.hpp"
 #include "paged_gated_delta_net_jit_utils.hpp"
 #include "primitive_ocl_base.hpp"
 #include "utils/kernel_generator.hpp"
@@ -358,6 +359,13 @@ public:
 
     Stage::Ptr paged_gated_delta_net = make_stage<PagedGatedDeltaNetOptGenerator>();
     Stage::Ptr paged_gated_delta_net_short = make_stage<PagedGatedDeltaNetShortGenerator>();
+    // Chunked DPAS path for long calls (five stages, run in this order). Declared last: stage indices follow declaration order.
+    Stage::Ptr dpas_prep = make_stage<paged_gdn_dpas::Generator>(gdn_dpas::PREP, "prep");
+    Stage::Ptr dpas_kkt_solve = make_stage<paged_gdn_dpas::Generator>(gdn_dpas::KKT_SOLVE, "kkt_solve");
+    Stage::Ptr dpas_wy = make_stage<paged_gdn_dpas::Generator>(gdn_dpas::WY, "wy");
+    Stage::Ptr dpas_fwd_h = make_stage<paged_gdn_dpas::Generator>(gdn_dpas::FWD_H, "fwd_h");
+    Stage::Ptr dpas_fwd_o = make_stage<paged_gdn_dpas::Generator>(gdn_dpas::FWD_O, "fwd_o");
+    static constexpr size_t first_dpas_stage = 2;
 
     PagedGatedDeltaNetOptImpl() : PrimitiveImplOCL(PagedGatedDeltaNetOpt::get_type_info_static()) {}
     PagedGatedDeltaNetOptImpl(const program_node& node, const RuntimeParams& params) : PagedGatedDeltaNetOptImpl() {
@@ -367,14 +375,32 @@ public:
         if (params.is_dynamic() || uses_short_stage(params)) {
             add_stage(paged_gated_delta_net_short, params);
         }
+        // Dynamic: the call decides at run time, so the chunked stages are compiled too where the device supports them.
+        if (params.is_dynamic() ? paged_gdn_dpas::supported(params) : paged_gdn_dpas::use_for_call(params, uses_short_stage(params))) {
+            add_stage(dpas_prep, params);
+            add_stage(dpas_kkt_solve, params);
+            add_stage(dpas_wy, params);
+            add_stage(dpas_fwd_h, params);
+            add_stage(dpas_fwd_o, params);
+        }
     }
 
     [[nodiscard]] std::unique_ptr<primitive_impl> clone() const override {
         return make_deep_copy<PagedGatedDeltaNetOptImpl>(this);
     }
 
+    [[nodiscard]] std::vector<cldnn::BufferDescriptor> get_internal_buffer_descs(const RuntimeParams& params) const override {
+        if (has_stage(dpas_prep) && paged_gdn_dpas::use_for_call(params, uses_short_stage(params))) {
+            return paged_gdn_dpas::buffer_descs(params);
+        }
+        return {};
+    }
+
     // Indices in the order of make_stage().
     [[nodiscard]] std::vector<size_t> get_stages_execution_order(const RuntimeParams& params) const override {
+        if (has_stage(dpas_prep) && paged_gdn_dpas::use_for_call(params, uses_short_stage(params))) {
+            return {first_dpas_stage, first_dpas_stage + 1, first_dpas_stage + 2, first_dpas_stage + 3, first_dpas_stage + 4};
+        }
         return {has_stage(paged_gated_delta_net_short) && uses_short_stage(params) ? size_t{1} : size_t{0}};
     }
 };

@@ -7,6 +7,7 @@ set(GPU_OCL_V2_IMPL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/col2im.hpp
     ${CMAKE_CURRENT_LIST_DIR}/ctc_loss.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ctc_loss.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_dpas_common.hpp
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_opt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_opt.hpp
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_ref.cpp
@@ -68,6 +69,7 @@ set(GPU_OCL_V2_IMPL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/paged_causal_conv1d_ref.hpp
     ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net.cpp
     ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net_dpas.hpp
     ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net_jit_utils.hpp
     ${CMAKE_CURRENT_LIST_DIR}/paged_selective_ssm.cpp
     ${CMAKE_CURRENT_LIST_DIR}/paged_selective_ssm.hpp
@@ -118,6 +120,7 @@ set(GPU_OCL_V2_KERNEL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/ctc_loss.cl
     ${CMAKE_CURRENT_LIST_DIR}/expert_gemm_common.cl
     ${CMAKE_CURRENT_LIST_DIR}/expert_gemm_compute.cl
+    ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_dpas_common.cl
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_opt.cl
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_ref.cl
     ${CMAKE_CURRENT_LIST_DIR}/gather_matmul.cl
@@ -149,6 +152,7 @@ set(GPU_OCL_V2_KERNEL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/pa_kv_cache_update_ref.cl
     ${CMAKE_CURRENT_LIST_DIR}/paged_attention_opt.cl
     ${CMAKE_CURRENT_LIST_DIR}/paged_causal_conv1d_ref.cl
+    ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net_dpas.cl
     ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net_opt.cl
     ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net_ref.cl
     ${CMAKE_CURRENT_LIST_DIR}/paged_gated_delta_net_short.cl

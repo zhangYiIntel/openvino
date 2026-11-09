@@ -411,6 +411,12 @@ void PagedGatedDeltaNetLayerTest::generate_inputs(const std::vector<ov::Shape>& 
             tensor = ov::test::utils::create_and_fill_tensor(param->get_element_type(),
                                                              shape,
                                                              ov::test::utils::InputGenerateData(0, 1, 1000, 1));
+        } else if (i == 2 || i == 3) {
+            // value and state set the output scale; a small zero-mean range keeps the absolute error of kernels with f16
+            // GEMM operands (the chunked long-prefill path) inside the f16 tolerance
+            tensor = ov::test::utils::create_and_fill_tensor(param->get_element_type(),
+                                                             shape,
+                                                             ov::test::utils::InputGenerateData(-0.2, 0.4, 1000, 1));
         } else if (i <= 3) {
             tensor = ov::test::utils::create_and_fill_tensor(param->get_element_type(),
                                                              shape,

@@ -8,6 +8,7 @@
 #include <memory>
 #include <utility>
 
+#include "gated_delta_net_dpas_common.hpp"
 #include "gated_delta_net_inst.h"
 #include "program_node.h"
 #include "registry/implementation_manager.hpp"
@@ -50,6 +51,11 @@ struct GatedDeltaNetOpt : public ImplementationManager {
             return false;
         }
 
+        // The GEMMs run in f16, so an f32 execution keeps the full-precision ref kernel.
+        if (node.get_input_layout(0).data_type != ov::element::f16) {
+            return false;
+        }
+
         const auto& q_shape = node.get_input_layout(0).get_partial_shape();
         const auto& v_shape = node.get_input_layout(2).get_partial_shape();
         // Batch and sequence length may be dynamic; the head layout has to be known.
@@ -58,17 +64,10 @@ struct GatedDeltaNetOpt : public ImplementationManager {
             return false;
         }
 
-        const auto k_head_nums = q_shape[2].get_length();
-        const auto k_head_dims = q_shape[3].get_length();
-        const auto v_head_nums = v_shape[2].get_length();
-        const auto v_head_dims = v_shape[3].get_length();
-        if (k_head_dims != 128 || (v_head_dims % 64) != 0 || k_head_nums == 0 || (v_head_nums % k_head_nums) != 0) {
+        if (!gdn_dpas::head_layout_supported(q_shape[2].get_length(), q_shape[3].get_length(), v_shape[2].get_length(), v_shape[3].get_length())) {
             return false;
         }
-
-        // The kernels use f16 DPAS with 16 lanes per subgroup and need ~52KB of SLM.
-        const auto& info = node.get_program().get_engine().get_device_info();
-        return info.supports_immad && info.arch >= gpu_arch::xe_hpc && info.max_local_mem_size >= 56 * 1024;
+        return gdn_dpas::device_supported(node.get_program().get_engine().get_device_info());
     }
 };
 
