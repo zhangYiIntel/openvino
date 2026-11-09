@@ -12,6 +12,8 @@
 #include "openvino/op/result.hpp"
 #include "openvino/runtime/core.hpp"
 
+#include <cstdlib>
+
 namespace {
 
 using GatedDeltaNetParams = std::tuple<std::vector<ov::Shape>,  // Input shapes: query, key, value, state, gate, beta
@@ -84,7 +86,9 @@ TEST_P(GatedDeltaNetStaticTest, CompareWithTemplate) {
 
     // Run on GPU
     ov::Core core;
-    auto compiled_gpu = core.compile_model(model, "GPU");
+    // GDN_TEST_DEVICE selects the GPU (e.g. GPU.1); defaults to "GPU".
+    const char* device_env = std::getenv("GDN_TEST_DEVICE");
+    auto compiled_gpu = core.compile_model(model, device_env ? device_env : "GPU");
     auto req_gpu = compiled_gpu.create_infer_request();
     for (const auto& [param, tensor] : inputs) {
         req_gpu.set_tensor(param->output(0), tensor);
@@ -111,6 +115,25 @@ const std::vector<std::vector<ov::Shape>> static_shapes = {
     // B=1, S=4, qk_H=2, v_H=8, D=16, Dv=16 (GQA: v_H is multiple of qk_H)
     {{1, 4, 2, 16}, {1, 4, 2, 16}, {1, 4, 8, 16}, {1, 8, 16, 16}, {1, 4, 8}, {1, 4, 8}},
 };
+
+// Long prefill shapes (D=128, Dv multiple of 64, S >= 128) that take the chunked DPAS path where the device supports it.
+const std::vector<std::vector<ov::Shape>> long_prefill_shapes = {
+    // S=256: 4 full chunks
+    {{1, 256, 4, 128}, {1, 256, 4, 128}, {1, 256, 4, 128}, {1, 4, 128, 128}, {1, 256, 4}, {1, 256, 4}},
+    // S=200: tail chunk is partial (200 = 3 * 64 + 8)
+    {{1, 200, 4, 128}, {1, 200, 4, 128}, {1, 200, 4, 128}, {1, 4, 128, 128}, {1, 200, 4}, {1, 200, 4}},
+    // B=2, GQA (qk_H=2, v_H=4), Dv=64
+    {{2, 192, 2, 128}, {2, 192, 2, 128}, {2, 192, 4, 64}, {2, 4, 128, 64}, {2, 192, 4}, {2, 192, 4}},
+    // Dv=256 (several v blocks)
+    {{1, 130, 2, 128}, {1, 130, 2, 128}, {1, 130, 2, 256}, {1, 2, 128, 256}, {1, 130, 2}, {1, 130, 2}},
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_GatedDeltaNetLongPrefill,
+                         GatedDeltaNetStaticTest,
+                         ::testing::Combine(::testing::ValuesIn(long_prefill_shapes),
+                                            ::testing::Values(ov::element::f32),  // TEMPLATE reference has no f16 GatedDeltaNet
+                                            ::testing::Values(true)),
+                         GatedDeltaNetStaticTest::getTestCaseName);
 
 INSTANTIATE_TEST_SUITE_P(smoke_GatedDeltaNetStatic,
                          GatedDeltaNetStaticTest,
