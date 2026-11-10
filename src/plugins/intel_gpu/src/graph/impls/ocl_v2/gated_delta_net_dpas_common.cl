@@ -10,6 +10,8 @@
 
 #include "include/batch_headers/common.cl"
 #include "include/batch_headers/fetch_data.cl"
+#include "include/batch_headers/sub_group_block_read.cl"
+#include "include/batch_headers/sub_group_block_write.cl"
 #include "include/batch_headers/sub_group_shuffle.cl"
 
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
@@ -117,6 +119,20 @@ inline float FUNC(gdn_dot8)(float8 a, float8 b) {
     s = fma(a.s6, b.s6, s);
     s = fma(a.s7, b.s7, s);
     return s;
+}
+
+// q / k row access with sub group block reads and writes (a block message moves 16 lanes x GDN_VEC elements at once, which
+// streams better than per-lane 16-byte vector accesses). Chunk c of a row is read as one block: lane l holds elements
+// (c * GDN_VEC + j) * SUBGROUP_SIZE + l, j = 0..7. Reading and writing a row with the same mapping keeps it row-major, and
+// the mapping is irrelevant for the norm. The row pointer must be 16-byte aligned and the subgroup uniform.
+inline float8 FUNC(gdn_block_read_q)(const __global INPUT0_TYPE* row, int c) {
+    return convert_float8(BLOCK_READN(INPUT0_TYPE, GDN_VEC, row, c * SUBGROUP_SIZE * GDN_VEC));
+}
+inline float8 FUNC(gdn_block_read_k)(const __global INPUT1_TYPE* row, int c) {
+    return convert_float8(BLOCK_READN(INPUT1_TYPE, GDN_VEC, row, c * SUBGROUP_SIZE * GDN_VEC));
+}
+inline void FUNC(gdn_block_write_row)(__global half* row, int c, float8 v) {
+    BLOCK_WRITEN(half, GDN_VEC, row, c * SUBGROUP_SIZE * GDN_VEC, convert_half8(v));
 }
 
 inline float8 FUNC(gdn_load8_q)(const __global INPUT0_TYPE* p) {
@@ -301,8 +317,9 @@ inline void FUNC(gdn_solve_slm)(__local float* a, __local float* x, __local floa
 #undef GDN_NO_ADD
 }
 
-// Writes X as f16 in A-fragment-major order: [sg][ks][lane][8 rows], element e of a lane = X[8 sg + e][16 ks + lane],
-// so that a consumer loads each A fragment with one 16-byte load per lane. out points at the chunk's X block.
+// Writes X as f16 in A-fragment-major block order: [sg][ks][element e][lane], element e of lane l = X[8 sg + e][16 ks + l]. A
+// sub group block write of a fragment (8 elements per lane) produces exactly this order and a block read of 8 per lane returns the
+// DPAS A fragment (element = row, lane = k) directly. out points at the chunk's X block.
 inline void FUNC(gdn_store_x_fragments)(const __local float* x, __global half* out, int sg, int lid) {
     const int LD = GDN_SOLVE_LD;
 #pragma unroll
@@ -311,6 +328,6 @@ inline void FUNC(gdn_store_x_fragments)(const __local float* x, __global half* o
 #pragma unroll
         for (int e = 0; e < GDN_TM; e++)
             f[e] = convert_half(x[(size_t)(sg * GDN_TM + e) * LD + ks * GDN_TK + lid]);
-        vstore8(f, 0, out + (((size_t)sg * GDN_TOK_TILES + ks) * SUBGROUP_SIZE + lid) * GDN_TM);
+        BLOCK_WRITEN(half, GDN_TM, out, ((size_t)sg * GDN_TOK_TILES + ks) * SUBGROUP_SIZE * GDN_TM, f);
     }
 }

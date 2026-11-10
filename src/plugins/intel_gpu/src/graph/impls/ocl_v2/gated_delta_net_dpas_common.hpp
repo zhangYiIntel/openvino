@@ -46,11 +46,11 @@ inline std::string add_build_options(std::string options, size_t stage) {
 }
 
 // f16 DPAS with 16 lanes per subgroup (Xe-HPC and newer), enough SLM, and a discrete GPU.
-// The chunked path trades arithmetic for memory traffic: it moves ~2.5-3 GB of scratch data through DRAM for 16k tokens
-// (32 value heads), where the per-token kernels move < 0.5 GB and are limited by fp32 FMA throughput. That pays off with
-// the ~500 GB/s of a discrete card (tuned on a 28 Xe core Xe2 dGPU) but not with the ~100 GB/s of LPDDR shared by an
-// integrated GPU, where the traffic alone costs more than the per-token kernels take.
-// TODO: replace the device type with a bandwidth / compute estimate once integrated parts are measured.
+// The chunked path trades arithmetic for memory traffic: it moves a lot of scratch data through DRAM, where the per-token
+// kernels keep their state in registers and are limited by fp32 FMA throughput. That pays off with the memory bandwidth of a
+// discrete card but not with the LPDDR shared with the CPU on an integrated GPU, where the traffic alone costs more than the
+// per-token kernels take.
+// TODO: replace the device type with a bandwidth / compute estimate once integrated parts are evaluated.
 inline bool device_supported(const cldnn::device_info& info) {
     return info.dev_type == cldnn::device_type::discrete_gpu && info.supports_immad && info.arch >= cldnn::gpu_arch::xe_hpc &&
            info.max_local_mem_size >= min_local_mem_bytes;

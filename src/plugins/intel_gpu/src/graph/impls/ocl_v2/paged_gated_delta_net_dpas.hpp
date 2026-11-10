@@ -18,16 +18,15 @@ namespace ov::intel_gpu::ocl::paged_gdn_dpas {
 
 using namespace gdn_dpas;
 
-// The chunked path is used for calls with few, long sequences (at least min_tokens_per_sequence tokens each on average),
-// and only where it beats the per-token kernel the call would otherwise run. The per-token kernels get more parallelism
-// from every extra sequence, the chunked path does not. Measured on a 28 Xe core Xe2 dGPU (32 value heads, K = V = 128,
-// f16, 16k tokens), speedup of the chunked path over the short / general kernel:
-//   1 sequence: 1.4x / 1.2x      2 sequences: 1.4x / 0.6x      3+ sequences: 1.0x / 0.6x
-// so it runs for one sequence, and for two when the short kernel is the alternative. Break-even is at about 128 tokens.
+// The chunked path is used for calls with long sequences (at least min_tokens_per_sequence tokens each on average), and
+// only where it beats the per-token kernel the call would otherwise run. The per-token kernels get more parallelism from
+// every extra sequence, the chunked path does not, so the general kernel overtakes it as soon as there are a few sequences,
+// while the short kernel stays behind for a larger number. Hence the limits on the number of sequences below, depending on
+// which kernel is the alternative.
 // TODO: tune on other devices and head configurations.
-inline constexpr size_t min_tokens_per_sequence = 256;
+inline constexpr size_t min_tokens_per_sequence = 128;
 inline constexpr size_t max_sequences_vs_general = 1;  // the alternative is the general kernel
-inline constexpr size_t max_sequences_vs_short = 2;    // the alternative is the short kernel
+inline constexpr size_t max_sequences_vs_short = 16;   // the alternative is the short kernel
 
 // Internal scratch buffers, in the order of the INTERNAL_BUFFER arguments.
 enum Scratch : uint32_t { QN = 0, KN, XINV, W, UT, HBUF, VNEWT };

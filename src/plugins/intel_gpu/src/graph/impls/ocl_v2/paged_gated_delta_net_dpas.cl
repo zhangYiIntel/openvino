@@ -86,45 +86,34 @@ KERNEL(gdn_paged_dpas_prep)(__global const INPUT0_TYPE* q,
         const bool tvalid = (tok < len);
         const size_t dst_row = ((size_t)i_hk * max_chunks + i_c) * GDN_CHUNK + tok;
 
-        {
-            float qs = 0.0f;
-            float8 qv[GDN_PREP_VECS];
+        // q: l2norm * SCALE_FACTOR and k: l2norm -> f16. Both rows are loaded before either norm is reduced, so the block reads
+        // (and the two independent subgroup reductions) overlap.
+        float8 qv[GDN_PREP_VECS], kv[GDN_PREP_VECS];
 #pragma unroll
-            for (int c = 0; c < GDN_PREP_VECS; c++) {
-                const int d = (c * SUBGROUP_SIZE + lid) * GDN_VEC;
-                qv[c] = tvalid ? FUNC(gdn_load8_q)(q + (size_t)(tok0 + tok) * q_token_stride + q_head + d) : (float8)(0.0f);
-                qs += FUNC(gdn_dot8)(qv[c], qv[c]);
-            }
-#if FUSE_QK_L2NORM
-            qs = sub_group_reduce_add(qs);
-#endif
-            float scale = SCALE_FACTOR;
-#if FUSE_QK_L2NORM
-            scale *= rsqrt(qs + Q_L2_NORM_EPS);
-#endif
-#pragma unroll
-            for (int c = 0; c < GDN_PREP_VECS; c++)
-                vstore8(convert_half8(qv[c] * scale), 0, qn + dst_row * DK + (c * SUBGROUP_SIZE + lid) * GDN_VEC);
+        for (int c = 0; c < GDN_PREP_VECS; c++) {
+            qv[c] = tvalid ? FUNC(gdn_block_read_q)(q + (size_t)(tok0 + tok) * q_token_stride + q_head, c) : (float8)(0.0f);
+            kv[c] = tvalid ? FUNC(gdn_block_read_k)(k + (size_t)(tok0 + tok) * k_token_stride + k_head, c) : (float8)(0.0f);
         }
-        {
-            float ks = 0.0f;
-            float8 kv[GDN_PREP_VECS];
+        float qs = 0.0f, ks = 0.0f;
 #pragma unroll
-            for (int c = 0; c < GDN_PREP_VECS; c++) {
-                const int d = (c * SUBGROUP_SIZE + lid) * GDN_VEC;
-                kv[c] = tvalid ? FUNC(gdn_load8_k)(k + (size_t)(tok0 + tok) * k_token_stride + k_head + d) : (float8)(0.0f);
-                ks += FUNC(gdn_dot8)(kv[c], kv[c]);
-            }
+        for (int c = 0; c < GDN_PREP_VECS; c++) {
+            qs += FUNC(gdn_dot8)(qv[c], qv[c]);
+            ks += FUNC(gdn_dot8)(kv[c], kv[c]);
+        }
 #if FUSE_QK_L2NORM
-            ks = sub_group_reduce_add(ks);
+        qs = sub_group_reduce_add(qs);
+        ks = sub_group_reduce_add(ks);
 #endif
-            float scale = 1.0f;
+        float q_scale = SCALE_FACTOR;
+        float k_scale = 1.0f;
 #if FUSE_QK_L2NORM
-            scale = rsqrt(ks + K_L2_NORM_EPS);
+        q_scale *= rsqrt(qs + Q_L2_NORM_EPS);
+        k_scale = rsqrt(ks + K_L2_NORM_EPS);
 #endif
 #pragma unroll
-            for (int c = 0; c < GDN_PREP_VECS; c++)
-                vstore8(convert_half8(kv[c] * scale), 0, kn + dst_row * DK + (c * SUBGROUP_SIZE + lid) * GDN_VEC);
+        for (int c = 0; c < GDN_PREP_VECS; c++) {
+            FUNC(gdn_block_write_row)(qn + dst_row * DK, c, qv[c] * q_scale);
+            FUNC(gdn_block_write_row)(kn + dst_row * DK, c, kv[c] * k_scale);
         }
     }
 }
@@ -249,8 +238,8 @@ KERNEL(gdn_paged_dpas_wy)(__global const half* kn,
         sbeta[ltid] = (ltid < len) ? convert_float(beta[(size_t)(tok0 + ltid) * HV + i_h]) : 0.0f;
     barrier(CLK_LOCAL_MEM_FENCE);  // sbeta
 
-    // kbT is built straight from global memory (no SLM tile): this keeps the stage at ~27 KB of SLM, so 4 workgroups fit
-    // on an Xe core instead of 2 (the stage is latency bound and gains from every extra resident workgroup).
+    // kbT is built straight from global memory (no SLM tile): a small SLM footprint lets more workgroups be resident on an
+    // Xe core, which hides the latency of this barrier-heavy stage.
     const __global half* kn_chunk = kn + ((size_t)i_hk * max_chunks + i_c) * GDN_CHUNK * DK;
     for (int e = ltid; e < GDN_CHUNK * DK / GDN_VEC; e += GDN_LANES) {
         const int tok = e % GDN_CHUNK;
@@ -274,7 +263,7 @@ KERNEL(gdn_paged_dpas_wy)(__global const half* kn,
             accw[c] = 0.0f;
 #pragma unroll
         for (int ks = 0; ks < GDN_TOK_TILES; ks++) {
-            const short8 af = as_short8(vload8(0, x + (((size_t)sg * GDN_TOK_TILES + ks) * SUBGROUP_SIZE + lid) * GDN_TM));
+            const short8 af = as_short8(BLOCK_READN(half, GDN_TM, x, ((size_t)sg * GDN_TOK_TILES + ks) * SUBGROUP_SIZE * GDN_TM));
 #pragma unroll
             for (int c = 0; c < GDN_DK_TILES; c++)
                 accw[c] = FUNC(gdn_dpas)(af, FUNC(gdn_b_frag_l)(t_kbT, GDN_CHUNK_PAD, GDN_TN * c + lid, ks), accw[c]);
@@ -282,7 +271,7 @@ KERNEL(gdn_paged_dpas_wy)(__global const half* kn,
         __global half* wout = w + i_hc * GDN_CHUNK * DK;
 #pragma unroll
         for (int c = 0; c < GDN_DK_TILES; c++)
-            vstore8(convert_half8(accw[c]), 0, wout + (((size_t)sg * GDN_DK_TILES + c) * SUBGROUP_SIZE + lid) * GDN_TM);
+            BLOCK_WRITEN(half, GDN_TM, wout, ((size_t)sg * GDN_DK_TILES + c) * SUBGROUP_SIZE * GDN_TM, convert_half8(accw[c]));
     }
 
     for (int nv = 0; nv < GDN_NV; nv++) {
@@ -306,7 +295,7 @@ KERNEL(gdn_paged_dpas_wy)(__global const half* kn,
             accu[c] = 0.0f;
 #pragma unroll
         for (int ks = 0; ks < GDN_TOK_TILES; ks++) {
-            const short8 af = as_short8(vload8(0, x + (((size_t)sg * GDN_TOK_TILES + ks) * SUBGROUP_SIZE + lid) * GDN_TM));
+            const short8 af = as_short8(BLOCK_READN(half, GDN_TM, x, ((size_t)sg * GDN_TOK_TILES + ks) * SUBGROUP_SIZE * GDN_TM));
 #pragma unroll
             for (int c = 0; c < GDN_NJ; c++)
                 accu[c] = FUNC(gdn_dpas)(af, FUNC(gdn_b_frag_l)(t_v, GDN_CHUNK_PAD, GDN_TN * c + lid, ks), accu[c]);
@@ -314,7 +303,7 @@ KERNEL(gdn_paged_dpas_wy)(__global const half* kn,
         __global half* uout = uT + (((size_t)i_h * GDN_NV + nv) * max_chunks + i_c) * GDN_V_BLOCK * GDN_CHUNK;
 #pragma unroll
         for (int c = 0; c < GDN_NJ; c++)
-            vstore8(convert_half8(accu[c]), 0, uout + (size_t)(GDN_TN * c + lid) * GDN_CHUNK + r0);
+            BLOCK_WRITEN(half, GDN_TM, uout, ((size_t)sg * GDN_NJ + c) * SUBGROUP_SIZE * GDN_TM, convert_half8(accu[c]));
         barrier(CLK_LOCAL_MEM_FENCE);
     }
 }
@@ -427,7 +416,7 @@ KERNEL(gdn_paged_dpas_fwd_h)(__global const half* kn,
             accu[j] = 0.0f;
 #pragma unroll
         for (int ks = 0; ks < GDN_DK_TILES; ks++) {
-            const short8 af = as_short8(vload8(0, wg + (((size_t)sg * GDN_DK_TILES + ks) * SUBGROUP_SIZE + lid) * GDN_TM));
+            const short8 af = as_short8(BLOCK_READN(half, GDN_TM, wg, ((size_t)sg * GDN_DK_TILES + ks) * SUBGROUP_SIZE * GDN_TM));
 #pragma unroll
             for (int j = 0; j < GDN_NJ; j++)
                 accu[j] = FUNC(gdn_dpas)(af, FUNC(gdn_b_frag_l)(hT, GDN_DK_PAD, lid + GDN_TN * j, ks), accu[j]);
@@ -445,7 +434,7 @@ KERNEL(gdn_paged_dpas_fwd_h)(__global const half* kn,
                 dec[e] = (sg * GDN_TM + e < hi) ? exp2(g_hi - gc2[sg * GDN_TM + e]) : 0.0f;
 #pragma unroll
             for (int j = 0; j < GDN_NJ; j++) {
-                const half8 uu = vload8(0, ug + (size_t)(lid + GDN_TN * j) * GDN_CHUNK + sg * GDN_TM);
+                const half8 uu = BLOCK_READN(half, GDN_TM, ug, ((size_t)sg * GDN_NJ + j) * SUBGROUP_SIZE * GDN_TM);
                 const float8 vnew = convert_float8(uu) - accu[j];
                 float8 vmask, uadj;
 #pragma unroll
@@ -664,8 +653,8 @@ KERNEL(gdn_paged_dpas_fwd_o)(__global const half* qn,
             const int col = nv * GDN_V_BLOCK + GDN_TN * j + lid;
 #pragma unroll
             for (int e = 0; e < GDN_TM; e++)
-                if (r0 + e < len)
-                    o[(size_t)(r0 + e) * HV * DV + col] = (OUTPUT_TYPE)acco[nv][j][e];
+                if (r0 + e < len)  // uniform per subgroup: 16 consecutive columns of a row are one block write
+                    BLOCK_WRITEN(OUTPUT_TYPE, 1, o + (size_t)(r0 + e) * HV * DV, nv * GDN_V_BLOCK + GDN_TN * j, (OUTPUT_TYPE)acco[nv][j][e]);
         }
 }
 #endif  // GDN_STAGE == 4

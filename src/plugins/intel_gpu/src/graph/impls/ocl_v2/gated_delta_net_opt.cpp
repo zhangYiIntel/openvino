@@ -21,10 +21,8 @@ using cldnn::BufferDescriptor;
 
 using namespace gdn_dpas;
 
-// The chunked path pads every sequence to 64-token chunks, so it only pays off from a few chunks on. Measured on a
-// Xe2 dGPU (32 heads, K = V = 128, f16): break-even is around 128-192 tokens, and from 256 tokens on the chunked
-// kernels are faster than the per-token ref kernel (about 6% at 256 up to ~20% at 3k tokens, 13-15% at 8k-16k).
-// Shorter calls (decode included) run the ref kernel.
+// The chunked path pads every sequence to whole chunks, so it only pays off from a few chunks on; shorter calls (decode
+// included) run the per-token ref kernel. The threshold is the point where the chunked kernels overtake it.
 // TODO: tune on other devices and head configurations.
 constexpr size_t min_opt_seq_len = 256;
 
