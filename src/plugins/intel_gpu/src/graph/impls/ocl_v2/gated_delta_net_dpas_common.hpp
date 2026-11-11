@@ -26,7 +26,7 @@ inline constexpr size_t k_head_dim_supported = 128;
 inline constexpr size_t min_local_mem_bytes = 56 * 1024;  // SLM needed by the largest stage
 
 // Stage ids; they match GDN_STAGE in the kernels.
-enum GdnStage : size_t { PREP = 0, KKT_SOLVE, WY, FWD_H, FWD_O, STAGE_COUNT };
+enum GdnStage : size_t { PREP = 0, KKT_SOLVE, WY, FWD_H, FWD_O, KKT_WY, STAGE_COUNT };
 
 inline void make_jit_constants(JitConstants& jit, size_t stage) {
     jit.make("GDN_STAGE", stage);
@@ -39,7 +39,7 @@ inline void make_jit_constants(JitConstants& jit, size_t stage) {
 
 // The GEMM-heavy stages keep many accumulator tiles in registers; they are built for the large register file.
 inline std::string add_build_options(std::string options, size_t stage) {
-    if (stage == WY || stage == FWD_H || stage == FWD_O) {
+    if (stage == WY || stage == KKT_WY || stage == FWD_H || stage == FWD_O) {
         options += " -cl-intel-256-GRF-per-thread";
     }
     return options;

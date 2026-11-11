@@ -569,3 +569,163 @@ KERNEL(gdn_opt_fwd_o)(__global const half* qn,           // [B, HK, NT * CHUNK, 
         }
 }
 #endif  // GDN_STAGE == 4
+
+// ---------------------------------------------------------------------------
+// Stage 5: kkt_wy = kkt_solve + wy in one workgroup. X stays in SLM (f16 A-operand tile) instead of going through xinv, and
+// the SLM regions are reused: x holds the kn tile and then X (fp32), a holds A and then kbT, rv holds the solve temporaries
+// and then the v tile.
+// ---------------------------------------------------------------------------
+#if GDN_STAGE == 5
+#if (K_HEAD_DIM * GDN_CHUNK_PAD * 2 > GDN_CHUNK * GDN_SOLVE_LD * 4)
+#    error "kbT must fit in the A buffer it aliases"
+#endif
+#if (GDN_NTMP * GDN_BLK * GDN_BLK_LD * 4 > GDN_V_BLOCK * GDN_CHUNK_PAD * 2)
+#    error "the solve temporaries must fit in the v tile they alias"
+#endif
+REQD_SUB_GROUP_SIZE(SUBGROUP_SIZE)
+KERNEL(gdn_opt_kkt_wy)(__global const half* kn,            // [B, HK, NT * CHUNK, DK] f16
+                       __global const INPUT2_TYPE* v,      // [B, T, HV, V]
+                       __global const INPUT4_TYPE* g,
+                       __global const INPUT5_TYPE* beta,
+                       __global half* w,                   // out: [B, HV, NT, CHUNK, DK], fragment-major
+                       __global half* uT,                  // out: [B, HV, NV, NT, V_BLOCK, CHUNK]
+                       int seq_len,
+                       int value_offset,
+                       int v_t_stride) {
+    const int DK = K_HEAD_DIM;
+    const int HV = V_HEAD_NUM;
+    const int HK = K_HEAD_NUM;
+    const int VLEN = V_HEAD_DIM;
+    const int GROUP = HV / HK;
+    const int NT = (seq_len + GDN_CHUNK - 1) / GDN_CHUNK;
+    const int i_t = get_group_id(0);
+    const int i_bhv = get_global_id(1);
+    const int i_b = i_bhv / HV;
+    const int i_h = i_bhv % HV;
+    const int i_hk = i_h / GROUP;
+    const int lid = get_sub_group_local_id();
+    const int sg = get_sub_group_id();
+    const int ltid = sg * SUBGROUP_SIZE + lid;
+    const int t0 = i_t * GDN_CHUNK;
+    const int LD = GDN_SOLVE_LD;
+
+    __local float x[GDN_CHUNK * GDN_SOLVE_LD] GDN_ALIGNED;  // kn tile, then X
+    __local half* tile = (__local half*)x;
+    __local float a[GDN_CHUNK * GDN_SOLVE_LD] GDN_ALIGNED;  // A, then kbT[dk][token]
+    __local half* t_kbT = (__local half*)a;
+    __local half rv[GDN_V_BLOCK * GDN_CHUNK_PAD] GDN_ALIGNED;  // solve temporaries, then v tile [v col][token]
+    __local float* tmp = (__local float*)rv;
+    __local half xh[GDN_CHUNK * GDN_CHUNK_PAD] GDN_ALIGNED;  // X as f16 A operand
+    __local float gc2[GDN_GC_SIZE] GDN_ALIGNED;
+    __local float sbeta[GDN_CHUNK] GDN_ALIGNED;
+
+    FUNC(gdn_stage_tile_g2l)(kn + ((size_t)(i_b * HK + i_hk) * NT + i_t) * GDN_CHUNK * DK, DK, tile, GDN_DK_PAD, GDN_CHUNK, DK, ltid);
+    FUNC(gdn_stage_gc)(gc2, g, ((size_t)i_b * seq_len) * HV + i_h, HV, t0, seq_len, ltid);
+    if (ltid < GDN_CHUNK) {
+        const int t = t0 + ltid;
+        sbeta[ltid] = (t < seq_len) ? convert_float(beta[((size_t)i_b * seq_len + t) * HV + i_h]) : 0.0f;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // A = strict_lower(beta decay kn kn^T)
+    float8 acc[GDN_TOK_TILES];
+#pragma unroll
+    for (int c = 0; c < GDN_TOK_TILES; c++)
+        acc[c] = 0.0f;
+    const int r0 = sg * GDN_TM;
+#pragma unroll
+    for (int ks = 0; ks < GDN_DK_TILES; ks++) {
+        const short8 af = FUNC(gdn_a_frag_l)(tile, GDN_DK_PAD, r0, ks, lid);
+#pragma unroll
+        for (int c = 0; c < GDN_TOK_TILES; c++)
+            acc[c] = FUNC(gdn_dpas)(af, FUNC(gdn_b_frag_l)(tile, GDN_DK_PAD, GDN_TN * c + lid, ks), acc[c]);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);  // the tile (aliased with x) is dead
+#pragma unroll
+    for (int c = 0; c < GDN_TOK_TILES; c++) {
+        const int jj = GDN_TN * c + lid;
+        const float gj = gc2[jj];
+#pragma unroll
+        for (int j = 0; j < GDN_TM; j++) {
+            const int i = r0 + j;
+            a[(size_t)i * LD + jj] = (i > jj) ? acc[c][j] * exp2(gc2[i] - gj) * sbeta[i] : 0.0f;
+        }
+    }
+    for (int e = ltid; e < GDN_CHUNK * GDN_CHUNK; e += GDN_LANES)
+        x[(size_t)(e / GDN_CHUNK) * LD + (e % GDN_CHUNK)] = 0.0f;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    FUNC(gdn_solve_slm)(a, x, tmp, sg, lid);  // ends with a barrier: a and tmp are dead
+
+    // X -> f16 tile; kbT[dim][tok] = f16(kn[tok][dim] beta[tok] exp2(gc[tok])) straight from global kn (just read, cached).
+    for (int e = ltid; e < GDN_CHUNK * GDN_CHUNK; e += GDN_LANES) {
+        const int r = e / GDN_CHUNK;
+        const int c = e % GDN_CHUNK;
+        xh[(size_t)r * GDN_CHUNK_PAD + c] = convert_half(x[(size_t)r * LD + c]);
+    }
+    const __global half* kn_chunk = kn + ((size_t)(i_b * HK + i_hk) * NT + i_t) * GDN_CHUNK * DK;
+    for (int e = ltid; e < GDN_CHUNK * DK / GDN_VEC; e += GDN_LANES) {
+        const int tok = e % GDN_CHUNK;
+        const int d0 = (e / GDN_CHUNK) * GDN_VEC;
+        const float scale = sbeta[tok] * exp2(gc2[tok]);
+        const half8 kk = vload8(0, kn_chunk + (size_t)tok * DK + d0);
+#pragma unroll
+        for (int i = 0; i < GDN_VEC; i++)
+            t_kbT[(size_t)(d0 + i) * GDN_CHUNK_PAD + tok] = convert_half(convert_float(kk[i]) * scale);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // w = X kbT^T: M = tokens (8 rows per subgroup), N = DK, K = tokens.
+    {
+        float8 accw[GDN_DK_TILES];
+#pragma unroll
+        for (int c = 0; c < GDN_DK_TILES; c++)
+            accw[c] = 0.0f;
+#pragma unroll
+        for (int ks = 0; ks < GDN_TOK_TILES; ks++) {
+            const short8 af = FUNC(gdn_a_frag_l)(xh, GDN_CHUNK_PAD, r0, ks, lid);
+#pragma unroll
+            for (int c = 0; c < GDN_DK_TILES; c++)
+                accw[c] = FUNC(gdn_dpas)(af, FUNC(gdn_b_frag_l)(t_kbT, GDN_CHUNK_PAD, GDN_TN * c + lid, ks), accw[c]);
+        }
+        __global half* wout = w + ((size_t)i_bhv * NT + i_t) * GDN_CHUNK * DK;
+#pragma unroll
+        for (int c = 0; c < GDN_DK_TILES; c++)
+            BLOCK_WRITEN(half, GDN_TM, wout, ((size_t)sg * GDN_DK_TILES + c) * SUBGROUP_SIZE * GDN_TM, convert_half8(accw[c]));
+    }
+
+    // u = X vb per v-block, written as uT[n][token].
+    for (int nv = 0; nv < GDN_NV; nv++) {
+        const __global INPUT2_TYPE* vsrc = v + ((size_t)i_b * seq_len + t0) * v_t_stride + (size_t)(i_h + value_offset) * VLEN + nv * GDN_V_BLOCK;
+        for (int e = ltid; e < GDN_CHUNK * GDN_V_BLOCK / GDN_VEC; e += GDN_LANES) {
+            const int tok = e % GDN_CHUNK;
+            const int c0 = (e / GDN_CHUNK) * GDN_VEC;
+            float8 vv = (float8)(0.0f);
+            if (t0 + tok < seq_len)
+                vv = FUNC(gdn_load8_v)(vsrc + (size_t)tok * v_t_stride + c0);
+            const float bt = sbeta[tok];
+#pragma unroll
+            for (int i = 0; i < GDN_VEC; i++)
+                rv[(size_t)(c0 + i) * GDN_CHUNK_PAD + tok] = convert_half(vv[i] * bt);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        float8 accu[GDN_NJ];
+#pragma unroll
+        for (int c = 0; c < GDN_NJ; c++)
+            accu[c] = 0.0f;
+#pragma unroll
+        for (int ks = 0; ks < GDN_TOK_TILES; ks++) {
+            const short8 af = FUNC(gdn_a_frag_l)(xh, GDN_CHUNK_PAD, r0, ks, lid);
+#pragma unroll
+            for (int c = 0; c < GDN_NJ; c++)
+                accu[c] = FUNC(gdn_dpas)(af, FUNC(gdn_b_frag_l)(rv, GDN_CHUNK_PAD, GDN_TN * c + lid, ks), accu[c]);
+        }
+        __global half* uout = uT + ((((size_t)i_bhv * GDN_NV + nv) * NT + i_t) * GDN_V_BLOCK) * GDN_CHUNK;
+#pragma unroll
+        for (int c = 0; c < GDN_NJ; c++)
+            BLOCK_WRITEN(half, GDN_TM, uout, ((size_t)sg * GDN_NJ + c) * SUBGROUP_SIZE * GDN_TM, convert_half8(accu[c]));
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+}
+#endif  // GDN_STAGE == 5

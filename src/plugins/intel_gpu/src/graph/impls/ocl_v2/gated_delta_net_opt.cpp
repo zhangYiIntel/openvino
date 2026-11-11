@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <string_view>
 
 #include "gated_delta_net_dpas_common.hpp"
@@ -148,6 +149,15 @@ protected:
             buf(UT);
             scalars(3);
             break;
+        case KKT_WY:  // kn, v, g, beta, w, uT, seq_len, v_off, v_t_stride
+            buf(KN);
+            in(2);
+            in(4);
+            in(5);
+            buf(W);
+            buf(UT);
+            scalars(3);
+            break;
         case FWD_H:  // kn, w, uT, g, state, hbuf, vnewT, [output_state], seq_len
             buf(KN);
             buf(W);
@@ -199,6 +209,7 @@ protected:
                 wgs.global = {d.nt * wg_lanes, d.batch * d.hv, 1};
                 set_scalars(kd, {seq_len});
                 break;
+            case KKT_WY:
             case WY: {
                 wgs.global = {d.nt * wg_lanes, d.batch * d.hv, 1};
                 const auto& v_layout = params.input_layouts[2];
@@ -233,6 +244,7 @@ public:
     Stage::Ptr wy = make_stage<GatedDeltaNetOptGenerator>(WY, "wy");
     Stage::Ptr fwd_h = make_stage<GatedDeltaNetOptGenerator>(FWD_H, "fwd_h");
     Stage::Ptr fwd_o = make_stage<GatedDeltaNetOptGenerator>(FWD_O, "fwd_o");
+    Stage::Ptr kkt_wy = make_stage<GatedDeltaNetOptGenerator>(KKT_WY, "kkt_wy");
 
     GatedDeltaNetOptImpl() : PrimitiveImplOCL(GatedDeltaNetOpt::get_type_info_static()) {}
     GatedDeltaNetOptImpl(const program_node& node, const RuntimeParams& params) : GatedDeltaNetOptImpl() {
@@ -244,6 +256,7 @@ public:
             add_stage(wy, params);
             add_stage(fwd_h, params);
             add_stage(fwd_o, params);
+            add_stage(kkt_wy, params);
         }
     }
 
@@ -254,7 +267,8 @@ public:
     // Indices in the order of make_stage(): 0 is ref, 1..5 are the opt stages.
     [[nodiscard]] std::vector<size_t> get_stages_execution_order(const RuntimeParams& params) const override {
         if (has_stage(prep) && use_opt(params)) {
-            return {1, 2, 3, 4, 5};
+            static const bool tmp_fuse = std::getenv("GDN_FUSE_KKT_WY") != nullptr;  // TEMP(bench)
+            return tmp_fuse ? std::vector<size_t>{1, 6, 4, 5} : std::vector<size_t>{1, 2, 3, 4, 5};
         }
         return {0};
     }
