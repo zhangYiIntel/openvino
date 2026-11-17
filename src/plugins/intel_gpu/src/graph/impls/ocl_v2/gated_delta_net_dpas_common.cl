@@ -37,10 +37,16 @@
 #define GDN_H_TILES (GDN_DK_PER_SG / GDN_TM)            // row tiles of the state per subgroup
 #define GDN_DK_PAD (K_HEAD_DIM + GDN_SLM_PAD)           // SLM row stride (halves) of [*][DK] tiles
 #define GDN_CHUNK_PAD (GDN_CHUNK + GDN_SLM_PAD)         // SLM row stride (halves) of [*][CHUNK] tiles
-#define GDN_SOLVE_LD (GDN_CHUNK + GDN_SLM_PAD)          // SLM row stride (floats) of the CHUNK x CHUNK matrices
 #define GDN_BLK SUBGROUP_SIZE                           // solve block size
 #define GDN_NBLK (GDN_CHUNK / GDN_BLK)                  // diagonal blocks in the solve
 #define GDN_BLK_LD (GDN_BLK + 1)                        // padded stride of a solve temporary block
+// A and X are lower block triangular (4 x 4 blocks of 16 x 16): only the 10 blocks with n <= m are stored, each with row stride
+// GDN_BLK_LD, block (m, n) at index m (m + 1) / 2 + n. Both packed matrices share one SLM buffer of GDN_PK_TOTAL floats, which is
+// also the staging area of the kn tile before A exists.
+#define GDN_PK_BLOCKS (GDN_NBLK * (GDN_NBLK + 1) / 2)
+#define GDN_PK_SIZE (GDN_PK_BLOCKS * GDN_BLK * GDN_BLK_LD)  // floats of one packed matrix
+#define GDN_PK_TOTAL (2 * GDN_PK_SIZE)
+#define GDN_PK(buf, mm, nn) ((buf) + (size_t)((((mm) * ((mm) + 1)) / 2 + (nn)) * GDN_BLK * GDN_BLK_LD))
 #define GDN_GC_SIZE (GDN_CHUNK + GDN_CHUNK / SUBGROUP_SIZE)  // gate prefix sums + one total per subgroup
 #define GDN_PREP_VECS (K_HEAD_DIM / (SUBGROUP_SIZE * GDN_VEC))  // 8-element q/k vectors per lane in prep
 #define GDN_PF_W (GDN_CHUNK * K_HEAD_DIM / GDN_LANES)   // elements of w / kn prefetched per lane
@@ -58,11 +64,14 @@
 #if (K_HEAD_DIM % (SUBGROUP_SIZE * GDN_VEC) != 0 || K_HEAD_DIM % GDN_SUBGROUPS != 0 || GDN_DK_PER_SG % GDN_TM != 0)
 #    error "K_HEAD_DIM must tile over lanes and subgroups"
 #endif
+#if (GDN_V_BLOCK > K_HEAD_DIM)
+#    error "the wy v tile aliases the kbT tile and must fit in it"
+#endif
 #if (GDN_V_BLOCK % GDN_TN != 0 || V_HEAD_DIM % GDN_V_BLOCK != 0)
 #    error "V_HEAD_DIM must be a multiple of GDN_V_BLOCK, itself a multiple of 16"
 #endif
-#if (GDN_CHUNK * GDN_DK_PAD * 2 > GDN_CHUNK * GDN_SOLVE_LD * 4)
-#    error "the kn tile must fit in the X buffer it aliases"
+#if (GDN_CHUNK * GDN_DK_PAD * 2 > GDN_PK_TOTAL * 4)
+#    error "the kn tile must fit in the packed A / X buffer it aliases"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -225,11 +234,11 @@ inline void FUNC(gdn_mma_blk)(const __local float* A, int lda, const __local flo
 }
 
 // ---------------------------------------------------------------------------
-// Triangular solve. On entry a holds A (strictly lower, CHUNK x CHUNK floats, stride GDN_SOLVE_LD) and x is
-// zeroed; on return x holds X = (I + A)^-1 (fla chunk_fwd: per-block forward substitution, then block merge).
+// Triangular solve. On entry a holds A (strictly lower, packed blocks, see GDN_PK); on return x (packed too, every
+// block fully written) holds X = (I + A)^-1 (fla chunk_fwd: per-block forward substitution, then block merge).
 // ---------------------------------------------------------------------------
 inline void FUNC(gdn_solve_slm)(__local float* a, __local float* x, __local float* tmp, int sg, int lid) {
-    const int LD = GDN_SOLVE_LD;
+    const int LD = GDN_BLK_LD;
     const int LDT = GDN_BLK_LD;
     // Phase A: invert the diagonal blocks, one subgroup each, lane j holds column j of X_mm.
     // xcol[i] = -a[i][j] (i > j); for i >= 2: xcol[i] += sum_{k<i} (-a[i][k]) xcol[k]; finally xcol[j] += 1.
@@ -239,7 +248,7 @@ inline void FUNC(gdn_solve_slm)(__local float* a, __local float* x, __local floa
         float xcol[GDN_BLK];
 #pragma unroll
         for (int i = 0; i < GDN_BLK; i++)
-            xcol[i] = (i > j) ? -a[(size_t)(m * GDN_BLK + i) * LD + (m * GDN_BLK + j)] : 0.0f;
+            xcol[i] = (i > j) ? -GDN_PK(a, m, m)[(size_t)i * LD + j] : 0.0f;
         for (int i = 2; i < GDN_BLK; i++) {
             const float a_orig = xcol[i];  // lane k holds -A[i][k]
             float a_i = a_orig;
@@ -250,7 +259,7 @@ inline void FUNC(gdn_solve_slm)(__local float* a, __local float* x, __local floa
         xcol[j] += 1.0f;
 #pragma unroll
         for (int i = 0; i < GDN_BLK; i++)
-            x[(size_t)(m * GDN_BLK + i) * LD + (m * GDN_BLK + j)] = xcol[i];
+            GDN_PK(x, m, m)[(size_t)i * LD + j] = xcol[i];
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -258,8 +267,8 @@ inline void FUNC(gdn_solve_slm)(__local float* a, __local float* x, __local floa
     // barriers outside the subgroup branches:
     //   X10 = -(X11 A10) X00, X21 = -(X22 A21) X11, X32 = -(X33 A32) X22
     //   X20 = -X22 (A20 X00 + A21 X10), X31 = -X33 (A31 X11 + A32 X21), X30 = -X33 (A30 X00 + A31 X10 + A32 X20)
-#define GDN_A_BLK(mm, nn) (a + ((size_t)(mm)*GDN_BLK) * LD + (nn)*GDN_BLK)
-#define GDN_X_BLK(mm, nn) (x + ((size_t)(mm)*GDN_BLK) * LD + (nn)*GDN_BLK)
+#define GDN_A_BLK(mm, nn) GDN_PK(a, mm, nn)
+#define GDN_X_BLK(mm, nn) GDN_PK(x, mm, nn)
 #define GDN_T_BLK(id) (tmp + ((size_t)(id)*GDN_BLK) * LDT)
 #define GDN_NO_ADD ((const __local float*)0)
     if (lid < GDN_BLK) {
@@ -317,17 +326,34 @@ inline void FUNC(gdn_solve_slm)(__local float* a, __local float* x, __local floa
 #undef GDN_NO_ADD
 }
 
+// Column tile c of A = strict_lower(beta exp2(gc_i - gc_j) acc) for the rows of this subgroup into the packed matrix (blocks above the
+// diagonal are not stored). acc is the DPAS accumulator of the gram matrix: element e = row 8 sg + e, lane = column 16 c + lid.
+inline void FUNC(gdn_store_a_packed)(__local float* a, float8 acc, int c, int sg, int lid, const __local float* gc2, const __local float* sbeta) {
+    const int mrow = sg * GDN_TM / GDN_BLK;
+    if (c > mrow)
+        return;
+    const int jj = GDN_TN * c + lid;
+    const float gj = gc2[jj];
+#pragma unroll
+    for (int e = 0; e < GDN_TM; e++) {
+        const int i = sg * GDN_TM + e;
+        GDN_PK(a, mrow, c)[(size_t)(i % GDN_BLK) * GDN_BLK_LD + lid] = (i > jj) ? acc[e] * exp2(gc2[i] - gj) * sbeta[i] : 0.0f;
+    }
+}
+
 // Writes X as f16 in A-fragment-major block order: [sg][ks][element e][lane], element e of lane l = X[8 sg + e][16 ks + l]. A
 // sub group block write of a fragment (8 elements per lane) produces exactly this order and a block read of 8 per lane returns the
 // DPAS A fragment (element = row, lane = k) directly. out points at the chunk's X block.
-inline void FUNC(gdn_store_x_fragments)(const __local float* x, __global half* out, int sg, int lid) {
-    const int LD = GDN_SOLVE_LD;
+inline void FUNC(gdn_store_x_fragments)(__local float* x, __global half* out, int sg, int lid) {
+    const int mrow = sg * GDN_TM / GDN_BLK;  // block row of this subgroup's 8 rows
 #pragma unroll
     for (int ks = 0; ks < GDN_TOK_TILES; ks++) {
-        half8 f;
+        half8 f = (half8)(0.0h);  // blocks above the diagonal are zero
+        if (ks <= mrow) {
 #pragma unroll
-        for (int e = 0; e < GDN_TM; e++)
-            f[e] = convert_half(x[(size_t)(sg * GDN_TM + e) * LD + ks * GDN_TK + lid]);
+            for (int e = 0; e < GDN_TM; e++)
+                f[e] = convert_half(GDN_PK(x, mrow, ks)[(size_t)((sg * GDN_TM + e) % GDN_BLK) * GDN_BLK_LD + lid]);
+        }
         BLOCK_WRITEN(half, GDN_TM, out, ((size_t)sg * GDN_TOK_TILES + ks) * SUBGROUP_SIZE * GDN_TM, f);
     }
 }

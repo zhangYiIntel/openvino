@@ -122,6 +122,7 @@ set(GPU_OCL_V2_KERNEL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/expert_gemm_compute.cl
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_dpas_common.cl
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_opt.cl
+    ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_tok.cl
     ${CMAKE_CURRENT_LIST_DIR}/gated_delta_net_ref.cl
     ${CMAKE_CURRENT_LIST_DIR}/gather_matmul.cl
     ${CMAKE_CURRENT_LIST_DIR}/gather_matmul_batched.cl

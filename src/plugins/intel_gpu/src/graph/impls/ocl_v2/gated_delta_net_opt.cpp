@@ -47,12 +47,40 @@ struct Dims {
     }
 };
 
+// True if the device and the head layout allow the chunked DPAS kernels.
+bool dpas_eligible(const RuntimeParams& params) {
+    const auto& q = params.get_input_layout(0);
+    const auto& q_shape = q.get_partial_shape();
+    const auto& v_shape = params.get_input_layout(2).get_partial_shape();
+    return q.data_type == ov::element::f16 &&
+           head_layout_supported(q_shape[2].get_length(), q_shape[3].get_length(), v_shape[2].get_length(), v_shape[3].get_length()) &&
+           device_supported(params.get_device_info());
+}
+
+// True if the device and the head layout allow the per-token kernel (gated_delta_net_tok.cl).
+bool tok_eligible(const RuntimeParams& params) {
+    static const bool tmp_off = std::getenv("GDN_DISABLE_TOK") != nullptr;  // TEMP(bench)
+    const auto& q_shape = params.get_input_layout(0).get_partial_shape();
+    const auto& v_shape = params.get_input_layout(2).get_partial_shape();
+    return !tmp_off && gdn_tok::head_layout_supported(q_shape[2].get_length(), q_shape[3].get_length(), v_shape[2].get_length(), v_shape[3].get_length()) &&
+           gdn_tok::device_supported(params.get_device_info());
+}
+
 // True if this call runs the chunked kernels (static shape and a long enough sequence).
 bool use_opt(const RuntimeParams& params) {
-    if (params.is_dynamic()) {
+    if (params.is_dynamic() || !dpas_eligible(params)) {
         return false;
     }
     return params.get_input_layout(0).get_partial_shape()[1].get_length() >= static_cast<int64_t>(min_opt_seq_len);
+}
+
+// True if this call runs the per-token kernel: it is eligible, the chunked path is not taken, and there is at least one token (the kernel
+// reads the first token's operands ahead).
+bool use_tok(const RuntimeParams& params) {
+    if (params.is_dynamic() || !tok_eligible(params) || use_opt(params)) {
+        return false;
+    }
+    return params.get_input_layout(0).get_partial_shape()[1].get_length() > 0;
 }
 
 void set_scalars(KernelData& kd, const std::vector<int32_t>& scalars) {
@@ -149,15 +177,6 @@ protected:
             buf(UT);
             scalars(3);
             break;
-        case KKT_WY:  // kn, v, g, beta, w, uT, seq_len, v_off, v_t_stride
-            buf(KN);
-            in(2);
-            in(4);
-            in(5);
-            buf(W);
-            buf(UT);
-            scalars(3);
-            break;
         case FWD_H:  // kn, w, uT, g, state, hbuf, vnewT, [output_state], seq_len
             buf(KN);
             buf(W);
@@ -166,6 +185,19 @@ protected:
             in(3);
             buf(HBUF);
             buf(VNEWT);
+            if (params.output_layouts.size() > 1) {
+                args.push_back({T::OUTPUT, 1});
+            }
+            scalars(1);
+            break;
+        case FWD_HO:  // kn, w, uT, g, state, qn, output, [output_state], seq_len
+            buf(KN);
+            buf(W);
+            buf(UT);
+            in(4);
+            in(3);
+            buf(QN);
+            args.push_back({T::OUTPUT, 0});
             if (params.output_layouts.size() > 1) {
                 args.push_back({T::OUTPUT, 1});
             }
@@ -209,13 +241,13 @@ protected:
                 wgs.global = {d.nt * wg_lanes, d.batch * d.hv, 1};
                 set_scalars(kd, {seq_len});
                 break;
-            case KKT_WY:
             case WY: {
                 wgs.global = {d.nt * wg_lanes, d.batch * d.hv, 1};
                 const auto& v_layout = params.input_layouts[2];
                 set_scalars(kd, {seq_len, get_head_offset(v_layout), get_token_stride(v_layout)});
                 break;
             }
+            case FWD_HO:
             case FWD_H:
                 wgs.global = {d.batch * d.hv * nv * wg_lanes, 1, 1};
                 set_scalars(kd, {seq_len});
@@ -232,6 +264,89 @@ protected:
     }
 };
 
+// The per-token kernel; arguments: q, k, v, state, g, beta, output, [output_state], seq_len, q / k / v head offsets and token strides.
+class GatedDeltaNetTokGenerator : public KernelGenerator {
+public:
+    GatedDeltaNetTokGenerator() : KernelGenerator("gated_delta_net_tok") {}
+
+protected:
+    static constexpr size_t max_k_vec_size = 8;  // elements per lane of one q / k block read, at most
+    static constexpr size_t acc_ways = 4;        // independent accumulator chains of the dot products over the k axis
+    static constexpr size_t prefetch_ahead = 8;  // tokens
+    static constexpr size_t prefetch_bytes = 8;  // request size
+
+    [[nodiscard]] JitConstants get_jit_constants(const RuntimeParams& params) const override {
+        auto jit = KernelGenerator::get_jit_constants(params);
+        auto desc = params.typed_desc<gated_delta_net>();
+        const Dims d(params);
+
+        jit.make("K_HEAD_NUM", d.hk);
+        jit.make("V_HEAD_NUM", d.hv);
+        jit.make("K_HEAD_DIM", d.dk);
+        jit.make("V_HEAD_DIM", d.dv);
+        jit.make("SUBGROUP_SIZE", gdn_tok::v_rows_per_subgroup);
+        jit.make("V_BLOCK_SIZE", gdn_tok::v_rows_per_subgroup);
+        // The largest power of two (up to max_k_vec_size) that divides a lane's share of the k axis.
+        size_t k_vec_size = max_k_vec_size;
+        while (k_vec_size > 1 && (d.dk / gdn_tok::v_rows_per_subgroup) % k_vec_size != 0) {
+            k_vec_size /= 2;
+        }
+        jit.make("K_VEC_SIZE", k_vec_size);
+        jit.make("ACC_WAYS", acc_ways);
+        jit.make("PF_AHEAD", prefetch_ahead);
+        jit.make("PF_BYTES", prefetch_bytes);
+        jit.make("FUSE_QK_L2NORM", desc->fuse_qk_l2norm ? 1 : 0);
+        jit.make("Q_L2_NORM_EPS", desc->q_l2_norm_eps);
+        jit.make("K_L2_NORM_EPS", desc->k_l2_norm_eps);
+        jit.make("SCALE_FACTOR", 1.0f / std::sqrt(static_cast<float>(d.dk)));
+        jit.make("OUTPUT_STATE", params.output_layouts.size() > 1 ? 1 : 0);
+        return jit;
+    }
+
+    // The state lives in registers: built for the large register file.
+    [[nodiscard]] std::string get_build_options(const RuntimeParams& params) const override {
+        return KernelGenerator::get_build_options(params) + " -cl-intel-256-GRF-per-thread";
+    }
+
+    [[nodiscard]] Arguments get_arguments_desc(const RuntimeParams& params) const override {
+        using T = ArgumentDescriptor::Types;
+        Arguments args;
+        for (uint32_t i = 0; i < params.input_layouts.size(); i++) {
+            args.push_back({T::INPUT, i});
+        }
+        for (uint32_t i = 0; i < params.output_layouts.size(); i++) {
+            args.push_back({T::OUTPUT, i});
+        }
+        for (uint32_t i = 0; i < 7; i++) {
+            args.push_back({T::SCALAR, i});
+        }
+        return args;
+    }
+
+    [[nodiscard]] DispatchDataFunc get_dispatch_data_func() const override {
+        return DispatchDataFunc{[](const RuntimeParams& params, KernelData& kd, ImplRuntimeParams* rt_params) {
+            assert(!params.is_dynamic());
+            auto& wgs = kd.params.workGroups;
+            const Dims d(params);
+            const size_t sg = gdn_tok::v_rows_per_subgroup;
+            // The v-tile axis goes first so that the tiles of a head, which read the same q and k rows, have consecutive group ids.
+            wgs.global = {(d.dv / sg) * sg, d.hv, d.batch};
+            wgs.local = {sg, 1, 1};
+            const auto& q_layout = params.input_layouts[0];
+            const auto& k_layout = params.input_layouts[1];
+            const auto& v_layout = params.input_layouts[2];
+            set_scalars(kd,
+                        {static_cast<int32_t>(d.seq_len),
+                         get_head_offset(q_layout),
+                         get_head_offset(k_layout),
+                         get_head_offset(v_layout),
+                         get_token_stride(q_layout),
+                         get_token_stride(k_layout),
+                         get_token_stride(v_layout)});
+        }};
+    }
+};
+
 class GatedDeltaNetOptImpl : public PrimitiveImplOCL {
 public:
     DECLARE_OBJECT_TYPE_SERIALIZATION(ov::intel_gpu::ocl::GatedDeltaNetOptImpl)
@@ -244,19 +359,23 @@ public:
     Stage::Ptr wy = make_stage<GatedDeltaNetOptGenerator>(WY, "wy");
     Stage::Ptr fwd_h = make_stage<GatedDeltaNetOptGenerator>(FWD_H, "fwd_h");
     Stage::Ptr fwd_o = make_stage<GatedDeltaNetOptGenerator>(FWD_O, "fwd_o");
-    Stage::Ptr kkt_wy = make_stage<GatedDeltaNetOptGenerator>(KKT_WY, "kkt_wy");
+    Stage::Ptr fwd_ho = make_stage<GatedDeltaNetOptGenerator>(FWD_HO, "fwd_ho");
+    Stage::Ptr tok = make_stage<GatedDeltaNetTokGenerator>();
 
     GatedDeltaNetOptImpl() : PrimitiveImplOCL(GatedDeltaNetOpt::get_type_info_static()) {}
     GatedDeltaNetOptImpl(const program_node& node, const RuntimeParams& params) : GatedDeltaNetOptImpl() {
         add_stage(ref, params);
         // Dynamic: both paths are compiled and chosen per call. Static: only the one the shape needs.
-        if (params.is_dynamic() || use_opt(params)) {
+        if (dpas_eligible(params) && (params.is_dynamic() || use_opt(params))) {
             add_stage(prep, params);
             add_stage(kkt_solve, params);
             add_stage(wy, params);
             add_stage(fwd_h, params);
             add_stage(fwd_o, params);
-            add_stage(kkt_wy, params);
+            add_stage(fwd_ho, params);
+        }
+        if (tok_eligible(params)) {
+            add_stage(tok, params);
         }
     }
 
@@ -264,11 +383,14 @@ public:
         return make_deep_copy<GatedDeltaNetOptImpl>(this);
     }
 
-    // Indices in the order of make_stage(): 0 is ref, 1..5 are the opt stages.
+    // Indices in the order of make_stage(): 0 is ref, 1..5 are the opt stages, 6 the fused fwd_ho (experiment), 7 the per-token kernel.
     [[nodiscard]] std::vector<size_t> get_stages_execution_order(const RuntimeParams& params) const override {
         if (has_stage(prep) && use_opt(params)) {
-            static const bool tmp_fuse = std::getenv("GDN_FUSE_KKT_WY") != nullptr;  // TEMP(bench)
-            return tmp_fuse ? std::vector<size_t>{1, 6, 4, 5} : std::vector<size_t>{1, 2, 3, 4, 5};
+            static const bool tmp_ho = std::getenv("GDN_FUSE_FWD_HO") != nullptr;  // TEMP(bench)
+            return tmp_ho ? std::vector<size_t>{1, 2, 3, 6} : std::vector<size_t>{1, 2, 3, 4, 5};
+        }
+        if (has_stage(tok) && use_tok(params)) {
+            return {7};
         }
         return {0};
     }

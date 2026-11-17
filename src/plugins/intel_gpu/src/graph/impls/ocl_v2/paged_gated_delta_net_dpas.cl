@@ -147,13 +147,13 @@ KERNEL(gdn_paged_dpas_kkt_solve)(__global const half* kn,  // [HK, max_chunks * 
     if (seq < 0)
         return;
 
-    __local float x[GDN_CHUNK * GDN_SOLVE_LD] GDN_ALIGNED;  // also the kn tile while the GEMM reads it
-    __local half* tile = (__local half*)x;
-    __local float a[GDN_CHUNK * GDN_SOLVE_LD] GDN_ALIGNED;
+    __local float axbuf[GDN_PK_TOTAL] GDN_ALIGNED;  // packed A and X; also the kn tile while the GEMM reads it
+    __local half* tile = (__local half*)axbuf;
+    __local float* a = axbuf;
+    __local float* x = axbuf + GDN_PK_SIZE;
     __local float tmp[GDN_NTMP * GDN_BLK * GDN_BLK_LD] GDN_ALIGNED;
     __local float gc2[GDN_GC_SIZE] GDN_ALIGNED;
     __local float sbeta[GDN_CHUNK] GDN_ALIGNED;
-    const int LD = GDN_SOLVE_LD;
 
     FUNC(gdn_stage_tile_g2l)(kn + ((size_t)i_hk * max_chunks + i_c) * GDN_CHUNK * DK, DK, tile, GDN_DK_PAD, GDN_CHUNK, DK, ltid);
     FUNC(gdn_stage_gc)(gc2, gate, i_h, HV, tok0, tok0 + len, ltid);
@@ -176,17 +176,8 @@ KERNEL(gdn_paged_dpas_kkt_solve)(__global const half* kn,  // [HK, max_chunks * 
     barrier(CLK_LOCAL_MEM_FENCE);  // the tile (aliased with x) is dead
 
 #pragma unroll
-    for (int c = 0; c < GDN_TOK_TILES; c++) {
-        const int jj = GDN_TN * c + lid;
-        const float gj = gc2[jj];
-#pragma unroll
-        for (int j = 0; j < GDN_TM; j++) {
-            const int i = r0 + j;
-            a[(size_t)i * LD + jj] = (i > jj) ? acc[c][j] * exp2(gc2[i] - gj) * sbeta[i] : 0.0f;
-        }
-    }
-    for (int e = ltid; e < GDN_CHUNK * GDN_CHUNK; e += GDN_LANES)
-        x[(size_t)(e / GDN_CHUNK) * LD + (e % GDN_CHUNK)] = 0.0f;
+    for (int c = 0; c < GDN_TOK_TILES; c++)
+        FUNC(gdn_store_a_packed)(a, acc[c], c, sg, lid, gc2, sbeta);
     barrier(CLK_LOCAL_MEM_FENCE);
 
     FUNC(gdn_solve_slm)(a, x, tmp, sg, lid);
@@ -229,7 +220,7 @@ KERNEL(gdn_paged_dpas_wy)(__global const half* kn,
         return;
 
     __local half t_kbT[K_HEAD_DIM * GDN_CHUNK_PAD] GDN_ALIGNED;
-    __local half t_v[GDN_V_BLOCK * GDN_CHUNK_PAD] GDN_ALIGNED;
+    __local half* t_v = t_kbT;  // [v col][token]; kbT is dead once w is computed (see the barrier before the u loop)
     __local float gc2[GDN_GC_SIZE] GDN_ALIGNED;
     __local float sbeta[GDN_CHUNK] GDN_ALIGNED;
 
@@ -273,6 +264,8 @@ KERNEL(gdn_paged_dpas_wy)(__global const half* kn,
         for (int c = 0; c < GDN_DK_TILES; c++)
             BLOCK_WRITEN(half, GDN_TM, wout, ((size_t)sg * GDN_DK_TILES + c) * SUBGROUP_SIZE * GDN_TM, convert_half8(accw[c]));
     }
+
+    barrier(CLK_LOCAL_MEM_FENCE);  // every subgroup has read kbT: t_v reuses its storage
 
     for (int nv = 0; nv < GDN_NV; nv++) {
         const __global INPUT2_TYPE* vsrc = value + (size_t)tok0 * v_token_stride + (size_t)(i_h + value_head_offset) * v_head_stride + nv * GDN_V_BLOCK;
