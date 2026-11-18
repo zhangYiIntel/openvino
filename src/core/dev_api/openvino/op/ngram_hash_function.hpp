@@ -27,6 +27,9 @@ namespace internal {
 ///
 /// Input 0: ngrams [..., ngram_size] of type i32 or i64. Output 0: row_ids [..., H] of type i32,
 /// H = sum(heads_per_order).
+/// The head count must fit both int64 shape dimensions and size_t. Every possible row
+/// (head_offsets[h] + head_vocab_sizes[h] - 1) must fit int32; a modulus of 2^31 is valid with offset zero.
+/// A dynamic input window dimension must equal ngram_size at execution.
 /// \ingroup ov_ops_cpp_api
 class OPENVINO_API NGramHashFunction : public ov::op::Op {
 public:
@@ -36,13 +39,12 @@ public:
     /// \brief Constructs an NGramHashFunction operation.
     ///
     /// \param ngrams           Windows of ngram_size token ids for every token, oldest first.
-    /// \param ngram_size       The largest n-gram order (>= 2).
     /// \param heads_per_order  Number of hashed heads of every order 2 .. ngram_size (ngram_size - 1 values).
-    /// \param multipliers      Hash multipliers of the token itself, the previous token, ... (ngram_size values).
+    /// \param multipliers      Hash multipliers of the token itself, the previous token, ... (ngram_size values,
+    ///                         ngram_size >= 2). The largest n-gram order is ngram_size = multipliers.size().
     /// \param head_vocab_sizes Vocabulary size (modulus) of every head (H values).
     /// \param head_offsets     First row of every head in the packed table (H values).
     NGramHashFunction(const Output<Node>& ngrams,
-                      int64_t ngram_size,
                       std::vector<int64_t> heads_per_order,
                       std::vector<int64_t> multipliers,
                       std::vector<int64_t> head_vocab_sizes,
@@ -52,8 +54,9 @@ public:
     void validate_and_infer_types() override;
     std::shared_ptr<Node> clone_with_new_inputs(const ov::OutputVector& new_args) const override;
 
+    /// \brief The largest n-gram order, equal to the number of multipliers.
     int64_t get_ngram_size() const {
-        return m_ngram_size;
+        return static_cast<int64_t>(m_multipliers.size());
     }
     const std::vector<int64_t>& get_heads_per_order() const {
         return m_heads_per_order;
@@ -71,7 +74,6 @@ public:
     size_t get_num_heads() const;
 
 private:
-    int64_t m_ngram_size{0};
     std::vector<int64_t> m_heads_per_order;
     std::vector<int64_t> m_multipliers;
     std::vector<int64_t> m_head_vocab_sizes;

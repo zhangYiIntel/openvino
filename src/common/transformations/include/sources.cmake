@@ -87,6 +87,7 @@ set(COMMON_OPTIMIZATIONS_HEADERS
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/fq_reshape_fusion.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/fuse_clamp_and_fake_quantize.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/fuse_gated_delta_net.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/gated_residual_fusion.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/fuse_moe_experts.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/fuse_qsa_indexer.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/fuse_rotary_positional_embeddings.hpp
@@ -119,6 +120,7 @@ set(COMMON_OPTIMIZATIONS_HEADERS
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/multi_scale_deformable_attn_grid_sample_fusion.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/mvn_fusion.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/nearest_neighbor_upsampling_fusion.hpp
+    ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/ngram_hash_function_fusion.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/nonzero_horizontal_fusion.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/nop_elimination.hpp
     ${CMAKE_CURRENT_LIST_DIR}/transformations/common_optimizations/normalize_l2_fusion.hpp

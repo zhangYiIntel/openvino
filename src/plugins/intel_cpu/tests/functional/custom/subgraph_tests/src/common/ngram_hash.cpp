@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -22,6 +23,8 @@
 #include "openvino/op/ngram_hash_function.hpp"
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/unsqueeze.hpp"
+#include "openvino/runtime/core.hpp"
+#include "openvino/runtime/exec_model_info.hpp"
 #include "shared_test_classes/base/ov_subgraph.hpp"
 
 namespace ov::test {
@@ -36,9 +39,9 @@ struct NGramHashCase {
 
 const std::vector<int64_t> qwen_multipliers{23703573157769, 20109073645365, 8052911324071, 3000000019};
 const std::vector<int64_t> deepseek_multipliers{0x3BF58476D1CE4E5B,
-                                              static_cast<int64_t>(0x9E3779B97F4A7C15ULL),
-                                              1234567891011,
-                                              static_cast<int64_t>(0xD6E8FEB86659FD93ULL)};
+                                                static_cast<int64_t>(0x9E3779B97F4A7C15ULL),
+                                                1234567891011,
+                                                static_cast<int64_t>(0xD6E8FEB86659FD93ULL)};
 
 const std::vector<NGramHashCase> cases{
     {"Qwen3_8FlashNext_Bigram", {qwen_multipliers[0], qwen_multipliers[1]}, {8}, 0},
@@ -47,21 +50,23 @@ const std::vector<NGramHashCase> cases{
     {"DeepSeekV4_1Flash_Bigram", {deepseek_multipliers[0], deepseek_multipliers[1]}, {4}, 8},
     {"DeepSeekV4_1Flash_Trigram", {deepseek_multipliers.begin(), deepseek_multipliers.begin() + 3}, {4, 4}, 8},
     {"DeepSeekV4_1Flash_Fourgram_PerOrderHeads", deepseek_multipliers, {2, 4, 3}, 8},
-    {"Barrett_UnitAndPowerOfTwo",
+    {"Modulo_UnitAndPowerOfTwo",
      {0, std::numeric_limits<int64_t>::min(), -1, std::numeric_limits<int64_t>::max()},
      {0, 2, 1},
      0,
      {1, 2, 1073741824}},
-    {"Barrett_MaxDivisor",
+    {"Modulo_MaxDivisor",
      {std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::min()},
-      {2},
+     {2},
      0,
-      {std::numeric_limits<int32_t>::max(), 1}},
-    {"Barrett_NearPowerOfTwo",
+     {std::numeric_limits<int32_t>::max(), 1}},
+    {"Modulo_NearPowerOfTwo",
      {qwen_multipliers.begin(), qwen_multipliers.begin() + 3},
      {2, 1},
      0,
      {536870911, 536870913, 536870923}},
+    {"Modulo_Int32RowBoundary", {11, 13}, {1}, 0, {2147483648LL}},
+    {"ManyHeads", {11, 13}, {129}, 0, std::vector<int64_t>(129, 1)},
 };
 
 enum class HashInputKind { direct_i32, direct_i64, traced_i64 };
@@ -93,11 +98,10 @@ std::vector<int64_t> make_offsets(const std::vector<int64_t>& vocab) {
 std::shared_ptr<Node> make_hash(const Output<Node>& windows, const NGramHashCase& config) {
     const auto vocab = make_vocab_sizes(config);
     return std::make_shared<op::internal::NGramHashFunction>(windows,
-                                                            config.multipliers.size(),
-                                                            config.heads_per_order,
-                                                            config.multipliers,
-                                                            vocab,
-                                                            make_offsets(vocab));
+                                                             config.heads_per_order,
+                                                             config.multipliers,
+                                                             vocab,
+                                                             make_offsets(vocab));
 }
 
 std::shared_ptr<Model> make_direct_model(const NGramHashCase& config, const element::Type& type) {
@@ -152,14 +156,13 @@ std::shared_ptr<Model> make_traced_model(const NGramHashCase& config, bool refer
         const std::vector<int64_t> starts(offsets.begin() + head_offset, offsets.begin() + head_offset + heads);
         head_offset += heads;
         const auto expanded = std::make_shared<op::v0::Unsqueeze>(mix, axis);
-        const auto mod = std::make_shared<op::v1::FloorMod>(
-            expanded,
-            op::v0::Constant::create(element::i64, Shape{heads}, sizes));
-        blocks.push_back(std::make_shared<op::v1::Add>(
-            mod,
-            op::v0::Constant::create(element::i64, Shape{heads}, starts)));
+        const auto mod =
+            std::make_shared<op::v1::FloorMod>(expanded, op::v0::Constant::create(element::i64, Shape{heads}, sizes));
+        blocks.push_back(
+            std::make_shared<op::v1::Add>(mod, op::v0::Constant::create(element::i64, Shape{heads}, starts)));
     }
-    const Output<Node> output = blocks.size() == 1 ? blocks[0] : std::make_shared<op::v0::Concat>(blocks, -1)->output(0);
+    const Output<Node> output =
+        blocks.size() == 1 ? blocks[0] : std::make_shared<op::v0::Concat>(blocks, -1)->output(0);
     return std::make_shared<Model>(OutputVector{output}, tokens);
 }
 }  // namespace
@@ -168,9 +171,9 @@ class NGramHashFunctionCPUTest : public testing::WithParamInterface<NGramHashPar
 public:
     static std::string getTestCaseName(const testing::TestParamInfo<NGramHashParams>& info) {
         const auto& [config, kind] = info.param;
-        const std::string mode = kind == HashInputKind::traced_i64 ? "TracedI64"
-                                : kind == HashInputKind::direct_i64 ? "DirectI64"
-                                                                    : "DirectI32";
+        const std::string mode = kind == HashInputKind::traced_i64   ? "TracedI64"
+                                 : kind == HashInputKind::direct_i64 ? "DirectI64"
+                                                                     : "DirectI32";
         return config.name + "_" + mode;
     }
 
@@ -188,7 +191,7 @@ protected:
         std::vector<InputShape> shapes;
         for (const auto& parameter : function->get_parameters()) {
             std::vector<Shape> static_shapes;
-            for (const size_t tokens : {1, 3, 257, 2}) {
+            for (const size_t tokens : {1, 3, 256, 257, 2}) {
                 Shape shape{tokens};
                 if (config.num_engram) {
                     shape.push_back(config.num_engram);
@@ -234,11 +237,78 @@ TEST_P(NGramHashFunctionCPUTest, CompareWithRefs) {
     CheckNumberOfNodesWithType(compiledModel, "NgramHash", 1);
 }
 
+TEST(NGramHashFunctionCPUValidationTest, RejectsInvalidDynamicWindow) {
+    const auto input = std::make_shared<op::v0::Parameter>(element::i64, PartialShape{-1, -1});
+    const auto hash = make_hash(input, cases[1]);
+    const auto model = std::make_shared<Model>(OutputVector{hash}, ParameterVector{input});
+    ov::Core core;
+    auto request = core.compile_model(model, "CPU").create_infer_request();
+    request.set_input_tensor(Tensor(element::i64, Shape{2, 6}));
+    EXPECT_THROW(request.infer(), ov::Exception);
+    Tensor valid(element::i64, Shape{2, 3});
+    std::fill_n(valid.data<int64_t>(), valid.get_size(), 0);
+    request.set_input_tensor(valid);
+    EXPECT_NO_THROW(request.infer());
+    EXPECT_EQ(request.get_output_tensor().get_shape(), (Shape{2, 16}));
+}
+
+TEST(NGramHashFunctionCPUValidationTest, RejectsDifferentOrderPrefixShapes) {
+    ov::Core core;
+    auto request = core.compile_model(make_traced_model(cases[1], false), "CPU").create_infer_request();
+    for (size_t i = 0; i < 3; ++i) {
+        Tensor input(element::i64, Shape{i == 2 ? size_t{3} : size_t{1}});
+        std::fill_n(input.data<int64_t>(), input.get_size(), 1);
+        request.set_input_tensor(i, input);
+    }
+    EXPECT_THROW(request.infer(), ov::Exception);
+}
+
+TEST(NGramHashFunctionCPUValidationTest, RejectsIncompatibleBroadcast) {
+    ov::Core core;
+    auto request = core.compile_model(make_traced_model(cases[1], false), "CPU").create_infer_request();
+    for (size_t i = 0; i < 3; ++i) {
+        Tensor input(element::i64, Shape{i == 0 ? size_t{2} : size_t{3}});
+        std::fill_n(input.data<int64_t>(), input.get_size(), 1);
+        request.set_input_tensor(i, input);
+    }
+    EXPECT_THROW(request.infer(), ov::Exception);
+}
+
+// The fused hash packs token terms without broadcasting, so differently shaped dynamic tokens fail loudly.
+class NGramHashFunctionBroadcastCPUTest : public testing::TestWithParam<size_t> {};
+
+TEST_P(NGramHashFunctionBroadcastCPUTest, RejectsBroadcastAfterFusion) {
+    const auto model = make_traced_model(cases[1], false);
+    for (const auto& parameter : model->get_parameters()) {
+        parameter->set_partial_shape(PartialShape::dynamic(GetParam()));
+    }
+    model->validate_nodes_and_infer_types();
+    ov::Core core;
+    auto compiled = core.compile_model(model, "CPU");
+    size_t hashes = 0;
+    for (const auto& node : compiled.get_runtime_model()->get_ordered_ops()) {
+        hashes += node->get_rt_info().at(ov::exec_model_info::LAYER_TYPE).as<std::string>() == "NgramHash";
+    }
+    ASSERT_EQ(hashes, 1);
+    auto request = compiled.create_infer_request();
+    const std::vector<Shape> concrete =
+        GetParam() == 1 ? std::vector<Shape>{{1}, {3}, {3}} : std::vector<Shape>{{2, 1}, {1, 3}, {2, 3}};
+    for (size_t i = 0; i < concrete.size(); ++i) {
+        Tensor input(element::i64, concrete[i]);
+        std::fill_n(input.data<int64_t>(), input.get_size(), 1);
+        request.set_input_tensor(i, input);
+    }
+    EXPECT_THROW(request.infer(), ov::Exception);
+}
+
 INSTANTIATE_TEST_SUITE_P(smoke_NGramHashFunction,
-                         NGramHashFunctionCPUTest,
-                         testing::Combine(testing::ValuesIn(cases),
-                                          testing::Values(HashInputKind::direct_i32,
-                                                          HashInputKind::direct_i64,
-                                                          HashInputKind::traced_i64)),
-                         NGramHashFunctionCPUTest::getTestCaseName);
+                         NGramHashFunctionBroadcastCPUTest,
+                         testing::Values(size_t{1}, size_t{2}));
+
+INSTANTIATE_TEST_SUITE_P(
+    smoke_NGramHashFunction,
+    NGramHashFunctionCPUTest,
+    testing::Combine(testing::ValuesIn(cases),
+                     testing::Values(HashInputKind::direct_i32, HashInputKind::direct_i64, HashInputKind::traced_i64)),
+    NGramHashFunctionCPUTest::getTestCaseName);
 }  // namespace ov::test

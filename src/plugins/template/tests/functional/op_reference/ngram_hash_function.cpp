@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+#include "openvino/op/ngram_hash_function.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -10,7 +12,6 @@
 #include <vector>
 
 #include "base_reference_test.hpp"
-#include "openvino/op/ngram_hash_function.hpp"
 #include "openvino/op/parameter.hpp"
 
 namespace {
@@ -30,13 +31,11 @@ public:
     void SetUp() override {
         const auto& params = GetParam();
         const auto input = std::make_shared<ov::op::v0::Parameter>(params.input.type, params.input.shape);
-        const auto hash = std::make_shared<ov::op::internal::NGramHashFunction>(
-            input,
-            static_cast<int64_t>(params.multipliers.size()),
-            params.heads_per_order,
-            params.multipliers,
-            params.vocab_sizes,
-            params.offsets);
+        const auto hash = std::make_shared<ov::op::internal::NGramHashFunction>(input,
+                                                                                params.heads_per_order,
+                                                                                params.multipliers,
+                                                                                params.vocab_sizes,
+                                                                                params.offsets);
         function = std::make_shared<ov::Model>(ov::OutputVector{hash}, ov::ParameterVector{input});
         inputData = {params.input.data};
         refOutData = {params.expected.data};
@@ -60,9 +59,10 @@ std::vector<NGramHashFunctionParams> generate_params() {
                                   const std::vector<int64_t>& vocab,
                                   const std::vector<int64_t>& offsets,
                                   const std::vector<int32_t>& expected) {
-            const auto input = type == ov::element::i32
-                                   ? reference_tests::Tensor{shape, type, std::vector<int32_t>(tokens.begin(), tokens.end())}
-                                   : reference_tests::Tensor{shape, type, tokens};
+            const auto input =
+                type == ov::element::i32
+                    ? reference_tests::Tensor{shape, type, std::vector<int32_t>(tokens.begin(), tokens.end())}
+                    : reference_tests::Tensor{shape, type, tokens};
             auto output_shape = shape;
             output_shape.back() = vocab.size();
             params.push_back({name + "_" + type.get_type_name(),
@@ -109,6 +109,14 @@ std::vector<NGramHashFunctionParams> generate_params() {
         add_case("ZeroTokens", {1, 3}, {0, 0, 0}, {1, 1}, {11, 13, 17}, {7, 11}, {0, 7}, {0, 7});
         add_case("Empty", {0, 3}, {}, {1, 1}, {11, 13, 17}, {7, 11}, {0, 7}, {});
         if (type == ov::element::i64) {
+            add_case("Int32RowBoundary",
+                     {2, 2},
+                     {0, -1, 0, 2147483647},
+                     {1},
+                     {1, 1},
+                     {2147483648LL},
+                     {0},
+                     {2147483647, 2147483647});
             add_case("FullInt64Range",
                      {1, 3},
                      {std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max(), 3000000000LL},
