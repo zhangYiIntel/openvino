@@ -604,8 +604,6 @@ set(CPU_PLUGIN_SRCS
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/read_value_with_subgraph.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/sdpa.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/sdpa.hpp
-    ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/sparse_attention_with_kv_cache.cpp
-    ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/sparse_attention_with_kv_cache.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/submodel.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/submodel.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/op/swish_cpu.cpp
@@ -907,14 +905,14 @@ set(CPU_PLUGIN_X64_SRCS
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/op/qsa_indexer.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/op/sparse_attention_with_kv_cache.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/op/sparse_attention_with_kv_cache.hpp
+    ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/convert_qsa_indexer.cpp
+    ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/convert_qsa_indexer.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/convert_to_interaction.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/convert_to_interaction.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/mlp_fusion.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/mlp_fusion.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/qkv_proj_fusion.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/qkv_proj_fusion.hpp
-    ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/qsa_indexer_fusion.cpp
-    ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/qsa_indexer_fusion.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/sparse_attention_kv_cache_fusion.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/sparse_attention_kv_cache_fusion.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/x64/pass/sdpa_fuse_transpose_reshape.cpp

@@ -212,12 +212,14 @@
 #    include "openvino/op/subtract.hpp"
 #    include "snippets/lowered/pass/mha_parallel_wa_optimizer.hpp"
 #    include "snippets/pass/common_optimizations.hpp"
+#    include "transformations/common_optimizations/fuse_qsa_indexer.hpp"
 #    include "transformations/common_optimizations/rms_fusion.hpp"
 #    include "transformations/common_optimizations/strided_slice_reshape_concat_fusion.hpp"
 #    include "transformations/cpu_opset/common/op/sdpa.hpp"
 #    include "transformations/cpu_opset/common/pass/causal_mask_preprocess_fusion.hpp"
 #    include "transformations/cpu_opset/common/pass/convert_fq_rnn_to_quantized_rnn.hpp"
 #    include "transformations/cpu_opset/common/pass/decompose_rms_norm.hpp"
+#    include "transformations/cpu_opset/x64/pass/convert_qsa_indexer.hpp"
 #    include "transformations/cpu_opset/x64/pass/convert_to_interaction.hpp"
 #    include "transformations/cpu_opset/x64/pass/mlp_fusion.hpp"
 #    include "transformations/cpu_opset/x64/pass/qkv_proj_fusion.hpp"
@@ -596,6 +598,8 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
         ov::pass::KeepConstAndDecompression);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::AUGRUCellFusion);
     CPU_REGISTER_PASS_COMMON(manager, SDPASubgraphFusion);
+    // The cache of the QSA indexer keeps the QSAPrepare-17 shape contract at runtime, so it is not padded.
+    CPU_REGISTER_PASS_X64(manager, ov::pass::FuseQSAIndexer, false /* padding */);
     CPU_REGISTER_PASS_X64(manager, SparseAttentionKVCacheFusion);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::GatedDeltaNetFusion);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::CommonOptimizations);
@@ -1200,6 +1204,9 @@ void Transformations::PostLpt() {
                           ov::pass::RMSFusion,
                           false /* force_tail_convert */,
                           enable_without_gamma);
+    // The query RMSNorm + RoPE of the QSA index selection are matched as the internal RMS / RoPE ops.
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::FuseQSAIndexerQuery);
+    CPU_REGISTER_PASS_X64(postLPTPassManager, ov::intel_cpu::ConvertQSAIndexer);
     CPU_REGISTER_PASS_X64(postLPTPassManager, ov::intel_cpu::DecomposeRMSNorm);
     CPU_SET_CALLBACK_X64(
         postLPTPassManager,
