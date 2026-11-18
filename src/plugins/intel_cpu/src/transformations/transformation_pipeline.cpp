@@ -78,7 +78,6 @@
 #include "transformations/common_optimizations/matmul_const_transposes_extraction.hpp"
 #include "transformations/common_optimizations/move_eltwise_up_data_movement.hpp"
 #include "transformations/common_optimizations/mul_fake_quantize_fusion.hpp"
-#include "transformations/common_optimizations/ngram_hash_function_fusion.hpp"
 #include "transformations/common_optimizations/nop_elimination.hpp"
 #include "transformations/common_optimizations/reshape_prelu.hpp"
 #include "transformations/common_optimizations/sdpa_fusion.hpp"
@@ -152,6 +151,7 @@
 #include "transformations/low_precision/mark_dequantization_subgraph.hpp"
 
 // CPU specific transformations
+#include "transformations/cpu_opset/common/pass/clamp_bf16_scalar_constants.hpp"
 #include "transformations/cpu_opset/common/pass/disable_bf16_comp_cumsum_sin_gen.hpp"
 #include "transformations/cpu_opset/common/pass/insert_convert_after_extension.hpp"
 #include "transformations/cpu_opset/common/pass/ngram_fusion.hpp"
@@ -221,7 +221,6 @@
 #    include "transformations/cpu_opset/x64/pass/convert_to_interaction.hpp"
 #    include "transformations/cpu_opset/x64/pass/mlp_fusion.hpp"
 #    include "transformations/cpu_opset/x64/pass/qkv_proj_fusion.hpp"
-#    include "transformations/cpu_opset/x64/pass/qsa_indexer_fusion.hpp"
 #    include "transformations/cpu_opset/x64/pass/sparse_attention_kv_cache_fusion.hpp"
 #    include "transformations/op_conversions/group_normalization_decomposition.hpp"
 #    include "transformations/op_conversions/hsigmoid_decomposition.hpp"
@@ -622,10 +621,6 @@ void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecis
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::TransposeMatMul);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ConstantFolding);
     CPU_REGISTER_PASS_ARM64(manager, ov::pass::HardSigmoidDecomposition);
-
-    // Fuses int64 n-gram hashes (all orders) into one NGramHashFunction that keeps the int64 math inside its kernel,
-    // before ConvertPrecision would otherwise downcast the products/xors to i32.
-    CPU_REGISTER_PASS_COMMON(manager, ov::pass::NGramHashFunctionFusion);
 
     if (useLpt) {
         CPU_LPT_SCOPE(LowPrecisionTransformations_Part2);
@@ -1205,8 +1200,6 @@ void Transformations::PostLpt() {
                           ov::pass::RMSFusion,
                           false /* force_tail_convert */,
                           enable_without_gamma);
-    // The query RMSNorm + RoPE of the QSA index selection are matched as the internal RMS / RoPE ops.
-    CPU_REGISTER_PASS_X64(postLPTPassManager, QSAIndexerFusion);
     CPU_REGISTER_PASS_X64(postLPTPassManager, ov::intel_cpu::DecomposeRMSNorm);
     CPU_SET_CALLBACK_X64(
         postLPTPassManager,
@@ -1226,6 +1219,8 @@ void Transformations::PostLpt() {
     if (config.inferencePrecision == ov::element::bf16) {
         CPU_REGISTER_PASS_COMMON(postLPTPassManager, ov::pass::DisableBF16CompForLtxVideoRopePattern);
         CPU_REGISTER_PASS_COMMON(postLPTPassManager, ov::intel_cpu::DisableBF16CompCumSumSinGen);
+        // Must be before Snippets tokenization and ConvertToPowerStatic (CpuSpecificOpSet)
+        CPU_REGISTER_PASS_COMMON(postLPTPassManager, ov::intel_cpu::ClampBF16ScalarConstants);
     }
 
     // Should be before Snippets pipeline because Ngram pattern contains eltwise nodes that can be tokenized by

@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -93,6 +95,40 @@ void rmsnorm_partial_rope(const float* src,
     }
 }
 
+// The row of a query head: the steps of rmsnorm_partial_rope that the op applies, the others leave `src` as it is.
+void query_row_ref(const float* src,
+                   float* dst,
+                   const float* weight,
+                   size_t dim,
+                   size_t rotary_dim,
+                   float eps,
+                   const float* cos_row,
+                   const float* sin_row,
+                   bool norm,
+                   bool rope) {
+    if (norm && rope) {
+        rmsnorm_partial_rope(src, dst, weight, dim, rotary_dim, eps, cos_row, sin_row);
+        return;
+    }
+    if (norm) {
+        const float inv_rms = rms_inv_scale(src, dim, eps);
+        for (size_t d = 0; d < dim; d++) {
+            dst[d] = src[d] * inv_rms * weight[d];
+        }
+        return;
+    }
+    std::copy_n(src, dim, dst);
+    if (rope) {
+        const size_t half = rotary_dim / 2;
+        for (size_t j = 0; j < half; j++) {
+            const float x0 = dst[j];
+            const float x1 = dst[j + half];
+            dst[j] = x0 * cos_row[j] - x1 * sin_row[j];
+            dst[j + half] = x1 * cos_row[j + half] + x0 * sin_row[j + half];
+        }
+    }
+}
+
 // Independent (host-vector based) oracle for one QSAIndexer call, re-implementing
 // new_spec/qsa-prepare-17.rst's padding-aware prepare+selection pseudocode directly -- NOT a copy
 // of the CPU node's PlainTensor-based indexing/control flow. `summary_cache`/`past_raw_k`/
@@ -169,14 +205,16 @@ QSAIndexerOracle::Output QSAIndexerOracle::run_call(size_t batch,
             std::copy_n(&rope_sin[(b * L + lu) * rotary_dim], rotary_dim, rope_sin_buf.data());
             for (size_t h = 0; h < h_iq; h++) {
                 const float* src = &q_idx[((b * L + lu) * h_iq + h) * d_idx];
-                rmsnorm_partial_rope(src,
-                                     &q_normed[h * d_idx],
-                                     q_norm_weight.data(),
-                                     d_idx,
-                                     rotary_dim,
-                                     eps,
-                                     rope_cos_buf.data(),
-                                     rope_sin_buf.data());
+                query_row_ref(src,
+                              &q_normed[h * d_idx],
+                              q_norm_weight.data(),
+                              d_idx,
+                              rotary_dim,
+                              eps,
+                              rope_cos_buf.data(),
+                              rope_sin_buf.data(),
+                              query_norm,
+                              query_rope);
             }
 
             if (pos_in_block == 0) {
@@ -250,7 +288,9 @@ QSAIndexerOracle::Output QSAIndexerOracle::run_call(size_t batch,
                     for (size_t i = 0; i < k; i++) {
                         chosen[i] = scores[i].second;
                     }
-                    std::sort(chosen.begin(), chosen.end());
+                    if (!order_by_score) {
+                        std::sort(chosen.begin(), chosen.end());  // else: the order of partial_sort, by score
+                    }
                 }
                 auto* out_row = &out.sel_indices[((b * h_sel + sh) * L + lu) * block_topk];
                 for (size_t i = 0; i < k; i++) {
@@ -280,7 +320,8 @@ QSAIndexerOracle::Output QSAIndexerOracle::run_call(size_t batch,
 }
 
 std::string QSAIndexerLayerCPUTest::getTestCaseName(const testing::TestParamInfo<QSAIndexerLayerTestParams>& obj) {
-    const auto& [device, data_precision, h_iq, h_ik, h_sel, batch, scenario] = obj.param;
+    const auto& [device, data_precision, h_iq, h_ik, h_sel, batch, scenario, order_by_score, query_fusion_type] =
+        obj.param;
     std::string scenario_name;
     switch (scenario) {
     case QSAIndexerScenario::kDensePrefill:
@@ -295,14 +336,25 @@ std::string QSAIndexerLayerCPUTest::getTestCaseName(const testing::TestParamInfo
     case QSAIndexerScenario::kRaggedCalls:
         scenario_name = "RaggedCalls";
         break;
+    case QSAIndexerScenario::kNaNScores:
+        scenario_name = "NaNScores";
+        break;
+    case QSAIndexerScenario::kOverflowScores:
+        scenario_name = "OverflowScores";
+        break;
+    case QSAIndexerScenario::kTinyScores:
+        scenario_name = "TinyScores";
+        break;
     }
     return "Target=" + device + "_DataPrecision=" + data_precision.get_type_name() + "_Hiq=" + std::to_string(h_iq) +
            "_Hik=" + std::to_string(h_ik) + "_Hsel=" + std::to_string(h_sel) + "_Batch=" + std::to_string(batch) +
-           "_Scenario=" + scenario_name;
+           "_Scenario=" + scenario_name + "_OrderByScore=" + std::to_string(order_by_score) +
+           "_QueryFusionType=" + std::to_string(static_cast<int>(query_fusion_type));
 }
 
 void QSAIndexerLayerCPUTest::SetUp() {
-    const auto& [device, data_precision, h_iq, h_ik, h_sel, batch, scenario] = GetParam();
+    const auto& [device, data_precision, h_iq, h_ik, h_sel, batch, scenario, order_by_score, query_fusion_type] =
+        GetParam();
     targetDevice = device;
     m_data_precision = data_precision;
     m_h_iq = h_iq;
@@ -310,6 +362,15 @@ void QSAIndexerLayerCPUTest::SetUp() {
     m_h_sel = h_sel;
     m_batch = batch;
     m_scenario = scenario;
+    m_order_by_score = order_by_score;
+    m_query_norm = query_fusion_type == QSAIndexerQueryFusionType::kNormAndRope ||
+                   query_fusion_type == QSAIndexerQueryFusionType::kNormOnly;
+    m_query_rope = query_fusion_type == QSAIndexerQueryFusionType::kNormAndRope ||
+                   query_fusion_type == QSAIndexerQueryFusionType::kRopeOnly;
+    m_mismatch_share = (order_by_score || query_fusion_type != QSAIndexerQueryFusionType::kNormAndRope) &&
+                               data_precision != ov::element::f32
+                           ? 0.1
+                           : 0.0;
     rel_threshold = 1e-3F;
     abs_threshold = 1e-4F;
     if (data_precision == ov::element::bf16) {
@@ -344,6 +405,10 @@ void QSAIndexerLayerCPUTest::SetUp() {
         m_calls.push_back(CallSpec{7, {7, 5}});
         m_calls.push_back(CallSpec{3, {10, 8}});
         m_calls.push_back(CallSpec{5, {15, 13}});
+    } else if (is_degenerate_scores_scenario()) {
+        m_compress_ratio = 2;
+        m_summary_cap = 40;
+        m_calls.push_back(CallSpec{80, std::vector<int32_t>(m_batch, 80)});
     } else {
         m_compress_ratio = 2;
         m_summary_cap = 4;
@@ -392,7 +457,7 @@ void QSAIndexerLayerCPUTest::SetUp() {
     p_past_raw_k->set_friendly_name("past_raw_k");
     p_past_rope->set_friendly_name("past_rope");
 
-    ov::intel_cpu::QSAIndexer::Config config;
+    ov::intel_cpu::QSAIndexerNode::Config config;
     config.compress_ratio = m_compress_ratio;
     config.block_topk = m_block_topk;
     config.h_sel = m_h_sel;
@@ -400,6 +465,9 @@ void QSAIndexerLayerCPUTest::SetUp() {
     config.indexer_head_dim = m_didx;
     config.eps = 1e-6F;
     config.scale = 0.25F;
+    config.order_by_score = m_order_by_score;
+    config.query_norm = m_query_norm;
+    config.query_rope = m_query_rope;
 
     ov::OutputVector args = {p_q_idx,
                              p_k_idx,
@@ -411,8 +479,8 @@ void QSAIndexerLayerCPUTest::SetUp() {
                              p_summary_cache,
                              p_past_raw_k,
                              p_past_rope};
-    using OutputIdx = ov::intel_cpu::QSAIndexer::OutputIdx;
-    auto qsa_indexer_v2 = std::make_shared<ov::intel_cpu::QSAIndexer>(args, config);
+    using OutputIdx = ov::intel_cpu::QSAIndexerNode::OutputIdx;
+    auto qsa_indexer_v2 = std::make_shared<ov::intel_cpu::QSAIndexerNode>(args, config);
 
     function = std::make_shared<ov::Model>(
         ov::ResultVector{std::make_shared<ov::op::v0::Result>(qsa_indexer_v2->output(OutputIdx::SEL_INDICES)),
@@ -435,7 +503,45 @@ void QSAIndexerLayerCPUTest::SetUp() {
 void QSAIndexerLayerCPUTest::compare(const std::vector<ov::Tensor>& expected, const std::vector<ov::Tensor>& actual) {
     ASSERT_EQ(expected.size(), actual.size());
     for (size_t i = 0; i < expected.size(); i++) {
-        ov::test::utils::compare(expected[i], actual[i], abs_threshold, rel_threshold);
+        ov::test::utils::compare(expected[i], actual[i], abs_threshold, rel_threshold, m_mismatch_share);
+    }
+}
+
+bool QSAIndexerLayerCPUTest::is_degenerate_scores_scenario() const {
+    return m_scenario == QSAIndexerScenario::kNaNScores || m_scenario == QSAIndexerScenario::kOverflowScores ||
+           m_scenario == QSAIndexerScenario::kTinyScores;
+}
+
+void QSAIndexerLayerCPUTest::check_selection_invariants(const CallSpec& call,
+                                                        const std::vector<ov::Tensor>& outs) const {
+    using OutputIdx = ov::intel_cpu::QSAIndexerNode::OutputIdx;
+    const auto L = static_cast<size_t>(call.length);
+    const auto r = static_cast<int64_t>(m_compress_ratio);
+    const auto* indices = outs[OutputIdx::SEL_INDICES].data<int32_t>();
+    const auto* counts = outs[OutputIdx::SEL_COUNT].data<int32_t>();
+    for (size_t b = 0; b < m_batch; b++) {
+        for (size_t sh = 0; sh < m_h_sel; sh++) {
+            for (size_t l = 0; l < L; l++) {
+                const int64_t abs_pos = call.key_length[b] - call.length + static_cast<int64_t>(l);
+                const int64_t visible = (abs_pos + 1) / r;  // the complete blocks up to the token
+                const size_t row = (b * m_h_sel + sh) * L + l;
+                const auto count = static_cast<size_t>(counts[row]);
+                const std::string where =
+                    "row " + std::to_string(b) + ", sel head " + std::to_string(sh) + ", token " + std::to_string(l);
+                ASSERT_EQ(count, std::min(m_block_topk, static_cast<size_t>(visible))) << where;
+                const int32_t* chosen = indices + row * m_block_topk;
+                for (size_t i = 0; i < count; i++) {
+                    ASSERT_GE(chosen[i], 0) << where;
+                    ASSERT_LT(chosen[i], visible) << where;
+                    for (size_t j = 0; j < i; j++) {
+                        ASSERT_NE(chosen[i], chosen[j]) << "duplicate block, " << where;
+                    }
+                    if (!m_order_by_score && i > 0) {
+                        ASSERT_LT(chosen[i - 1], chosen[i]) << "blocks not ascending, " << where;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -445,11 +551,23 @@ std::vector<ov::Tensor> QSAIndexerLayerCPUTest::run_call(const CallSpec& call, s
     ov::Tensor t_q_idx = ov::test::utils::create_and_fill_tensor(
         m_data_precision,
         ov::Shape{m_batch, L, m_h_iq, m_didx},
-        ov::test::utils::InputGenerateData(-1.0, 2000, 1000, static_cast<int32_t>(10 + call_idx * 4 + 1)));
+        ov::test::utils::InputGenerateData(-1, 2, 1000, static_cast<int32_t>(10 + call_idx * 4 + 1)));
     ov::Tensor t_k_idx = ov::test::utils::create_and_fill_tensor(
         m_data_precision,
         ov::Shape{m_batch, L, m_h_ik, m_didx},
-        ov::test::utils::InputGenerateData(-1.0, 2000, 1000, static_cast<int32_t>(10 + call_idx * 4 + 2)));
+        ov::test::utils::InputGenerateData(-1, 2, 1000, static_cast<int32_t>(10 + call_idx * 4 + 2)));
+
+    if (m_scenario == QSAIndexerScenario::kNaNScores) {
+        // one NaN in the keys of the tokens of blocks 3, 4 and 17 (tokens 2b, 2b + 1 of the block b)
+        auto k_values = read_tensor_to_f32(t_k_idx);
+        for (size_t b = 0; b < m_batch; b++) {
+            for (const size_t token : {6UL, 9UL, 34UL}) {
+                k_values[((b * L + token) * m_h_ik + (token % m_h_ik)) * m_didx + 1] =
+                    std::numeric_limits<float>::quiet_NaN();
+            }
+        }
+        write_f32_to_tensor(t_k_idx, k_values);
+    }
 
     // rope_cos/rope_sin can't be arbitrary random data: they must be genuine (cos, sin) pairs,
     // pre-duplicated across both halves of rotary_dim (per new_spec's rotate-half convention), so
@@ -513,6 +631,12 @@ std::vector<ov::Tensor> QSAIndexerLayerCPUTest::run_call(const CallSpec& call, s
         outs.push_back(std::move(c));
     }
 
+    if (is_degenerate_scores_scenario()) {
+        // no reference: the selection invariants only
+        check_selection_invariants(call, outs);
+        return outs;
+    }
+
     QSAIndexerOracle oracle;
     oracle.h_iq = m_h_iq;
     oracle.h_ik = m_h_ik;
@@ -523,6 +647,9 @@ std::vector<ov::Tensor> QSAIndexerLayerCPUTest::run_call(const CallSpec& call, s
     oracle.block_topk = m_block_topk;
     oracle.eps = 1e-6F;
     oracle.scale = 0.25F;
+    oracle.order_by_score = m_order_by_score;
+    oracle.query_norm = m_query_norm;
+    oracle.query_rope = m_query_rope;
     oracle.summary_cap = m_summary_cap;
     oracle.summary_cache = std::move(m_oracle_summary_cache);
     oracle.past_raw_k = std::move(m_oracle_past_raw_k);
@@ -578,9 +705,9 @@ std::vector<ov::Tensor> QSAIndexerLayerCPUTest::run_call(const CallSpec& call, s
             << "state input " << i << " was modified in place";
     }
     // ...and the state outputs are what the outside Assign feeds into the next call.
-    m_summary_cache_tensor = outs[ov::intel_cpu::QSAIndexer::OutputIdx::SUMMARY_CACHE];
-    m_past_raw_k_tensor = outs[ov::intel_cpu::QSAIndexer::OutputIdx::PAST_INCOMPLETE_RAW_K];
-    m_past_rope_tensor = outs[ov::intel_cpu::QSAIndexer::OutputIdx::PAST_INCOMPLETE_ROPE];
+    m_summary_cache_tensor = outs[ov::intel_cpu::QSAIndexerNode::OutputIdx::SUMMARY_CACHE];
+    m_past_raw_k_tensor = outs[ov::intel_cpu::QSAIndexerNode::OutputIdx::PAST_INCOMPLETE_RAW_K];
+    m_past_rope_tensor = outs[ov::intel_cpu::QSAIndexerNode::OutputIdx::PAST_INCOMPLETE_ROPE];
     return outs;
 }
 
@@ -596,11 +723,17 @@ void QSAIndexerLayerCPUTest::run() {
     m_q_norm_weight_tensor =
         ov::test::utils::create_and_fill_tensor(m_data_precision,
                                                 ov::Shape{m_didx},
-                                                ov::test::utils::InputGenerateData(0.5, 1000, 1000, 6));
+                                                ov::test::utils::InputGenerateData(0.5, 1, 1000, 6));
     m_k_norm_weight_tensor =
         ov::test::utils::create_and_fill_tensor(m_data_precision,
                                                 ov::Shape{m_didx},
-                                                ov::test::utils::InputGenerateData(0.5, 1000, 1000, 7));
+                                                ov::test::utils::InputGenerateData(0.5, 1, 1000, 7));
+
+    // Degenerate scores through the gain of the query RMSNorm: it scales the query, so the scores.
+    if (m_scenario == QSAIndexerScenario::kOverflowScores || m_scenario == QSAIndexerScenario::kTinyScores) {
+        const float gain = m_scenario == QSAIndexerScenario::kOverflowScores ? 3e38F : 1e-37F;
+        write_f32_to_tensor(m_q_norm_weight_tensor, std::vector<float>(m_didx, gain));
+    }
 
     m_oracle_summary_cache.assign(m_batch * m_h_ik * m_summary_cap * m_didx, 0.0F);
     m_oracle_past_raw_k.assign(m_batch * m_h_ik * (m_compress_ratio - 1) * m_didx, 0.0F);

@@ -56,9 +56,9 @@ struct Step {
 };
 
 // {inference precision, kv cache precision, key cache quantized by channel, batch, head size, key block size,
-// number of selection heads}
+// number of selection heads, TurboQuant cache algorithm requested}
 using StatefulSparseAttentionParams =
-    std::tuple<ov::element::Type, ov::element::Type, bool, size_t, size_t, size_t, size_t>;
+    std::tuple<ov::element::Type, ov::element::Type, bool, size_t, size_t, size_t, size_t, bool>;
 
 // values in [-1, 1] with a step of 0.01, exactly representable in bf16 after the rounding done by the helper
 ov::Tensor random_tensor(ov::element::Type prec, const ov::Shape& shape, int seed) {
@@ -148,11 +148,11 @@ struct HostCache {
 class StatefulSparseAttentionTest : public ::testing::TestWithParam<StatefulSparseAttentionParams> {
 public:
     static std::string getTestCaseName(const testing::TestParamInfo<StatefulSparseAttentionParams>& obj) {
-        const auto& [prec, cache_prec, by_channel, batch, head_size, block_size, sel_heads] = obj.param;
+        const auto& [prec, cache_prec, by_channel, batch, head_size, block_size, sel_heads, turbo] = obj.param;
         std::ostringstream result;
         result << "Prec=" << prec.get_type_name() << "_Cache=" << cache_prec.get_type_name()
                << (by_channel ? "_KeyByChannel" : "") << "_N=" << batch << "_E=" << head_size << "_Bk=" << block_size
-               << "_Hs=" << sel_heads;
+               << "_Hs=" << sel_heads << (turbo ? "_Turbo" : "");
         return result.str();
     }
 
@@ -161,15 +161,18 @@ protected:
                                                           size_t head_size,
                                                           size_t block_size,
                                                           size_t sel_heads) {
-        auto q = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kHeads, -1, head_size});
-        auto k = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_size});
-        auto v = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_size});
+        // PartialShape takes signed dimensions: convert the runtime sizes explicitly (-Werror=narrowing)
+        const auto head_dim = static_cast<int64_t>(head_size);
+        const auto sel_dim = static_cast<int64_t>(sel_heads);
+        auto q = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kHeads, -1, head_dim});
+        auto k = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_dim});
+        auto v = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_dim});
         auto sel_idx =
-            std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_heads, -1, kTopK});
-        auto sel_cnt = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_heads, -1});
+            std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_dim, -1, kTopK});
+        auto sel_cnt = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_dim, -1});
         auto beam_idx = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1});
         auto past_init =
-            std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_size});
+            std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_dim});
         set_name(q, "q");
         set_name(k, "k");
         set_name(v, "v");
@@ -179,9 +182,9 @@ protected:
         set_name(past_init, "past_init");
 
         auto variable_k = std::make_shared<ov::op::util::Variable>(
-            ov::op::util::VariableInfo{ov::PartialShape{-1, kKvHeads, -1, head_size}, data_prec, "pastk"});
+            ov::op::util::VariableInfo{ov::PartialShape{-1, kKvHeads, -1, head_dim}, data_prec, "pastk"});
         auto variable_v = std::make_shared<ov::op::util::Variable>(
-            ov::op::util::VariableInfo{ov::PartialShape{-1, kKvHeads, -1, head_size}, data_prec, "pastv"});
+            ov::op::util::VariableInfo{ov::PartialShape{-1, kKvHeads, -1, head_dim}, data_prec, "pastv"});
         auto past_k = std::make_shared<ov::op::v6::ReadValue>(past_init, variable_k);
         auto past_v = std::make_shared<ov::op::v6::ReadValue>(past_init, variable_v);
 
@@ -211,12 +214,15 @@ protected:
                                                            size_t head_size,
                                                            size_t block_size,
                                                            size_t sel_heads) {
-        auto q = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kHeads, -1, head_size});
-        auto k = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_size});
-        auto v = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_size});
+        // PartialShape takes signed dimensions: convert the runtime sizes explicitly (-Werror=narrowing)
+        const auto head_dim = static_cast<int64_t>(head_size);
+        const auto sel_dim = static_cast<int64_t>(sel_heads);
+        auto q = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kHeads, -1, head_dim});
+        auto k = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_dim});
+        auto v = std::make_shared<ov::op::v0::Parameter>(data_prec, ov::PartialShape{-1, kKvHeads, -1, head_dim});
         auto sel_idx =
-            std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_heads, -1, kTopK});
-        auto sel_cnt = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_heads, -1});
+            std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_dim, -1, kTopK});
+        auto sel_cnt = std::make_shared<ov::op::v0::Parameter>(ov::element::i32, ov::PartialShape{-1, sel_dim, -1});
         set_name(q, "q");
         set_name(k, "k");
         set_name(v, "v");
@@ -298,7 +304,16 @@ protected:
 };
 
 TEST_P(StatefulSparseAttentionTest, CompareWithStatelessReference) {
-    const auto& [prec, cache_prec, key_by_channel, N, E, Bk, Hs] = GetParam();
+    // plain variables: the lambda below captures them, which clang rejects for structured bindings before C++20
+    const auto& param = GetParam();
+    const auto prec = std::get<0>(param);
+    const auto cache_prec = std::get<1>(param);
+    const auto key_by_channel = std::get<2>(param);
+    const auto N = std::get<3>(param);
+    const auto E = std::get<4>(param);
+    const auto Bk = std::get<5>(param);
+    const auto Hs = std::get<6>(param);
+    const auto turbo = std::get<7>(param);
     if (prec == ov::element::bf16 && !ov::with_cpu_x86_bfloat16()) {
         GTEST_SKIP() << "bf16 is not supported on this machine";
     }
@@ -310,23 +325,15 @@ TEST_P(StatefulSparseAttentionTest, CompareWithStatelessReference) {
     config[ov::hint::kv_cache_precision.name()] = cache_prec;
     config[ov::key_cache_group_size.name()] = static_cast<uint64_t>(32);
     config[ov::value_cache_group_size.name()] = static_cast<uint64_t>(32);
+    if (turbo) {
+        // not supported by the node, and the fusion is unconditional: both caches must stay plain, not fail
+        config[ov::internal::key_cache_quant_alg.name()] = ov::internal::CacheQuantAlgorithm::TURBO;
+        config[ov::internal::value_cache_quant_alg.name()] = ov::internal::CacheQuantAlgorithm::TURBO;
+    }
     if (key_by_channel) {
         // the key groups are 32 tokens long: the prefill ends in a partial group that the decodes keep filling
         config[ov::internal::key_cache_quant_mode.name()] = ov::internal::CacheQuantMode::BY_CHANNEL;
     }
-    auto compiled = core->compile_model(make_stateful_model(prec, E, Bk, Hs), ov::test::utils::DEVICE_CPU, config);
-    auto compiled_ref =
-        core->compile_model(make_reference_model(prec, E, Bk, Hs), ov::test::utils::DEVICE_CPU, ref_config);
-    check_fused(compiled);
-
-    // bf16 inference rounds the cache once, in both models
-    float threshold = prec == ov::element::bf16 ? 2e-2F : 1e-4F;
-    if (cache_prec == ov::element::u8) {
-        threshold = 3e-2F;
-    } else if (cache_prec == ov::element::u4) {
-        threshold = 0.15F;
-    }
-
     // the random selection of blocks below; the K/V/Q values come from the common tensor helper
     std::mt19937 gen(1234);
     int seed = 1;
@@ -340,6 +347,19 @@ TEST_P(StatefulSparseAttentionTest, CompareWithStatelessReference) {
         steps.push_back({1, false});
     }
     steps.push_back({3, false});
+
+    auto compiled = core->compile_model(make_stateful_model(prec, E, Bk, Hs), ov::test::utils::DEVICE_CPU, config);
+    auto compiled_ref =
+        core->compile_model(make_reference_model(prec, E, Bk, Hs), ov::test::utils::DEVICE_CPU, ref_config);
+    check_fused(compiled);
+
+    // bf16 inference rounds the cache once, in both models
+    float threshold = prec == ov::element::bf16 ? 2e-2F : 1e-4F;
+    // a TURBO request leaves the caches plain: only a compressed cache is merely close to the reference
+    const bool compressed_cache = !turbo && cache_prec != ov::element::f32;
+    if (compressed_cache) {
+        threshold = cache_prec == ov::element::u8 ? 3e-2F : 0.15F;
+    }
 
     auto request = compiled.create_infer_request();
     auto request_ref = compiled_ref.create_infer_request();
@@ -403,7 +423,7 @@ TEST_P(StatefulSparseAttentionTest, CompareWithStatelessReference) {
     for (auto&& state : request.query_state()) {
         const auto& expected = state.get_name() == "pastk" ? k_cache : v_cache;
         // a compressed cache must not be exact: that proves the cache is really quantized
-        const float min_diff = cache_prec == ov::element::f32 ? 0.F : 1e-4F;
+        const float min_diff = compressed_cache ? 1e-4F : 0.F;
         compare(expected.tensor(prec), state.get_state(), threshold, "get_state " + state.get_name(), min_diff);
     }
 
@@ -435,7 +455,8 @@ INSTANTIATE_TEST_SUITE_P(smoke_StatefulSparseAttention,
                                             ::testing::Values(1, 2),
                                             ::testing::Values(32, 64),
                                             ::testing::Values(4, 16),
-                                            ::testing::Values(1, 2)),
+                                            ::testing::Values(1, 2),
+                                            ::testing::Values(false)),
                          StatefulSparseAttentionTest::getTestCaseName);
 
 // keys quantized by channel (u8 only); the values are quantized by token
@@ -447,7 +468,21 @@ INSTANTIATE_TEST_SUITE_P(smoke_StatefulSparseAttention_KeyByChannel,
                                             ::testing::Values(1, 2),
                                             ::testing::Values(32, 64),
                                             ::testing::Values(4, 16),
-                                            ::testing::Values(1, 2)),
+                                            ::testing::Values(1, 2),
+                                            ::testing::Values(false)),
+                         StatefulSparseAttentionTest::getTestCaseName);
+
+// a TurboQuant cache request falls back to plain caches
+INSTANTIATE_TEST_SUITE_P(smoke_StatefulSparseAttention_Turbo,
+                         StatefulSparseAttentionTest,
+                         ::testing::Combine(::testing::Values(ov::element::f32, ov::element::bf16),
+                                            ::testing::Values(ov::element::u8, ov::element::u4),
+                                            ::testing::Values(false),
+                                            ::testing::Values(1, 2),
+                                            ::testing::Values(64),
+                                            ::testing::Values(4),
+                                            ::testing::Values(1),
+                                            ::testing::Values(true)),
                          StatefulSparseAttentionTest::getTestCaseName);
 
 }  // namespace test

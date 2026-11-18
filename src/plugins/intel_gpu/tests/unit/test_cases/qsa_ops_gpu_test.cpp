@@ -1035,7 +1035,7 @@ std::unique_ptr<network> build_dense_network(engine& engine, const dense_inputs&
             sel = input_info("sel");
             count = input_info("count");
         }
-        static_assert(SparseSDPAIn::COUNT_MIN == 6, "keep the test input order in sync with SparseSDPA::InputIdx");
+        static_assert(SparseSDPAIn::COUNT_CORE == 6, "keep the test input order in sync with SparseSDPA::InputIdx");
         topo.add(sparse_sdpa("attn",
                              {input_info("query"), input_info("key"), input_info("value"), sel, count, input_info("key_length")},
                              cfg,
@@ -2163,12 +2163,9 @@ TEST(qsa_ops_gpu_test, qwen38_dense_attention_gqa_split_reads_padded_kv) {
 // history. KVCache pre-allocates ahead on the sequence axis, i.e. hands over padded K/V.
 // ---------------------------------------------------------------------------
 
-void run_sparse_sdpa_kv_cache_model_test(const split_dims& d, const std::vector<size_t>& q_lens, float rtol, float atol = 2e-3f, bool compressed = false) {
+void run_sparse_sdpa_kv_cache_model_test(const split_dims& d, const std::vector<size_t>& q_lens, float rtol, float atol = 2e-3f) {
     if (!qsa_ops_available()) {
         GTEST_SKIP() << "Intel subgroup extensions are not supported on this device";
-    }
-    if (compressed && !get_test_engine().get_device_info().supports_immad) {
-        GTEST_SKIP() << "KVCacheCompression of SparseSDPA needs immad (planar i8 zero points)";
     }
     ov::Core core;
     const auto f16 = ov::element::f16;
@@ -2203,15 +2200,8 @@ void run_sparse_sdpa_kv_cache_model_test(const split_dims& d, const std::vector<
     auto model = std::make_shared<ov::Model>(ov::ResultVector{std::make_shared<ov::op::v0::Result>(attn)},
                                              sinks,
                                              ov::ParameterVector{query, key_new, value_new, sel, count, key_length});
-    auto compiled =
-        core.compile_model(model, "GPU", ov::hint::inference_precision(f16), ov::hint::kv_cache_precision(compressed ? ov::element::i8 : ov::element::f16));
+    auto compiled = core.compile_model(model, "GPU", ov::hint::inference_precision(f16));
     auto request = compiled.create_infer_request();
-    if (compressed) {
-        // A compressed state cannot be read back as f16, which tells that KVCacheCompression took the K/V caches.
-        for (auto& state : request.query_state()) {
-            EXPECT_ANY_THROW(state.get_state());
-        }
-    }
 
     tests::random_generator rg(GET_SUITE_NAME);
     split_reference ref;
@@ -2265,12 +2255,6 @@ void run_sparse_sdpa_kv_cache_model_test(const split_dims& d, const std::vector<
         const auto stats = compute_error_stats(gpu, expected);
         print_error_stats("kv_cache_model_attention", stats);
         ASSERT_EQ(stats.non_finite, 0u);
-        if (compressed) {
-            // Per-token i8 K/V with integer zero points: judge the mean error against one quantization step of the
-            // [-1, 1] inputs, since short histories average the outputs towards zero and inflate relative errors.
-            ASSERT_LT(stats.mean_abs, 2.0 / 255.0) << "compressed K/V deviates from the f16 reference";
-            continue;
-        }
         size_t mismatches = 0;
         for (size_t i = 0; i < expected.size(); i++) {
             if (std::fabs(gpu[i] - expected[i]) > atol + rtol * std::fabs(expected[i]) && mismatches++ < 8) {
@@ -2283,14 +2267,6 @@ void run_sparse_sdpa_kv_cache_model_test(const split_dims& d, const std::vector<
 
 TEST(qsa_ops_gpu_test, sparse_sdpa_reads_kv_cache_across_infer_calls) {
     run_sparse_sdpa_kv_cache_model_test(two_kv_head_dims(), {37, 1, 1, 6, 1, 2003, 1, 1}, 2e-3f);
-}
-
-TEST(qsa_ops_gpu_test, sparse_sdpa_reads_compressed_kv_cache_across_infer_calls) {
-    run_sparse_sdpa_kv_cache_model_test(two_kv_head_dims(), {37, 1, 1, 6, 1, 2003, 1, 1}, 0.0f, 0.0f, true);
-}
-
-TEST(qsa_ops_gpu_test, qwen38_sparse_sdpa_reads_compressed_kv_cache_across_infer_calls) {
-    run_sparse_sdpa_kv_cache_model_test(qwen38_dims(), {37, 1, 1, 9, 1}, 0.0f, 0.0f, true);
 }
 
 TEST(qsa_ops_gpu_test, qwen38_sparse_sdpa_reads_kv_cache_across_infer_calls) {
@@ -2548,25 +2524,6 @@ TEST(qsa_ops_gpu_test, sparse_pa_config_validation_rejects_illegal_attributes) {
     ASSERT_FALSE(cldnn::sparse_pa::validate_config(c, reason));
 }
 
-constexpr size_t paged_sparse_attention_scale_idx = 11;
-constexpr size_t paged_sparse_attention_sinks_idx = 12;
-
-ov::OutputVector make_sparse_pa_args(const split_dims& d, size_t num_pages) {
-    return {make_param({-1, I(d.Hq * d.Dh)}),
-            make_param({-1, I(d.Hkv * d.Dh)}),
-            make_param({-1, I(d.Hkv * d.Dv)}),
-            make_param({I(num_pages), I(d.Hkv), I(d.page_size), I(d.Dh)}),
-            make_param({I(num_pages), I(d.Hkv), I(d.page_size), I(d.Dv)}),
-            make_param({-1}, ov::element::i32),
-            make_param({-1}, ov::element::i32),
-            make_param({-1}, ov::element::i32),
-            make_param({-1}, ov::element::i32),
-            make_param({-1, 1, I(d.block_topk)}, ov::element::i32),
-            make_param({-1, 1}, ov::element::i32),
-            make_param({}),    // scale
-            make_param({0})};  // sinks: empty = none
-}
-
 ov::intel_gpu::op::SparseSDPA::Config make_sparse_sdpa_config(const split_dims& d) {
     ov::intel_gpu::op::SparseSDPA::Config c;
     c.num_heads = d.Hq;
@@ -2709,39 +2666,6 @@ TEST(qsa_ops_gpu_test, plugin_rejects_unsupported_indexer_heads_and_precision) {
     sink_args.push_back(make_param({I(d.Hq)}));
     auto sdpa_sinks = std::make_shared<ov::intel_gpu::op::SparseSDPA>(sink_args, make_sparse_sdpa_config(d));
     expect_compile_error(core, sdpa_sinks, {}, "sinks input is not supported");
-}
-
-TEST(qsa_ops_gpu_test, plugin_lowers_sparse_pa_scale_input_and_rejects_sinks) {
-    ov::Core core;
-    if (!gpu_in_core(core)) {
-        GTEST_SKIP() << "GPU plugin is not available in ov::Core";
-    }
-    split_dims d;
-    const auto key_block_size = static_cast<int64_t>(d.r);
-
-    // A non-empty sinks input is rejected, a non-Constant scale input is rejected.
-    auto args = make_sparse_pa_args(d, 8);
-    args[paged_sparse_attention_sinks_idx] = make_param({I(d.Hq)});
-    expect_compile_error(core, std::make_shared<ov::op::internal::PagedSparseAttention>(args, key_block_size), {}, "sinks input is not supported");
-
-    args = make_sparse_pa_args(d, 8);
-    args[paged_sparse_attention_sinks_idx] = ov::op::v0::Constant::create(ov::element::f16, ov::Shape{0}, std::vector<float>{});
-    expect_compile_error(core, std::make_shared<ov::op::internal::PagedSparseAttention>(args, key_block_size), {}, "scale input must be a Constant");
-
-    // Constant scale + empty sinks lowers (scale and sinks are not primitive inputs).
-    if (!qsa_ops_available()) {
-        GTEST_SKIP() << "Intel subgroup extensions are not supported on this device";
-    }
-    args[paged_sparse_attention_scale_idx] = ov::op::v0::Constant::create(ov::element::f16, ov::Shape{}, {0.0625f});
-    auto op = std::make_shared<ov::op::internal::PagedSparseAttention>(args, key_block_size);
-    ov::ParameterVector params;
-    for (const auto& input : op->input_values()) {
-        if (auto p = ov::as_type_ptr<ov::op::v0::Parameter>(input.get_node_shared_ptr())) {
-            params.push_back(p);
-        }
-    }
-    auto model = std::make_shared<ov::Model>(ov::OutputVector{op->output(0)}, params);
-    ASSERT_NO_THROW(core.compile_model(model, "GPU", ov::hint::inference_precision(ov::element::f16)));
 }
 
 }  // namespace

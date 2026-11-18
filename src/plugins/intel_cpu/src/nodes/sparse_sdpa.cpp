@@ -5,46 +5,49 @@
 #include "sparse_sdpa.h"
 
 #include <cmath>
+#include <cpu/x64/cpu_isa_traits.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <memory>
-#include <numeric>
+#include <oneapi/dnnl/dnnl_common.hpp>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "config.h"
 #include "cpu_memory.h"
-#include "cpu_parallel.hpp"
 #include "cpu_shape.h"
 #include "cpu_types.h"
 #include "graph_context.h"
 #include "memory_desc/blocked_memory_desc.h"
 #include "memory_desc/cpu_blocked_memory_desc.h"
+#include "memory_desc/cpu_memory_desc.h"
 #include "memory_state.h"
 #include "node.h"
 #include "nodes/common/cpu_convert.h"
+#include "nodes/kernels/scaled_attn/attn_brgemm_common.hpp"
 #include "nodes/kernels/scaled_attn/attn_memcpy.hpp"
 #include "nodes/kernels/scaled_attn/attn_quant.hpp"
 #include "nodes/kernels/scaled_attn/cache_spec.hpp"
-#include "nodes/kernels/scaled_attn/executor_pa_common.hpp"
-#include "nodes/kernels/scaled_attn/sparse_sdpa_kernel.hpp"
+#include "nodes/kernels/sparse_attn/sparse_attn_common.hpp"
+#include "nodes/kernels/sparse_attn/sparse_sdpa_kernel.hpp"
 #include "onednn/iml_type_mapper.h"
+#include "openvino/core/dimension.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/core/node.hpp"
+#include "openvino/core/type.hpp"
 #include "openvino/core/type/element_type.hpp"
 #include "openvino/op/sparse_attention.hpp"
 #include "openvino/runtime/internal_properties.hpp"
+#include "shape_inference/shape_inference.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "shape_inference/shape_inference_status.hpp"
-#include "transformations/cpu_opset/common/op/sparse_attention_with_kv_cache.hpp"
+#include "transformations/cpu_opset/x64/op/sparse_attention_with_kv_cache.hpp"
 #include "utils/general_utils.h"
 #include "utils/plain_tensor.hpp"
-
-#ifdef OPENVINO_ARCH_X86_64
-#    include <cpu/x64/cpu_isa_traits.hpp>
-#endif
 
 namespace ov::intel_cpu::node {
 
@@ -64,6 +67,53 @@ struct InputIdx {
     static constexpr size_t COUNT_MIN = 5;
 };
 
+// Shape inference of SparseAttentionWithKVCache from the input shapes only: the state inputs may be stubs without data
+// (a state without an initial value), so the generic fallback that reads the data of every input cannot be used.
+//   attention [N, H, L, Ev]; present_key / present_value [beam_idx, Hkv, L0 + L, E / Ev]
+class SparseSDPAKVShapeInfer : public ShapeInferEmptyPads {
+public:
+    IShapeInfer::Result infer(const std::vector<std::reference_wrapper<const VectorDims>>& input_shapes,
+                              [[maybe_unused]] const std::unordered_map<size_t, MemoryPtr>& data_dependency) override {
+        const auto inputs_size = input_shapes.size();
+        OPENVINO_ASSERT(inputs_size >= SparseAttentionKVOp::InputIdx::COUNT_MIN,
+                        "SparseSDPAKVShapeInfer: unexpected number of inputs: ",
+                        inputs_size);
+        const auto& cur_k = input_shapes[SparseAttentionKVOp::InputIdx::CUR_KEY].get();
+        const auto& cur_v = input_shapes[SparseAttentionKVOp::InputIdx::CUR_VALUE].get();
+        const auto& beam_idx = input_shapes[inputs_size - 3].get();
+        auto present_k = input_shapes[inputs_size - 2].get();
+        auto present_v = input_shapes[inputs_size - 1].get();
+        for (auto* present : {&present_k, &present_v}) {
+            (*present)[0] = beam_idx[0];
+        }
+        present_k[2] += cur_k[2];
+        present_v[2] += cur_v[2];
+
+        VectorDims out = input_shapes[SparseAttentionKVOp::InputIdx::QUERY].get();
+        out[3] = cur_v[3];
+        return {{std::move(out), std::move(present_k), std::move(present_v)}, ShapeInferStatus::success};
+    }
+
+    [[nodiscard]] port_mask_t get_port_mask() const override {
+        return EMPTY_PORT_MASK;
+    }
+};
+
+class SparseSDPAShapeInferFactory : public ShapeInferFactory {
+public:
+    explicit SparseSDPAShapeInferFactory(std::shared_ptr<ov::Node> op) : m_op(std::move(op)) {}
+
+    [[nodiscard]] ShapeInferPtr makeShapeInfer() const override {
+        if (ov::is_type<SparseAttentionKVOp>(m_op)) {
+            return std::make_shared<SparseSDPAKVShapeInfer>();
+        }
+        return make_shape_inference(m_op);
+    }
+
+private:
+    std::shared_ptr<ov::Node> m_op;
+};
+
 // BHLS KV cache descriptor with the logical length L; the capacity cap_L >= L along L is carried by the strides.
 std::shared_ptr<CpuBlockedMemoryDesc> make_bhls_cache_desc(ov::element::Type prec,
                                                            size_t B,
@@ -81,55 +131,6 @@ std::shared_ptr<CpuBlockedMemoryDesc> make_bhls_cache_desc(ov::element::Type pre
                                                   VectorDims{H * cap_L * S, cap_L * S, S, 1});
 }
 
-// The outputs depend on the input shapes only. Unlike the fallback shape inference, which reads the data of all the
-// inputs, it does not touch the state inputs: they are memory stubs when the states have no initial value.
-class SparseSDPAShapeInfer : public ShapeInferEmptyPads {
-public:
-    explicit SparseSDPAShapeInfer(bool fuse_concat) : m_fuse_concat(fuse_concat) {}
-
-    IShapeInfer::Result infer(const std::vector<std::reference_wrapper<const VectorDims>>& input_shapes,
-                              [[maybe_unused]] const std::unordered_map<size_t, MemoryPtr>& data_dependency) override {
-        const auto inputs_size = input_shapes.size();
-        // [N, H, L, E] -> [N, H, L, Ev]
-        VectorDims output_dims = input_shapes[InputIdx::QUERY].get();
-        output_dims[3] = input_shapes[InputIdx::VALUE].get()[3];
-        if (!m_fuse_concat) {
-            return {{output_dims}, ShapeInferStatus::success};
-        }
-        // present = concat(gather(past, beam_idx, axis 0), current, axis 2)
-        const auto& beam_idx_dims = input_shapes[inputs_size - 3].get();
-        auto present = [&](VectorDims past_dims, const VectorDims& cur_dims) {
-            past_dims[0] = beam_idx_dims[0];
-            past_dims[2] += cur_dims[2];
-            return past_dims;
-        };
-        return {{output_dims,
-                 present(input_shapes[inputs_size - 2].get(), input_shapes[InputIdx::KEY].get()),
-                 present(input_shapes[inputs_size - 1].get(), input_shapes[InputIdx::VALUE].get())},
-                ShapeInferStatus::success};
-    }
-
-    [[nodiscard]] port_mask_t get_port_mask() const override {
-        return EMPTY_PORT_MASK;
-    }
-
-private:
-    bool m_fuse_concat;
-};
-
-class SparseSDPAShapeInferFactory : public ShapeInferFactory {
-public:
-    explicit SparseSDPAShapeInferFactory(const std::shared_ptr<ov::Node>& op)
-        : m_fuse_concat(ov::is_type<SparseAttentionKVOp>(op)) {}
-
-    [[nodiscard]] ShapeInferPtr makeShapeInfer() const override {
-        return std::make_shared<SparseSDPAShapeInfer>(m_fuse_concat);
-    }
-
-private:
-    bool m_fuse_concat;
-};
-
 }  // namespace
 
 SparseSDPA::SparseSDPA(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
@@ -141,10 +142,10 @@ SparseSDPA::SparseSDPA(const std::shared_ptr<ov::Node>& op, const GraphContext::
     if (const auto kv_op = ov::as_type_ptr<const SparseAttentionKVOp>(op)) {
         m_fuse_concat = true;
         m_base_inputs = op->get_input_size() - 3;
-        m_cache_prec = op->get_input_element_type(InputIdx::QUERY);
-        // a side is compressed when the hint asks for u8 / u4 and the head size is static; the keys are quantized
-        // by channel when that mode is requested (u8 only). Everything else (by-channel u4, TurboQuant, f16 / i8
-        // hints) leaves the side a plain cache
+        // A side is compressed when the hint asks for u8 / u4 and the head size is static; the keys are quantized by
+        // channel when that mode is requested (u8 only). Everything else (by-channel u4, TurboQuant, f16 / i8 hints)
+        // leaves the side a plain cache: the fusion is unconditional, so a TURBO setting must not make the model fail.
+        // The group size follows ScaledDotProductAttention.
         const auto& cpu_config = context->getConfig();
         auto make_spec = [&](ov::element::Type hint,
                              size_t group_size,
@@ -152,18 +153,13 @@ SparseSDPA::SparseSDPA(const std::shared_ptr<ov::Node>& op, const GraphContext::
                              bool by_channel,
                              ov::internal::CacheQuantAlgorithm alg) {
             ov::Extensions::Cpu::CacheSpec spec;
-            spec.alg = ov::internal::CacheQuantAlgorithm::SCALAR;
-            spec.by_channel = false;
-            spec.precision = m_cache_prec;
+            spec.precision = ov::element::dynamic;  // plain cache: set in initSupportedPrimitiveDescriptors
             spec.group_size = head_dim.is_static() ? static_cast<size_t>(head_dim.get_length()) : 0;
             if (none_of(hint, ov::element::u8, ov::element::u4) || spec.group_size == 0 ||
                 alg == ov::internal::CacheQuantAlgorithm::TURBO) {
                 return spec;
             }
-            const size_t head = spec.group_size;
-            // same rule as SDPA: the group is the whole head unless the configured size divides it; for by-channel
-            // quantization the group is a number of tokens
-            const size_t group = (group_size == 0 || head % group_size != 0) ? head : group_size;
+            const size_t group = ov::Extensions::Cpu::resolve_group_size(group_size, spec.group_size);
             if (by_channel) {
                 if (hint != ov::element::u8) {
                     return spec;
@@ -199,53 +195,77 @@ SparseSDPA::SparseSDPA(const std::shared_ptr<ov::Node>& op, const GraphContext::
 }
 
 void SparseSDPA::createPrimitive() {
-    const auto Dh = static_cast<size_t>(getInputShapeAtPort(InputIdx::QUERY).getDims()[3]);
-#ifdef OPENVINO_ARCH_X86_64
-    const auto Bk = m_key_block_size;
-    // JIT kernel limits: head_size must be a whole number of 32-wide bf16/f16 B-tiles, capped at 6
-    // tiles. The JIT kernel's own block_size (rows per AMX call) must be a multiple of 16, but Bk
-    // itself need not be -- see m_amx_unit_blocks below, which merges adjacent selected blocks up
-    // to a valid 16-row-multiple chunk.
-    if (Dh % 32 == 0 && Dh <= 192 && Bk > 0) {
-        const auto qprec = getOriginalInputPrecisionAtPort(InputIdx::QUERY);
-        // the cache of the stateful form is always kept in the query's precision
-        const auto kprec = m_fuse_concat ? m_cache_prec : getOriginalInputPrecisionAtPort(InputIdx::KEY);
-        // VALUE must match too: the AMX chunk path's P@V step reads VALUE directly at this
-        // precision via attn_acc_value_block() (zero-copy, same as the QK^T read of KEY) rather
-        // than through the precision-agnostic load_row_f32() the scalar fallback uses.
-        const auto vprec = m_fuse_concat ? m_cache_prec : getOriginalInputPrecisionAtPort(InputIdx::VALUE);
-        if (qprec == kprec && qprec == vprec && qprec == ov::element::bf16 &&
-            dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::amx_bf16)) {
-            m_amx_prec = ov::element::bf16;
-        } else if (qprec == kprec && qprec == vprec && qprec == ov::element::f16 &&
-                   dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::amx_fp16)) {
-            m_amx_prec = ov::element::f16;
+    // The kernel reads QUERY, KEY, VALUE and writes the output as one data type (see
+    // initSupportedPrimitiveDescriptors).
+    [[maybe_unused]] const auto qprec = getParentEdgeAt(InputIdx::QUERY)->getMemory().getPrecision();
+    CPU_NODE_ASSERT(getParentEdgeAt(InputIdx::KEY)->getMemory().getPrecision() == qprec &&
+                        getParentEdgeAt(InputIdx::VALUE)->getMemory().getPrecision() == qprec &&
+                        getChildEdgeAt(0)->getMemory().getPrecision() == qprec,
+                    "query, key, value and output must have one precision, but the query is ",
+                    qprec);
+    // The head counts and sizes are static (see isSupportedOperation), so the executor fixes them once.
+    const auto& q_dims = getInputShapeAtPort(InputIdx::QUERY).getDims();
+    const auto& k_dims = getInputShapeAtPort(InputIdx::KEY).getDims();
+    const auto& v_dims = getInputShapeAtPort(InputIdx::VALUE).getDims();
+    const auto& sel_dims = getInputShapeAtPort(InputIdx::SEL_INDICES).getDims();
+    CPU_NODE_ASSERT(none_of(Shape::UNDEFINED_DIM, q_dims[1], q_dims[3], k_dims[1], v_dims[3], sel_dims[1]),
+                    "requires static head counts and head sizes");
+    ov::Extensions::Cpu::SparseSdpaConfig config;
+    config.num_heads = static_cast<size_t>(q_dims[1]);
+    config.num_kv_heads = static_cast<size_t>(k_dims[1]);
+    config.num_selection_heads = static_cast<size_t>(sel_dims[1]);
+    config.k_head_size = static_cast<size_t>(q_dims[3]);
+    config.v_head_size = static_cast<size_t>(v_dims[3]);
+    config.data_precision = qprec;
+    config.key_block_size = m_key_block_size;
+    config.causal = m_causal;
+    config.scale = m_scale;
+    config.key_spec = m_key_spec;
+    config.value_spec = m_value_spec;
+    // The matrix type of the AMX prefill: bf16 / f16 when the data is natively that type and the CPU has the matching
+    // AMX.
+    ov::element::Type amx_type = ov::element::dynamic;
+    if (qprec == ov::element::bf16 && dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::amx_bf16)) {
+        amx_type = ov::element::bf16;
+    } else if (qprec == ov::element::f16 && dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::amx_fp16)) {
+        amx_type = ov::element::f16;
+    }
+    // Prefill over packs of query heads (brgemm products, whose M is the pack): it needs the AMX type and a causal op.
+    if (amx_type != ov::element::dynamic && m_causal) {
+        const size_t pack = ov::Extensions::Cpu::max_q_head_pack_size(config.num_heads,
+                                                                      config.num_kv_heads,
+                                                                      config.num_selection_heads);
+        if (ov::Extensions::Cpu::TileBrgemmKernels::supports_pack(pack)) {
+            m_brgemm = ov::Extensions::Cpu::TileBrgemmKernels::get(context->getParamsCache(),
+                                                                   pack,
+                                                                   config.k_head_size,
+                                                                   config.v_head_size,
+                                                                   ov::Extensions::Cpu::kGatherTileRows,
+                                                                   amx_type);
+            config.brgemm = m_brgemm.handle();
         }
     }
-    if (m_amx_prec != ov::element::dynamic) {
-        // Smallest number of adjacent Bk-sized blocks whose combined row count is a multiple of 16
-        // (e.g. Bk=4 -> 4 blocks = 16 rows; Bk=16 -> 1 block = 16 rows; Bk=2 -> 8 blocks = 16 rows).
-        m_amx_unit_blocks = 16 / std::gcd(static_cast<size_t>(16), Bk);
-        const auto unit_rows = m_amx_unit_blocks * Bk;
-        m_gemv_qk1 = std::make_shared<ov::Extensions::Cpu::JitMatMulVecAMX>(static_cast<int>(Dh),
-                                                                             static_cast<int>(unit_rows),
-                                                                             m_amx_prec);
-        m_gemv_qk4 = std::make_shared<ov::Extensions::Cpu::JitMatMulVecAMX>(static_cast<int>(Dh),
-                                                                             static_cast<int>(4 * unit_rows),
-                                                                             m_amx_prec);
-    }
-#endif
+    m_executor = ov::Extensions::Cpu::XARCH::make_sparse_sdpa_executor(config);
 }
 
 void SparseSDPA::initSupportedPrimitiveDescriptors() {
     if (!supportedPrimitiveDescriptors.empty()) {
         return;
     }
-    // QUERY / KEY / VALUE are echoed at whatever precision (f32/f16/bf16) was negotiated
-    // upstream -- the reference kernel reads them through load_row_f32() rather than hardcoding
-    // f32, since the dense caches grow every step and forcing a whole-tensor Reorder on every call
-    // would redo that conversion for the entire history each time. SEL_INDICES / SEL_COUNT are
-    // always i32 (enforced by the op's shape inference).
+    if (m_fuse_concat) {
+        // The plain cache and the current-step K / V follow the query precision, final only now (after
+        // EnforceInferencePrecision); a compressed side keeps u8 / u4.
+        m_cache_prec = getOriginalInputPrecisionAtPort(InputIdx::QUERY);
+        for (auto* spec : {&m_key_spec, &m_value_spec}) {
+            if (!isQuantizedCache(*spec)) {
+                spec->precision = m_cache_prec;
+            }
+        }
+    }
+    // QUERY, KEY, VALUE and the output share one precision (f32 / f16 / bf16), as in ScaledDotProductAttention: the
+    // kernel is instantiated for a single data type. SEL_INDICES / SEL_COUNT are always i32 (enforced by the op's shape
+    // inference).
+    const auto data_prec = getOriginalInputPrecisionAtPort(InputIdx::QUERY);
     if (m_fuse_concat) {
         // Same layout as ScaledDotProductAttention with fuse_concat: the state inputs keep the precision of the
         // MemoryInput nodes feeding them (no reorders, they are only proxies of the state), the cache outputs carry
@@ -259,7 +279,7 @@ void SparseSDPA::initSupportedPrimitiveDescriptors() {
             } else if (i > m_base_inputs) {
                 precision = getParentEdgeAt(i)->getParent()->getOriginalOutputPrecisionAtPort(0);
             } else if (i == InputIdx::KEY || i == InputIdx::VALUE) {
-                precision = m_cache_prec;
+                precision = data_prec;
             } else {
                 precision = getOriginalInputPrecisionAtPort(i);
             }
@@ -268,7 +288,7 @@ void SparseSDPA::initSupportedPrimitiveDescriptors() {
         const auto past_k_prec = getParentEdgeAt(m_base_inputs + 1)->getParent()->getOriginalOutputPrecisionAtPort(0);
         const auto past_v_prec = getParentEdgeAt(m_base_inputs + 2)->getParent()->getOriginalOutputPrecisionAtPort(0);
         std::vector<PortConfigurator> stateOutConfigs = {
-            PortConfigurator{LayoutType::ncsp, getOriginalOutputPrecisionAtPort(0), getOutputShapeAtPort(0), false, -1},
+            PortConfigurator{LayoutType::ncsp, data_prec, getOutputShapeAtPort(0), false, -1},
             PortConfigurator{LayoutType::ncsp, past_k_prec, getOutputShapeAtPort(1), false, -1},
             PortConfigurator{LayoutType::ncsp, past_v_prec, getOutputShapeAtPort(2), false, -1}};
         addSupportedPrimDesc(stateInConfigs, stateOutConfigs, impl_desc_type::ref);
@@ -277,11 +297,11 @@ void SparseSDPA::initSupportedPrimitiveDescriptors() {
     std::vector<PortConfigurator> inPortConfigs;
     for (size_t i = 0; i < getParentEdges().size(); ++i) {
         const bool is_index_port = i == InputIdx::SEL_INDICES || i == InputIdx::SEL_COUNT || i == InputIdx::KEY_LENGTH;
-        const ov::element::Type precision = is_index_port ? ov::element::i32 : getOriginalInputPrecisionAtPort(i);
+        const ov::element::Type precision = is_index_port ? ov::element::i32 : data_prec;
         inPortConfigs.emplace_back(LayoutType::ncsp, precision, getInputShapeAtPort(i), false, -1);
     }
     std::vector<PortConfigurator> outPortConfigs = {
-        PortConfigurator{LayoutType::ncsp, getOriginalOutputPrecisionAtPort(0), getOutputShapeAtPort(0), false, -1}};
+        PortConfigurator{LayoutType::ncsp, data_prec, getOutputShapeAtPort(0), false, -1}};
     addSupportedPrimDesc(inPortConfigs, outPortConfigs, impl_desc_type::ref);
 }
 
@@ -289,23 +309,17 @@ void SparseSDPA::execute([[maybe_unused]] const dnnl::stream& strm) {
     PlainTensor query(getSrcMemoryAtPort(InputIdx::QUERY));
     PlainTensor key;
     PlainTensor value;
-    ov::Extensions::Cpu::SparseKVQuant key_quant;
-    ov::Extensions::Cpu::SparseKVQuant value_quant;
+    const PlainTensor* key_scale_zp = nullptr;
+    const PlainTensor* value_scale_zp = nullptr;
     if (m_fuse_concat) {
         updateKVCache();
         key.reset(m_k_state->internal_state_mem());
         value.reset(m_v_state->internal_state_mem());
         if (isQuantizedCache(m_key_spec)) {
-            key_quant = {m_key_spec.precision,
-                         m_key_spec.group_size,
-                         m_key_spec.by_channel,
-                         &m_k_state->get_scale_zp()};
+            key_scale_zp = &m_k_state->get_scale_zp();
         }
         if (isQuantizedCache(m_value_spec)) {
-            value_quant = {m_value_spec.precision,
-                           m_value_spec.group_size,
-                           m_value_spec.by_channel,
-                           &m_v_state->get_scale_zp()};
+            value_scale_zp = &m_v_state->get_scale_zp();
         }
     } else {
         key.reset(getSrcMemoryAtPort(InputIdx::KEY));
@@ -315,92 +329,47 @@ void SparseSDPA::execute([[maybe_unused]] const dnnl::stream& strm) {
     PlainTensor sel_count(getSrcMemoryAtPort(InputIdx::SEL_COUNT));
     PlainTensor out(getDstMemoryAtPort(0));
 
-    const size_t Hq = query.size(1);
-    const size_t Hkv = key.size(1);
-    const size_t Dh = query.size(3);
-    const size_t Dv = value.size(3);
-    const size_t Bk = m_key_block_size;
-    const size_t H_sel = sel_indices.size(1);
-    const bool causal = m_causal;
-
-    const bool has_key_length = m_base_inputs > InputIdx::KEY_LENGTH;
     PlainTensor key_length;
     const int32_t* key_length_ptr = nullptr;
     size_t key_length_batch_stride = 0;
-    if (has_key_length) {
+    if (m_base_inputs > InputIdx::KEY_LENGTH) {
         key_length.reset(getSrcMemoryAtPort(InputIdx::KEY_LENGTH));
         key_length_ptr = key_length.ptr<int32_t>(0);
+        CPU_NODE_ASSERT(key_length.size(0) == 1 || key_length.size(0) == query.size(0),
+                        "key_length must have 1 or batch (",
+                        query.size(0),
+                        ") elements, but has ",
+                        key_length.size(0));
         key_length_batch_stride = key_length.size(0) == 1 ? 0 : 1;
-    }
-
-    // Per-worker-thread f32 scratch row: q_buf[Dh] | k_buf[Dh] | acc[Dv] | v_buf[Dv]
-    // (| raw[amx_raw_floats] when AMX-eligible). Per-worker-thread AMX run-decomposition scratch
-    // (i64): chunk_block_start[K_max] | chunk_n_units[K_max] | leftover_block_start[K_max], where
-    // K_max is SEL_INDICES' runtime last dimension -- the upper bound on nblocks for every
-    // (b, sh, l) in this call, only known once actual input shapes are resolved (not in
-    // createPrimitive()). Both regions are drawn from the plugin's DnnlScratchPad, which is a
-    // single shared, grow-only buffer per engine: a second createScratchPadMem() call that grows
-    // the pool frees the buffer backing any earlier call's pointer (see dnnl_scratch_pad.h /
-    // MemoryBlockWithReuse::resize()). So this issues exactly ONE combined request per execute()
-    // call -- sized for both regions together -- and slices it by byte offset, rather than
-    // requesting the two regions separately. This scratch allocation needs GraphContext, so it
-    // stays here rather than inside the cross-compiled sparse_sdpa_compute() kernel.
-    size_t amx_raw_floats = 0;
-    size_t runs_per_thread = 0;
-#ifdef OPENVINO_ARCH_X86_64
-    if (m_amx_prec != ov::element::dynamic) {
-        amx_raw_floats = 4 * m_amx_unit_blocks * Bk;
-        if (key_quant.enabled() || value_quant.enabled()) {
-            // dequantized K and V rows of one AMX chunk (<= 4 merge units, bf16 / f16 elements), see
-            // sparse_sdpa_compute()
-            amx_raw_floats += (amx_raw_floats * (Dh + Dv) * 2 + sizeof(float) - 1) / sizeof(float);
+        for (size_t b = 0; b < key_length.size(0); b++) {
+            CPU_NODE_ASSERT(key_length_ptr[b] >= 0 && static_cast<size_t>(key_length_ptr[b]) <= key.size(2),
+                            "key_length[",
+                            b,
+                            "] = ",
+                            key_length_ptr[b],
+                            " is out of range [0, ",
+                            key.size(2),
+                            "]");
         }
-        const size_t K_max = sel_indices.size(3);
-        runs_per_thread = 3 * K_max;
     }
-#endif
-    const size_t per_thread_floats = 2 * Dh + 2 * Dv + amx_raw_floats;
-    const auto num_threads = static_cast<size_t>(context->getCpuParallel()->get_num_worker_threads());
-    const size_t float_bytes = num_threads * per_thread_floats * sizeof(float);
-    const size_t float_bytes_aligned = (float_bytes + 7U) & ~size_t{7U};
-    const size_t runs_bytes = num_threads * runs_per_thread * sizeof(int64_t);
-    auto scratch_desc =
-        std::make_shared<CpuBlockedMemoryDesc>(ov::element::u8, ov::intel_cpu::Shape{float_bytes_aligned + runs_bytes});
-    const MemoryPtr scratch = context->getScratchPad()->createScratchPadMem(scratch_desc);
-    uint8_t* const scratch_base_bytes = scratch->getDataAs<uint8_t>();
-    float* const scratch_base = reinterpret_cast<float*>(scratch_base_bytes);
-    int64_t* const runs_base =
-        runs_per_thread > 0 ? reinterpret_cast<int64_t*>(scratch_base_bytes + float_bytes_aligned) : nullptr;
 
-    ov::Extensions::Cpu::XARCH::sparse_sdpa_compute(query,
-                                                    key,
-                                                    value,
-                                                    sel_indices,
-                                                    sel_count,
-                                                    out,
-                                                    Hq,
-                                                    Hkv,
-                                                    Dh,
-                                                    Dv,
-                                                    Bk,
-                                                    H_sel,
-                                                    causal,
-                                                    m_scale,
-                                                    scratch_base,
-                                                    per_thread_floats,
-#ifdef OPENVINO_ARCH_X86_64
-                                                    m_amx_prec,
-                                                    m_gemv_qk1.get(),
-                                                    m_gemv_qk4.get(),
-                                                    m_amx_unit_blocks,
-                                                    runs_base,
-                                                    runs_per_thread,
-#endif
-                                                    key_length_ptr,
-                                                    key_length_batch_stride,
-                                                    key_quant,
-                                                    value_quant,
-                                                    context->getCpuParallel());
+    const ov::Extensions::Cpu::SparseSdpaTensors tensors{query,
+                                                         key,
+                                                         value,
+                                                         sel_indices,
+                                                         sel_count,
+                                                         out,
+                                                         key_length_ptr,
+                                                         key_length_batch_stride,
+                                                         key_scale_zp,
+                                                         value_scale_zp};
+    const auto& cpu_parallel = context->getCpuParallel();
+    // One request: the DnnlScratchPad is a shared, grow-only buffer, so a second request that grows it would free the
+    // first.
+    const MemoryPtr scratch = context->getScratchPad()->createScratchPadMem(
+        std::make_shared<CpuBlockedMemoryDesc>(ov::element::u8,
+                                               ov::intel_cpu::Shape{m_executor->scratch_bytes(tensors, cpu_parallel)}));
+    m_executor->execute(tensors, scratch->getDataAs<uint8_t>(), cpu_parallel);
 }
 
 void SparseSDPA::assignState(const std::shared_ptr<VariableStateKVcache>& state, int idx) {
@@ -476,9 +445,12 @@ void SparseSDPA::updateKVCache() {
         //  - by token:   [capacity of L, B, H, 2 * S / group_size]
         //  - by channel: [2 * ceil(capacity of L / group_size), B, H, S]
         const bool by_channel = quantized && spec.by_channel;
-        const size_t szp_cols = !quantized ? 0 : (by_channel ? S : 2 * S / spec.group_size);
+        size_t szp_cols = 0;
+        if (quantized) {
+            szp_cols = by_channel ? S : 2 * S / spec.group_size;
+        }
         auto szp_rows = [&](size_t length) {
-            return by_channel ? 2 * ((length + spec.group_size - 1) / spec.group_size) : length;
+            return by_channel ? 2 * div_up(length, spec.group_size) : length;
         };
         auto mem = state->internal_state_mem();
 

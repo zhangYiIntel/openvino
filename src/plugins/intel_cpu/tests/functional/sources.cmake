@@ -116,6 +116,7 @@ set(CPU_FUNC_TESTS_CUSTOM_SRCS
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/group_convolution.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/gru_cell.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/gru_sequence.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/histc.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/common/activation.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/common/bitwise_shift.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/common/col2im.cpp
@@ -252,7 +253,6 @@ set(CPU_FUNC_TESTS_CUSTOM_SRCS
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/matrix_nms_zero_boxes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/merge_transpose_reorder.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/ngram.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/ngram_hash.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/not_fused_conv_simple_op.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/read_value_assign.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/remove_convert.cpp
@@ -287,12 +287,12 @@ set(CPU_FUNC_TESTS_X64_SRCS
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/classes/sparse_sdpa.hpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/classes/sparse_pa.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/classes/sparse_pa.hpp
-    ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/common/sparse_sdpa.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../../src/transformations/cpu_opset/x64/op/qsa_indexer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/../../src/transformations/cpu_opset/x64/op/qsa_indexer.hpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/selective_ssm_jit.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/activation.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/col2im.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/comparison.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/conversion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/convolution_backprop_data.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/convolution.cpp
@@ -312,7 +312,9 @@ set(CPU_FUNC_TESTS_X64_SRCS
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/rms_norm.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/softmax.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/sparse_pa.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/sparse_sdpa.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/single_layer_tests/instances/x64/transpose.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/bf16_attention_mask.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/bf16_convert_saturation.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/bf16_embed_tokens_rms.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/bf16_rotary_emb_matmul.cpp
@@ -327,6 +329,7 @@ set(CPU_FUNC_TESTS_X64_SRCS
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/conv_u8_fuse_sum_i8.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/conv_u8s8f32.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/conv_with_zero_point_fuse.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/eltwise_chain.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/fq_caching.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/fq_fused_with_ss.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/fq_layer_dq_bias.cpp
@@ -348,7 +351,6 @@ set(CPU_FUNC_TESTS_X64_SRCS
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/paged_attn_token_type.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/powerstatic_bf16_saturation.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/qkv_proj_fusion.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/qsa_indexer_fusion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/rms_norm_no_gamma.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/rope_table_precision.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/x64/stateful_sparse_attention.cpp
@@ -427,6 +429,7 @@ set(CPU_FUNC_TESTS_X64_SRCS
 set(CPU_FUNC_TESTS_SRCS
     ${CMAKE_CURRENT_LIST_DIR}/custom/behavior/compatibility_string.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/behavior/export_import.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/custom/behavior/hsm_blob.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/behavior/ov_executable_network/concurent_release_memory.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/behavior/ov_executable_network/input_tensor_initialization.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/behavior/ov_executable_network/properties.cpp
@@ -810,7 +813,6 @@ set(TMP_LIST_OF_COMMON_SUBGRAPH_TESTS
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/matrix_nms_zero_boxes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/merge_transpose_reorder.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/ngram.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/ngram_hash.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/not_fused_conv_simple_op.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/read_value_assign.cpp
     ${CMAKE_CURRENT_LIST_DIR}/custom/subgraph_tests/src/common/remove_convert.cpp

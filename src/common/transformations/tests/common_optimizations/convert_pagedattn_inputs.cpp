@@ -11,7 +11,9 @@
 #include "openvino/op/paged_attention.hpp"
 #include "openvino/op/paged_causal_conv1d.hpp"
 #include "openvino/op/paged_gated_delta_net.hpp"
+#include "openvino/op/paged_qsa_indexer.hpp"
 #include "openvino/op/paged_selective_ssm.hpp"
+#include "openvino/op/paged_sparse_attention.hpp"
 #include "openvino/pass/constant_folding.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/runtime/properties.hpp"
@@ -673,5 +675,170 @@ TEST_F(ConvertPagedAttnInputsStateTableTest, ConvertPagedSelectiveSSMIndependent
     EXPECT_EQ(selective_ssm_state_table->get_element_type(), ov::element::f16);
     EXPECT_EQ(paged_ssm->get_output_element_type(0), element::f32);
 }
+
+// PagedSparseAttention caches get the same precision and padded shapes as PagedAttentionExtension, and the op
+// stays valid with the padded shapes.
+TEST(ConvertPagedAttnInputsSparseTest, PagedSparseAttentionQuantizedCaches) {
+    constexpr size_t num_heads = 4;
+    constexpr size_t num_kv_heads = 2;
+    constexpr size_t key_head_size = 32;
+    constexpr size_t value_head_size = 16;
+    constexpr size_t key_block_size = 32;
+    constexpr size_t value_block_size = 32;
+
+    auto query = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, num_heads * key_head_size});
+    auto key = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, num_kv_heads * key_head_size});
+    auto value = std::make_shared<v0::Parameter>(element::f32, PartialShape{-1, num_kv_heads * value_head_size});
+    auto key_cache = std::make_shared<v0::Parameter>(element::dynamic, PartialShape::dynamic(4));
+    auto value_cache = std::make_shared<v0::Parameter>(element::dynamic, PartialShape::dynamic(4));
+    auto past_lens = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto subsequence_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto block_indices_begins = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    auto selected_block_indices = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1, 1, 8});
+    auto selected_block_count = std::make_shared<v0::Parameter>(element::i32, PartialShape{-1, 1});
+    auto scale = std::make_shared<v0::Constant>(element::f32, Shape{}, 0.5f);
+    auto sinks = std::make_shared<v0::Constant>(element::f32, Shape{0});
+    auto psa = std::make_shared<op::internal::PagedSparseAttention>(OutputVector{query,
+                                                                                 key,
+                                                                                 value,
+                                                                                 key_cache,
+                                                                                 value_cache,
+                                                                                 past_lens,
+                                                                                 subsequence_begins,
+                                                                                 block_indices,
+                                                                                 block_indices_begins,
+                                                                                 selected_block_indices,
+                                                                                 selected_block_count,
+                                                                                 scale,
+                                                                                 sinks},
+                                                                    4);
+    psa->get_rt_info()["num_k_heads"] = num_kv_heads;
+    psa->get_rt_info()["k_head_size"] = key_head_size;
+    psa->get_rt_info()["num_v_heads"] = num_kv_heads;
+    psa->get_rt_info()["v_head_size"] = value_head_size;
+    auto model = std::make_shared<ov::Model>(OutputVector{psa},
+                                             ParameterVector{query,
+                                                             key,
+                                                             value,
+                                                             key_cache,
+                                                             value_cache,
+                                                             past_lens,
+                                                             subsequence_begins,
+                                                             block_indices,
+                                                             block_indices_begins,
+                                                             selected_block_indices,
+                                                             selected_block_count});
+
+    ov::pass::ConvertPagedAttnInputs::KVCacheConfig cacheConfig;
+    cacheConfig.inferencePrecision = element::f32;
+    cacheConfig.keyCachePrecision = element::u8;
+    cacheConfig.valueCachePrecision = element::u8;
+    cacheConfig.keyCacheBlockSize = key_block_size;
+    cacheConfig.valueCacheBlockSize = value_block_size;
+    // u8 by-token: scale and zero point are appended to the head size.
+    auto update_shape = [](const ov::element::Type& precision, const bool, const size_t, int64_t& head_size, int64_t&) {
+        if (precision == ov::element::u8) {
+            head_size += 2 * sizeof(float);
+        }
+    };
+
+    ov::pass::Manager manager;
+    manager.register_pass<ov::pass::ConvertPagedAttnInputs>(cacheConfig, update_shape);
+    manager.run_passes(model);
+
+    EXPECT_EQ(key_cache->get_element_type(), element::u8);
+    EXPECT_EQ(value_cache->get_element_type(), element::u8);
+    EXPECT_EQ(key_cache->get_partial_shape(),
+              (PartialShape{-1, num_kv_heads, key_block_size, key_head_size + 2 * sizeof(float)}));
+    EXPECT_EQ(value_cache->get_partial_shape(),
+              (PartialShape{-1, num_kv_heads, value_block_size, value_head_size + 2 * sizeof(float)}));
+
+    // The padded caches must still validate against the unpadded key/value widths.
+    EXPECT_NO_THROW(model->validate_nodes_and_infer_types());
+    EXPECT_EQ(psa->get_output_partial_shape(0), (PartialShape{-1, num_heads * value_head_size}));
+}
+
+// Builds a PagedQSAIndexer whose floating-point data inputs have `data_precision` and whose caches are untyped, runs
+// ConvertPagedAttnInputs with `hint` as the inference precision and returns the indexer.
+std::shared_ptr<op::internal::PagedQSAIndexer> convert_qsa_indexer(const element::Type& data_precision,
+                                                                   const element::Type& hint,
+                                                                   std::shared_ptr<Model>& model) {
+    using InputIdx = op::internal::PagedQSAIndexer::InputIdx;
+    constexpr size_t head_dim = 16;
+    constexpr size_t rotary_dim = 8;
+    constexpr size_t page_size = 8;
+    auto data_param = [&](const PartialShape& shape) {
+        return std::make_shared<v0::Parameter>(data_precision, shape);
+    };
+    auto cache_param = [](const PartialShape& shape) {
+        return std::make_shared<v0::Parameter>(element::dynamic, shape);
+    };
+    auto i32_param = [] {
+        return std::make_shared<v0::Parameter>(element::i32, PartialShape{-1});
+    };
+    ParameterVector params(InputIdx::COUNT);
+    params[InputIdx::INDEX_QUERY] = data_param({-1, 2 * head_dim});
+    params[InputIdx::RAW_INDEX_KEYS] = data_param({-1, head_dim});
+    params[InputIdx::ROPE_COS] = data_param({-1, rotary_dim});
+    params[InputIdx::ROPE_SIN] = data_param({-1, rotary_dim});
+    params[InputIdx::Q_NORM_WEIGHT] = data_param({head_dim});
+    params[InputIdx::K_NORM_WEIGHT] = data_param({head_dim});
+    params[InputIdx::PAST_LENS] = i32_param();
+    params[InputIdx::SUBSEQUENCE_BEGINS] = i32_param();
+    params[InputIdx::BLOCK_INDICES] = i32_param();
+    params[InputIdx::BLOCK_INDICES_BEGINS] = i32_param();
+    params[InputIdx::INDEX_KEY_CACHE] = cache_param({-1, 1, page_size, head_dim});
+    params[InputIdx::INDEX_BLOCK_ROPE_CACHE] = cache_param({-1, page_size / 4, 2 * rotary_dim});
+    params[InputIdx::BLOCK_INDEX_KEYS_CACHE] = cache_param({-1, 1, page_size / 4, head_dim});
+
+    op::internal::PagedQSAIndexer::Config config;
+    config.key_block_size = 4;
+    config.block_topk = 4;
+    config.indexer_head_dim = head_dim;
+    config.indexer_rotary_dim = rotary_dim;
+    auto indexer = std::make_shared<op::internal::PagedQSAIndexer>(OutputVector(params.begin(), params.end()), config);
+    model = std::make_shared<Model>(indexer->outputs(), params);
+
+    ov::pass::ConvertPagedAttnInputs::KVCacheConfig cache_config;
+    cache_config.inferencePrecision = hint;
+    auto no_shape_update = [](const ov::element::Type&, const bool, const size_t, int64_t&, int64_t&) {};
+
+    ov::pass::Manager manager;
+    manager.register_pass<ov::pass::ConvertPagedAttnInputs>(cache_config, no_shape_update);
+    manager.run_passes(model);
+    return indexer;
+}
+
+// The indexer appends to its caches in place and requires one floating-point type across all its inputs: the caches
+// follow the indexer data type, whatever the inference precision hint is (e.g. an f32 model with a bf16 hint on a CPU
+// with native bf16, where f32 data is not converted to bf16 at model level), and keep it.
+using QSAIndexerCachePrecisionParams = std::tuple<element::Type, element::Type>;  // data precision, hint
+
+class ConvertPagedAttnInputsQSAIndexerTest : public ::testing::TestWithParam<QSAIndexerCachePrecisionParams> {};
+
+TEST_P(ConvertPagedAttnInputsQSAIndexerTest, CachesFollowDataPrecision) {
+    using InputIdx = op::internal::PagedQSAIndexer::InputIdx;
+    const auto& [data_precision, hint] = GetParam();
+    std::shared_ptr<Model> model;
+    const auto indexer = convert_qsa_indexer(data_precision, hint, model);
+
+    for (const auto idx :
+         {InputIdx::INDEX_KEY_CACHE, InputIdx::INDEX_BLOCK_ROPE_CACHE, InputIdx::BLOCK_INDEX_KEYS_CACHE}) {
+        EXPECT_TRUE(ov::is_type<v0::Parameter>(indexer->get_input_node_shared_ptr(idx))) << "cache input " << idx;
+        EXPECT_EQ(indexer->get_input_element_type(idx), data_precision) << "cache input " << idx;
+    }
+    EXPECT_NO_THROW(model->validate_nodes_and_infer_types());
+}
+
+INSTANTIATE_TEST_SUITE_P(smoke,
+                         ConvertPagedAttnInputsQSAIndexerTest,
+                         ::testing::Values(QSAIndexerCachePrecisionParams{element::f32, element::f32},
+                                           QSAIndexerCachePrecisionParams{element::f16, element::f16},
+                                           QSAIndexerCachePrecisionParams{element::bf16, element::bf16},
+                                           // data precision differs from the hint
+                                           QSAIndexerCachePrecisionParams{element::f32, element::bf16},
+                                           QSAIndexerCachePrecisionParams{element::f32, element::f16},
+                                           QSAIndexerCachePrecisionParams{element::bf16, element::f32}));
 
 }  // namespace

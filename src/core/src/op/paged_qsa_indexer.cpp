@@ -73,6 +73,8 @@ bool PagedQSAIndexer::visit_attributes(ov::AttributeVisitor& visitor) {
     visitor.on_attribute("indexer_head_dim", m_config.indexer_head_dim);
     visitor.on_attribute("epsilon", m_config.epsilon);
     visitor.on_attribute("scale", m_config.scale);
+    visitor.on_attribute("query_norm", m_config.query_norm);
+    visitor.on_attribute("query_rope", m_config.query_rope);
     return true;
 }
 
@@ -90,8 +92,6 @@ void PagedQSAIndexer::validate_and_infer_types() {
                           validate_config(m_config, reason),
                           "PagedQSAIndexer configuration is invalid: ",
                           reason);
-    // Resolve the 0 sentinel so serialized IR always carries the actual multiplier.
-    m_config.scale = effective_scale(m_config);
 
     const auto& index_query_ps = get_input_partial_shape(InputIdx::INDEX_QUERY);
     const auto& raw_index_keys_ps = get_input_partial_shape(InputIdx::RAW_INDEX_KEYS);

@@ -45,6 +45,7 @@
 #include "nodes/gathermatmul.h"
 #include "nodes/generate_proposals.h"
 #include "nodes/grn.h"
+#include "nodes/histc.h"
 #include "nodes/identity.hpp"
 #include "nodes/if.h"
 #include "nodes/input.h"
@@ -62,7 +63,6 @@
 #include "nodes/multinomial.hpp"
 #include "nodes/mvn.h"
 #include "nodes/ngram.h"
-#include "nodes/ngram_hash.h"
 #include "nodes/non_max_suppression.h"
 #include "nodes/non_zero.h"
 #include "nodes/normalize.h"
@@ -72,13 +72,11 @@
 #include "nodes/paged_causal_conv1d.h"
 #include "nodes/paged_gated_delta_net.h"
 #include "nodes/paged_selective_ssm.h"
-#include "nodes/paged_qsa_indexer.h"
 #include "nodes/pooling.h"
 #include "nodes/priorbox.h"
 #include "nodes/priorbox_clustered.h"
 #include "nodes/proposal.h"
 #include "nodes/psroi_pooling.h"
-#include "nodes/qsa_indexer.h"
 #include "nodes/random_uniform.hpp"
 #include "nodes/range.h"
 #include "nodes/rdft.h"
@@ -105,8 +103,6 @@
 #include "nodes/space_to_batch.h"
 #include "nodes/space_to_depth.h"
 #include "nodes/sparse_fill_empty_rows.h"
-#include "nodes/sparse_pa.h"
-#include "nodes/sparse_sdpa.h"
 #include "nodes/split.h"
 #include "nodes/stft.h"
 #include "nodes/strided_slice.h"
@@ -129,6 +125,13 @@
 #    include "nodes/paged_attn.h"
 #    include "nodes/qkv_proj.h"
 #    include "nodes/rms_norm.h"
+#endif
+
+#if defined(OPENVINO_ARCH_X86_64)
+#    include "nodes/paged_qsa_indexer.h"
+#    include "nodes/qsa_indexer.h"
+#    include "nodes/sparse_pa.h"
+#    include "nodes/sparse_sdpa.h"
 #endif
 
 #if defined(OPENVINO_ARCH_ARM64)
@@ -226,7 +229,6 @@ Node::NodesFactory::NodesFactory() : Factory("NodesFactory") {
     INTEL_CPU_NODE(Eye, Type::Eye);
     INTEL_CPU_NODE(Unique, Type::Unique);
     INTEL_CPU_NODE(Ngram, Type::Ngram);
-    INTEL_CPU_NODE(NgramHash, Type::NgramHash);
     INTEL_CPU_NODE(RoPE, Type::RoPE);
     INTEL_CPU_NODE(CausalMaskPreprocess, Type::CausalMaskPreprocess);
     INTEL_CPU_NODE(Identity, Type::Identity);
@@ -253,6 +255,7 @@ Node::NodesFactory::NodesFactory() : Factory("NodesFactory") {
     INTEL_CPU_NODE(PaKVReorder, Type::PaKVReorder);
     INTEL_CPU_NODE(SearchSorted, Type::SearchSorted);
     INTEL_CPU_NODE(SegmentMax, Type::SegmentMax);
+    INTEL_CPU_NODE(Histc, Type::Histc);
     INTEL_CPU_NODE(LoRA, Type::LoRA);
     INTEL_CPU_NODE(GatherMatmul, Type::GatherMatmul);
     INTEL_CPU_NODE(GatedDeltaNet, Type::GatedDeltaNet);
@@ -269,10 +272,10 @@ Node::NodesFactory::NodesFactory() : Factory("NodesFactory") {
     INTEL_CPU_NODE(QKVProjection, Type::QKVProjection);
     INTEL_CPU_NODE(PagedAttention, Type::PagedAttention);
     INTEL_CPU_NODE(RMSNorm, Type::RMS);
-    INTEL_CPU_NODE(node::QSAIndexer, Type::QSAIndexer);
+    INTEL_CPU_NODE(QSAIndexer, Type::QSAIndexer);
     INTEL_CPU_NODE(SparseSDPA, Type::SparseSDPA);
     INTEL_CPU_NODE(PagedQSAIndexer, Type::PagedQSAIndexer);
-    INTEL_CPU_NODE(node::SparsePA, Type::SparsePA);
+    INTEL_CPU_NODE(SparsePA, Type::SparsePA);
 #elif defined(OPENVINO_ARCH_ARM64)
     INTEL_CPU_NODE(FakeQuantize, Type::FakeQuantize);
     INTEL_CPU_NODE(PagedAttention, Type::PagedAttention);

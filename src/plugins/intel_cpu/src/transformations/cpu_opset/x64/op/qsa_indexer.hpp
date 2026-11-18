@@ -34,11 +34,11 @@ namespace ov::intel_cpu {
 /// every call, and keep their input shape.
 ///
 /// \ingroup ov_ops_cpp_api
-class QSAIndexer : public ov::op::Op {
+class QSAIndexerNode : public ov::op::Op {
 public:
     OPENVINO_OP("QSAIndexer", "cpu_plugin_opset");
 
-    /// @brief Fixed input order of the QSAIndexer op. All state cache ports are grouped at
+    /// @brief Fixed input order of the QSAIndexerNode op. All state cache ports are grouped at
     /// the end, after every plain-data/weight input.
     struct InputIdx {
         static constexpr size_t Q_IDX = 0;          ///< [B, L, H_iq, D_idx]
@@ -58,7 +58,7 @@ public:
         static constexpr size_t COUNT = 10;
     };
 
-    /// @brief Fixed output order of the QSAIndexer op. The three state outputs are the updated
+    /// @brief Fixed output order of the QSAIndexerNode op. The three state outputs are the updated
     /// values of the matching state inputs (same element type; summary_cache grows, see the class comment).
     struct OutputIdx {
         static constexpr size_t SEL_INDICES = 0;            ///< [B, H_sel, L, block_topk] i32
@@ -71,17 +71,24 @@ public:
     };
 
     struct Config {
-        size_t compress_ratio = 4;      ///< r (key_block_size)
+        size_t compress_ratio = 4;      ///< r (key_block_size), at least 2
         size_t block_topk = 0;          ///< K_max, required
         size_t h_sel = 1;               ///< 1 or H_ik
-        size_t indexer_rotary_dim = 0;  ///< <= indexer_head_dim, even
+        size_t indexer_rotary_dim = 0;  ///< positive, even, <= indexer_head_dim
         size_t indexer_head_dim = 0;    ///< D_idx
-        float eps = 1e-6f;              ///< RMSNorm epsilon
-        float scale = 0.0f;             ///< positive score multiplier; 0 selects the default 1 / sqrt(indexer_head_dim)
+        float eps = 1e-6F;              ///< RMSNorm epsilon
+        float scale = 0.0F;             ///< positive score multiplier; 0 selects the default 1 / sqrt(indexer_head_dim)
+        /// Order of the selected blocks of a row in `sel_indices`. false: ascending block ids, the cheaper order that
+        /// the sparse attention kernels prefer (adjacent blocks are attended in one go); true: the order of
+        /// SparseAttentionIndexer-17, by descending score and, for equal scores, by ascending block id. It needs the
+        /// scores of every token, also of those that take all their blocks.
+        bool order_by_score = false;
+        bool query_norm = true;  ///< the op applies the RMSNorm to q_idx; false: it is already done in front of the op
+        bool query_rope = true;  ///< the op applies the RoPE to q_idx; false: it is already done in front of the op
     };
 
-    QSAIndexer() = default;
-    QSAIndexer(const ov::OutputVector& args, const Config& config);
+    QSAIndexerNode() = default;
+    QSAIndexerNode(const ov::OutputVector& args, const Config& config);
 
     bool visit_attributes(ov::AttributeVisitor& visitor) override;
     void validate_and_infer_types() override;

@@ -37,16 +37,21 @@ ConvertPagedAttnInputs::ConvertPagedAttnInputs(const KVCacheConfig& config,
     MATCHER_SCOPE(ConvertPagedAttnInputs);
 
     auto paged_op = pattern::wrap_type<ov::op::PagedAttentionExtension,
+                                       ov::op::internal::PagedSparseAttention,
                                        ov::op::internal::PagedCausalConv1D,
                                        ov::op::internal::PagedGatedDeltaNet,
                                        ov::op::internal::PagedSelectiveSSM,
-                                       ov::op::internal::PagedSparseAttention,
                                        ov::op::internal::PagedQSAIndexer>();
     ov::matcher_pass_callback callback = [OV_CAPTURE_CPY_AND_THIS](pattern::Matcher& m) {
         const auto root = m.get_match_root();
         bool status = false;
 
-        if (const auto pa_op = ov::as_type_ptr<ov::op::PagedAttentionExtension>(root)) {
+        // PagedAttentionExtension and PagedSparseAttention share the key/value cache inputs (3, 4) and the
+        // `num_k_heads`/`k_head_size`/`num_v_heads`/`v_head_size` runtime info that defines the cache shape.
+        const auto pa_op =
+            ov::is_type_any_of<ov::op::PagedAttentionExtension, ov::op::internal::PagedSparseAttention>(root) ? root
+                                                                                                              : nullptr;
+        if (pa_op) {
             auto key_cache = ov::as_type_ptr<v0::Parameter>(pa_op->get_input_node_shared_ptr(3));
             auto value_cache = ov::as_type_ptr<v0::Parameter>(pa_op->get_input_node_shared_ptr(4));
             if (!key_cache || !value_cache) {
@@ -193,48 +198,26 @@ ConvertPagedAttnInputs::ConvertPagedAttnInputs(const KVCacheConfig& config,
             return true;
         }
 
-        // The caches of the Qwen Sparse Attention ops keep the layout of their specification and the inference
-        // precision (the sparse kernels have no compressed caches). Their head axes are set by PagedQSAFusion, the
-        // axis of the tokens of a block is set here.
-        auto set_cache = [&](const ov::Output<ov::Node>& input, size_t block_axis, size_t block_extent) {
-            const auto cache = ov::as_type_ptr<v0::Parameter>(input.get_node_shared_ptr());
-            if (!cache || cache->get_partial_shape().rank().is_dynamic() ||
-                block_axis >= cache->get_partial_shape().size()) {
-                return false;
-            }
-            auto cache_precision = m_config.inferencePrecision;
-            if (m_update_precision_func) {
-                m_update_precision_func(cache_precision);
-            }
-            auto shape = cache->get_partial_shape();
-            shape[block_axis] = static_cast<int64_t>(block_extent);
-            cache->set_element_type(cache_precision);
-            cache->set_partial_shape(shape);
-            enable_keep_const_precision(cache);
-            cache->validate_and_infer_types();
-            return true;
-        };
-
-        if (const auto sparse_attention = ov::as_type_ptr<ov::op::internal::PagedSparseAttention>(root)) {
-            // key_cache / value_cache: [num_blocks, Hkv, block_size, S]
-            return set_cache(sparse_attention->input_value(3), 2, m_config.keyCacheBlockSize) &&
-                   set_cache(sparse_attention->input_value(4), 2, m_config.valueCacheBlockSize);
-        }
-
-        if (const auto indexer = ov::as_type_ptr<ov::op::internal::PagedQSAIndexer>(root)) {
+        if (const auto paged_qsa = ov::as_type_ptr<ov::op::internal::PagedQSAIndexer>(root)) {
             using InputIdx = ov::op::internal::PagedQSAIndexer::InputIdx;
-            // The index caches share the page table of the key cache; a page holds block_size / r QSA blocks.
-            const size_t block_size = m_config.keyCacheBlockSize;
-            const size_t key_block_size = indexer->get_config().key_block_size;
-            OPENVINO_ASSERT(key_block_size > 0 && block_size % key_block_size == 0,
-                            "The KV cache block size ",
-                            block_size,
-                            " is not a multiple of the QSA key block size ",
-                            key_block_size);
-            const size_t blocks_per_page = block_size / key_block_size;
-            return set_cache(indexer->input_value(InputIdx::INDEX_KEY_CACHE), 2, block_size) &&
-                   set_cache(indexer->input_value(InputIdx::INDEX_BLOCK_ROPE_CACHE), 1, blocks_per_page) &&
-                   set_cache(indexer->input_value(InputIdx::BLOCK_INDEX_KEYS_CACHE), 2, blocks_per_page);
+            auto cache_precision = paged_qsa->get_input_element_type(InputIdx::INDEX_QUERY);
+            if (!cache_precision.is_static()) {
+                cache_precision = m_config.inferencePrecision;
+                if (m_update_precision_func) {
+                    m_update_precision_func(cache_precision);
+                }
+            }
+            bool changed = false;
+            for (const auto idx :
+                 {InputIdx::INDEX_KEY_CACHE, InputIdx::INDEX_BLOCK_ROPE_CACHE, InputIdx::BLOCK_INDEX_KEYS_CACHE}) {
+                if (const auto cache = ov::as_type_ptr<v0::Parameter>(paged_qsa->get_input_node_shared_ptr(idx))) {
+                    cache->set_element_type(cache_precision);
+                    enable_keep_const_precision(cache);
+                    cache->validate_and_infer_types();
+                    changed = true;
+                }
+            }
+            return changed;
         }
 
         return status;
