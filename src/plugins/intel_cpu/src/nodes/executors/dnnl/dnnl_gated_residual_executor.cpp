@@ -53,18 +53,8 @@ cpu_isa_t targetIsa() {
     return ov::with_cpu_x86_avx512_core() ? dnnl::impl::cpu::x64::avx512_core : dnnl::impl::cpu::x64::avx2;
 }
 
-// For compressed weights oneDNN decompresses only f32 and natively supported bf16 activations; FC maps bf16 on other
-// CPUs to f32 too. The node's type mapping runs f16 in f32.
-ov::element::Type gemmPrecision(ov::element::Type data, bool compressed) {
-    if (compressed && data == ov::element::bf16 && !ov::with_cpu_x86_bfloat16()) {
-        return ov::element::f32;
-    }
-    return data;
-}
-
-// GEMM row count. oneDNN has a fast path for a single row (its own GEMV-specific weight layout, packed next to the one
-// shared by all M >= 2), and for M >= 5 it prepacks the compressed weights once per call, which beats the in-kernel
-// weight decompression it uses for M = 2..4. So M = 1 is kept as is and M = 2..8 is padded to 8 rows.
+// GEMM row count: M = 1 stays (oneDNN's GEMV path); M = 2..8 pads to 8, as from M >= 5 oneDNN prepacks compressed
+// weights, which beats its in-kernel decompression of M = 2..4; M <= 16 pads to 16, larger M to a bucket.
 size_t normalize_rows(size_t m) {
     constexpr size_t kDecodeRows = 8;
     constexpr size_t kSmallRows = 16;
@@ -132,26 +122,23 @@ GatedResidualDnnlExecutor::GatedResidualDnnlExecutor(const GatedResidualAttrs& a
       m_weights_have_zero_points(attrs.read_layout.has_zp),
       m_layout(attrs.read_layout) {
     m_precision = memory.at(gatedResidualSrcArg(attrs.read_layout.residual))->getPrecision();
-    m_gemm_precision = gemmPrecision(m_precision, m_weights_compressed);
 
     // Built at compile time: packs the constant weights.
     createProjections(attrs, memory);
 }
 
 size_t GatedResidualDnnlExecutor::maxTileRows() const {
-    // Every tile re-reads all weights from memory, so larger tiles amortize that, up to a scratch budget. brgemm splits
-    // a GEMM into chunks of 128 rows x 64 output channels that the threads work on, and it blocks rows by 128 only for
-    // multiples of 128. The narrowest GEMM (down, L output channels) limits the parallelism, so a tile takes the most
-    // 128-row blocks that keep its chunk count within one wave of threads; more rows would start a second, partly empty
-    // wave.
+    // Larger tiles amortize the weight re-read of every tile, up to a scratch budget. brgemm runs chunks of 128 rows x
+    // 64 channels; the narrowest GEMM (down, L channels) limits parallelism, so a tile is as many 128-row blocks as
+    // fit one wave of threads.
     constexpr size_t kBrgemmRowBlock = 128;
     constexpr size_t kBrgemmChannelBlock = 64;
     constexpr size_t kScratchBudgetBytes = 128UL << 20;
     const size_t C = m_hc_count;
     const size_t CD = C * m_hidden_size;
-    const size_t bytes_per_row = (2 * CD) * sizeof(float) + m_lowrank * m_gemm_precision.size() +
+    const size_t bytes_per_row = (2 * CD) * sizeof(float) + m_lowrank * m_precision.size() +
                                  (m_produce_write_gate ? C * m_precision.size() : 0) +
-                                 (m_gemm_precision != ov::element::f32 ? CD * sizeof(uint16_t) : 0);
+                                 (m_precision != ov::element::f32 ? CD * sizeof(uint16_t) : 0);
     const size_t threads = static_cast<size_t>(std::max(1, CpuParallel::get_num_worker_threads()));
     const size_t channel_chunks = (m_lowrank + kBrgemmChannelBlock - 1) / kBrgemmChannelBlock;
     // The tile is a whole number of row blocks: as many as one wave of threads can take, within the scratch budget.
@@ -175,7 +162,7 @@ void GatedResidualDnnlExecutor::createProjections(const GatedResidualAttrs& attr
     // once for a full tile. The projections' FC executors use the child the node put in their contexts.
     m_tile_rows = maxTileRows();
     const size_t tile = m_tile_rows;
-    const bool gemm_lowp = m_gemm_precision != ov::element::f32;
+    const bool gemm_lowp = m_precision != ov::element::f32;
     const auto pad = m_context->getScratchPad();
     const auto logit_pad = pad->child(kPadLogit);
     const auto t_pad = pad->child(kPadT);
@@ -189,7 +176,7 @@ void GatedResidualDnnlExecutor::createProjections(const GatedResidualAttrs& attr
         m_wg_gate = tileMemory(wg_gate_pad, m_precision, tile, C);
     }
     if (gemm_lowp) {
-        m_rbar_gemm = tileMemory(rbar_gemm_pad, m_gemm_precision, tile, CD);
+        m_rbar_gemm = tileMemory(rbar_gemm_pad, m_precision, tile, CD);
     }
 
     struct Spec {
@@ -214,7 +201,7 @@ void GatedResidualDnnlExecutor::createProjections(const GatedResidualAttrs& attr
                      m_layout.zp_down,
                      gemm_src_pad,
                      t_pad,
-                     m_gemm_precision,
+                     m_precision,
                      {act(Type::linear, inv_c), act(Type::swish, 1.0F)}});
     // up: gates = sigmoid(up(T)), in f32.
     specs.push_back({kUp,
@@ -249,7 +236,7 @@ void GatedResidualDnnlExecutor::createProjections(const GatedResidualAttrs& attr
                         "GatedResidual: the projection executors must use the kPadProjections scratchpad");
         p.k = spec.k;
         p.n = spec.n;
-        p.src_prc = m_gemm_precision;
+        p.src_prc = m_precision;
         p.dst_prc = spec.dst_prc;
         p.src_pad = spec.src_pad;
         p.dst_pad = spec.dst_pad;
@@ -265,10 +252,10 @@ void GatedResidualDnnlExecutor::createProjections(const GatedResidualAttrs& attr
                 p.args[ARG_WEI | ARG_ATTR_ZERO_POINTS] = memory.at(gatedResidualSrcArg(spec.zero_points));
             }
         }
-        // Built for a full tile, which packs the weights; bindProjection() binds it to the rows it runs.
+        // The executor of a full tile; the one of the remainder is bound in update().
         p.args[ARG_SRC] = tileMemory(p.src_pad, p.src_prc, tile, p.k);
         p.args[ARG_DST] = tileMemory(p.dst_pad, p.dst_prc, tile, p.n);
-        p.executor = CreateDnnlDefault<DnnlFCPrimitive, FCAttrs>{true, false}(p.attrs, p.args, p.context);
+        p.full = CreateDnnlDefault<DnnlFCPrimitive, FCAttrs>{true, false}(p.attrs, p.args, p.context);
     }
 }
 
@@ -281,20 +268,31 @@ MemoryPtr GatedResidualDnnlExecutor::tileMemory(const DnnlScratchPadPtr& pad,
     return pad->createScratchPadMem(desc);
 }
 
-void GatedResidualDnnlExecutor::bindProjection(Projection& p, size_t m) {
-    if (p.m == m) {
+void GatedResidualDnnlExecutor::bindFull(Projection& p) {
+    if (!p.full_bound) {
+        OPENVINO_ASSERT(p.full->update(p.args), "GatedResidual: projection executor update failed");
+        p.full_bound = true;
+    }
+}
+
+void GatedResidualDnnlExecutor::bindRemainder(Projection& p, size_t m) {
+    if (p.part_m == m) {
         return;
     }
-    p.args[ARG_SRC] = tileMemory(p.src_pad, p.src_prc, m, p.k);
-    p.args[ARG_DST] = tileMemory(p.dst_pad, p.dst_prc, m, p.n);
-    OPENVINO_ASSERT(p.executor->update(p.args), "GatedResidual: projection executor update failed");
-    p.m = m;
+    p.part_args = p.args;
+    p.part_args[ARG_SRC] = tileMemory(p.src_pad, p.src_prc, m, p.k);
+    p.part_args[ARG_DST] = tileMemory(p.dst_pad, p.dst_prc, m, p.n);
+    if (!p.part) {
+        p.part = CreateDnnlDefault<DnnlFCPrimitive, FCAttrs>{true, false}(p.attrs, p.part_args, p.context);
+    }
+    OPENVINO_ASSERT(p.part->update(p.part_args), "GatedResidual: projection executor update failed");
+    p.part_m = m;
 }
 
 impl_desc_type GatedResidualDnnlExecutor::implType() const {
     // The projections dominate: report the implementation chosen for the down GEMM.
-    if (m_proj[kDown].executor) {
-        return m_proj[kDown].executor->implType();
+    if (m_proj[kDown].full) {
+        return m_proj[kDown].full->implType();
     }
     return targetIsa() == dnnl::impl::cpu::x64::avx512_core ? impl_desc_type::jit_avx512 : impl_desc_type::jit_avx2;
 }
@@ -347,13 +345,25 @@ bool GatedResidualDnnlExecutor::update(const MemoryArgs& memory) {
         };
         // The mix reads the f32 Rbar; a GEMM precision other than f32 needs a second copy of the normalization.
         m_rms_kernel = get_kernel(ov::element::f32);
-        if (m_gemm_precision != ov::element::f32) {
-            m_rms_kernel_gemm = get_kernel(m_gemm_precision);
+        if (m_precision != ov::element::f32) {
+            m_rms_kernel_gemm = get_kernel(m_precision);
         }
     }
 
     const size_t part_rows = m_rows % m_tile_rows;
     m_part_m = part_rows != 0 ? std::min(normalize_rows(part_rows), m_tile_rows) : 0;
+    const bool part_is_full = m_part_m == m_tile_rows;
+    for (auto& p : m_proj) {
+        if (!p.full) {
+            continue;
+        }
+        if (m_rows >= m_tile_rows || part_is_full) {
+            bindFull(p);
+        }
+        if (m_part_m != 0 && !part_is_full) {
+            bindRemainder(p, m_part_m);
+        }
+    }
     return true;
 }
 
@@ -369,7 +379,7 @@ void GatedResidualDnnlExecutor::execute_read_or_final_mix(const MemoryArgs& memo
     // The shared scratchpad block may have been reallocated since the last call: read the data pointers again.
     auto* rbar = m_rbar->getDataAs<float>();
     const auto* logit = m_logit->getDataAs<const float>();
-    const bool gemm_lowp = m_gemm_precision != ov::element::f32;
+    const bool gemm_lowp = m_precision != ov::element::f32;
     auto* rbar_gemm = gemm_lowp ? m_rbar_gemm->getDataAs<uint16_t>() : nullptr;
 
     // Inputs and outputs may have leading batch dims; rows are indexed flat.
@@ -390,13 +400,18 @@ void GatedResidualDnnlExecutor::execute_read_or_final_mix(const MemoryArgs& memo
 
     // Full tiles run tile_rows GEMM rows, the last m_part_m. `cur_rows` bounds the elementwise steps and stores;
     // `gemm_rows` may be larger (bucketed), with the extra source rows zeroed.
+    const bool part_is_full = m_part_m == tile_rows;
     for (size_t tile_start = 0; tile_start < rows; tile_start += tile_rows) {
         const size_t cur_rows = std::min(tile_rows, rows - tile_start);
         const bool full_tile = cur_rows == tile_rows;
         const size_t gemm_rows = full_tile ? tile_rows : m_part_m;
+        const bool on_full = full_tile || part_is_full;
         const auto run = [&](Projection& p) {
-            bindProjection(p, gemm_rows);
-            p.executor->execute(p.args);
+            if (on_full) {
+                p.full->execute(p.args);
+            } else {
+                p.part->execute(p.part_args);
+            }
         };
 
         // Step 1: per-row RMSNorm per branch: the f32 Rbar for the mix and a GEMM-precision copy for the GEMMs.

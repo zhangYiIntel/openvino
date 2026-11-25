@@ -10,6 +10,7 @@
 #include "common_test_utils/test_constants.hpp"
 #include "openvino/runtime/properties.hpp"
 #include "openvino/runtime/system_conf.hpp"
+#include "utils/precision_support.h"
 
 namespace ov::test {
 
@@ -19,10 +20,9 @@ using Mode = ov::op::internal::GatedResidual::Mode;
 
 const GatedResidualWeightCompression kNoCompression{};
 
-// Dynamic rows [rows, C*D], successive inferences through one compiled model. The tile size follows the thread count,
-// so these rows cover the partial-tile buckets (<= 16 and round-up-to-16: 1 and 17, a plain bucket: 100) and, when the
-// tile is smaller, several tiles with a remainder (513, 1100); the repeated 1 is a prefill -> decode flip. The cases
-// that need one particular tile fix the thread count.
+// Dynamic rows [rows, C*D], successive inferences of one compiled model: 1 is decode (repeated for a prefill -> decode
+// flip), 17/100 and 513/1100 fall into different row buckets, and with a small tile the last two are several tiles
+// plus a remainder.
 const ov::test::InputShape kDynRows{{-1}, {{1}, {17}, {100}, {513}, {1100}, {1}}};
 
 // The compressed cases need fewer row counts: the same buckets, without the plain one.
@@ -36,9 +36,8 @@ const ov::test::InputShape kDynBatchSeq{{-1, -1}, {{2, 3}, {4, 1}, {3, 7}, {2, 1
 // prefill-sized chunk first, then decode.
 const ov::test::InputShape kDynLargeRows{{-1}, {{33}, {1}, {1}}};
 
-// The tile of rows follows the thread count: with one channel chunk in the down projection (L <= 64) and 9 threads it
-// is 1152 rows. A remainder of 1029 rows buckets to 1280, past the tile, and 1153 is a full tile and one row, the
-// switch between the two GEMM sizes.
+// With L <= 64 (one channel chunk) and 9 threads the tile is 1152 rows: a 1029-row remainder buckets to 1280, past the
+// tile, and 1153 is a full tile plus one row.
 const ov::test::InputShape kDynTileRows{{-1}, {{1029}, {1}, {1153}, {1}}};
 
 std::vector<ov::AnyMap> inference_precision_configs() {
@@ -60,6 +59,25 @@ std::vector<ov::AnyMap> tile_configs() {
 std::vector<ov::AnyMap> bf16_inference_configs() {
     std::vector<ov::AnyMap> configs;
     if (ov::with_cpu_x86_bfloat16()) {
+        configs.push_back({{ov::hint::inference_precision.name(), ov::element::bf16}});
+    }
+    return configs;
+}
+
+// f16 inference, where the hardware supports it: the projections do not run f16, so the node runs in f32.
+std::vector<ov::AnyMap> f16_inference_configs() {
+    std::vector<ov::AnyMap> configs;
+    if (ov::intel_cpu::hasHardwareSupport(ov::element::f16)) {
+        configs.push_back({{ov::hint::inference_precision.name(), ov::element::f16}});
+    }
+    return configs;
+}
+
+// bf16 inference on hardware that runs bf16 but has no native bf16 instructions (plain AVX-512): oneDNN cannot
+// decompress weights at that precision, so the node runs in f32.
+std::vector<ov::AnyMap> bf16_without_native_configs() {
+    std::vector<ov::AnyMap> configs;
+    if (ov::intel_cpu::hasHardwareSupport(ov::element::bf16) && !ov::with_cpu_x86_bfloat16()) {
         configs.push_back({{ov::hint::inference_precision.name(), ov::element::bf16}});
     }
     return configs;
@@ -90,9 +108,17 @@ const Compression u8_grouped_zp{true, ov::element::u8, true, 16, ov::element::f1
 const Compression u8_grouped_nozp{true, ov::element::u8, false, 16, ov::element::bf16};
 const Compression i8_grouped_nozp{true, ov::element::i8, false, 16, ov::element::f16};
 const Compression i4_per_channel{true, ov::element::i4, false, 0, ov::element::bf16};
+const Compression i4_per_channel_f16{true, ov::element::i4, false, 0, ov::element::f16};
 const Compression i4_grouped_zp{true, ov::element::i4, true, 16, ov::element::f32};
 const Compression i4_grouped_nozp{true, ov::element::i4, false, 16, ov::element::f16};  // symmetric i4 (no zero point)
 const Compression u4_grouped_zp{true, ov::element::u4, true, 16, ov::element::f16};     // asymmetric u4 (zero point)
+const Compression u4_grouped_scalar_zp{true,
+                                       ov::element::u4,
+                                       true,
+                                       16,
+                                       ov::element::f16,
+                                       true};  // u4 with a per-tensor zero point
+const Compression u8_per_channel_scalar_zp{true, ov::element::u8, true, 0, ov::element::f32, true};
 const Compression u4_per_channel_zp{true, ov::element::u4, true, 0, ov::element::f32};
 const Compression u4_grouped_zp_gs32{true, ov::element::u4, true, 32, ov::element::f16};   // CD = L = 64 -> G = 2
 const Compression u4_grouped_zp_gs16{true, ov::element::u4, true, 16, ov::element::bf16};  // CD = L = 48 -> G = 3
@@ -109,6 +135,8 @@ const std::vector<GatedResidualShapeParams> compressed_shapes_with_inject{
     {4, 16, 64, ov::element::f16, i4_grouped_nozp},
     {4, 16, 64, ov::element::f16, u4_grouped_zp},
     {4, 8, 16, ov::element::f32, u4_per_channel_zp},
+    {4, 16, 64, ov::element::f16, u4_grouped_scalar_zp},
+    {4, 8, 16, ov::element::f32, u8_per_channel_scalar_zp},
     {4, 16, 64, ov::element::f16, u4_grouped_zp_gs32},  // G = 2 for w_down/w_inject (K = 64) and w_up (K = 64)
     {4, 12, 48, ov::element::f16, u4_grouped_zp_gs16},  // G = 3 for all three projections (K = 48)
 };
@@ -143,6 +171,13 @@ const std::vector<GatedResidualShapeParams> gain_without_one_compressed_shapes{
 const std::vector<GatedResidualShapeParams> compressed_shapes_bf16{
     {4, 16, 64, ov::element::f16, u4_grouped_zp},
     {4, 8, 16, ov::element::f32, i4_per_channel},
+};
+
+// Compressed weights under the inference precisions that run in f32 behind reorders.
+const std::vector<GatedResidualShapeParams> compressed_shapes_f32_fallback{
+    {4, 16, 64, ov::element::f16, u4_grouped_zp},
+    {4, 16, 64, ov::element::f16, i8_grouped_nozp},
+    {4, 8, 16, ov::element::f16, i4_per_channel_f16},
 };
 
 }  // namespace
@@ -279,6 +314,28 @@ INSTANTIATE_TEST_SUITE_P(smoke_GatedResidualCompressedBf16,
                                             ::testing::Values(true),  // norm_gain_plus_one
                                             ::testing::Values(kDynCompressedRows),
                                             ::testing::ValuesIn(bf16_inference_configs()),
+                                            ::testing::Values(ov::test::utils::DEVICE_CPU)),
+                         GatedResidualLayerCPUTest::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(smoke_GatedResidualCompressedF16,
+                         GatedResidualLayerCPUTest,
+                         ::testing::Combine(::testing::Values(Mode::READ),
+                                            ::testing::ValuesIn(compressed_shapes_f32_fallback),
+                                            ::testing::Values(true),  // produce_write_gate
+                                            ::testing::Values(true),  // norm_gain_plus_one
+                                            ::testing::Values(kDynCompressedRows),
+                                            ::testing::ValuesIn(f16_inference_configs()),
+                                            ::testing::Values(ov::test::utils::DEVICE_CPU)),
+                         GatedResidualLayerCPUTest::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(smoke_GatedResidualCompressedBf16WithoutNative,
+                         GatedResidualLayerCPUTest,
+                         ::testing::Combine(::testing::Values(Mode::READ),
+                                            ::testing::ValuesIn(compressed_shapes_f32_fallback),
+                                            ::testing::Values(true),  // produce_write_gate
+                                            ::testing::Values(true),  // norm_gain_plus_one
+                                            ::testing::Values(kDynCompressedRows),
+                                            ::testing::ValuesIn(bf16_without_native_configs()),
                                             ::testing::Values(ov::test::utils::DEVICE_CPU)),
                          GatedResidualLayerCPUTest::getTestCaseName);
 
