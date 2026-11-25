@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <memory>
 
+#include "cache/multi_cache.h"
 #include "cpu_parallel.hpp"
 #include "nodes/kernels/scaled_attn/attn_brgemm_common.hpp"
 #include "nodes/kernels/scaled_attn/cache_spec.hpp"
+#include "onednn/iml_type_mapper.h"
 #include "utils/plain_tensor.hpp"
 
 // Defined outside XARCH so the cross-compiled dispatcher can name the types in the signature.
@@ -33,8 +35,8 @@ struct SparsePAConfig {
     /// selected blocks merge up to a page), key_block_size when the page size is unknown. It sizes the scores and the
     /// dequantized-row buffers.
     size_t max_attend_kv_rows = 0;
-    /// The AMX prefill kernels; empty when the executor is not eligible. The config owns them, so an executor that
-    /// copies the config keeps them alive.
+    /// The AMX prefill kernels; empty when the executor is not eligible. make_*_executor() fills it (the node leaves it
+    /// empty). The config owns them, so an executor that copies the config keeps them alive.
     TileBrgemmKernels brgemm;
 };
 
@@ -58,6 +60,9 @@ struct SparsePATensors {
 class SparsePAExecutor {
 public:
     virtual ~SparsePAExecutor() = default;
+    /// The implementation type the node reports: the matrix extension of the prefill kernels when it has them, else
+    /// the SIMD stages of the variant.
+    [[nodiscard]] virtual ov::intel_cpu::impl_desc_type impl_type() const = 0;
     [[nodiscard]] virtual size_t scratch_bytes(const SparsePATensors& tensors,
                                                const ov::intel_cpu::CpuParallelPtr& cpu_parallel) const = 0;
     virtual void execute(const SparsePATensors& tensors,
@@ -70,6 +75,7 @@ public:
 namespace ov::Extensions::Cpu::XARCH {
 
 std::shared_ptr<ov::Extensions::Cpu::SparsePAExecutor> make_sparse_pa_executor(
-    const ov::Extensions::Cpu::SparsePAConfig& config);
+    const ov::Extensions::Cpu::SparsePAConfig& config,
+    const ov::intel_cpu::MultiCachePtr& cache);
 
 }  // namespace ov::Extensions::Cpu::XARCH

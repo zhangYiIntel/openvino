@@ -69,7 +69,8 @@ KVCachePattern make_pattern() {
     };
     p.past_k = wrap_type<ov::op::util::ReadValueBase>(only_cache_consumers);
     p.past_v = wrap_type<ov::op::util::ReadValueBase>(only_cache_consumers);
-    // The Convert dies with the fusion, so it must not have other consumers.
+    // RemoveMemoryInputConvert drops this Convert in the CPU graph, so another consumer would become a child of the
+    // MemoryInput; MatchSparseSdpaKvCache then rejects the state (it accepts only SparseSDPA and ShapeOf children).
     auto convert_past_k = optional<ov::op::v0::Convert>({p.past_k}, consumers_count(1));
     auto convert_past_v = optional<ov::op::v0::Convert>({p.past_v}, consumers_count(1));
 

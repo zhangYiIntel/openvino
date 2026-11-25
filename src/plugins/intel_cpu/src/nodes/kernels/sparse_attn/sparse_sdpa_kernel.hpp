@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <memory>
 
+#include "cache/multi_cache.h"
 #include "cpu_parallel.hpp"
 #include "nodes/kernels/scaled_attn/attn_brgemm_common.hpp"
 #include "nodes/kernels/scaled_attn/cache_spec.hpp"
+#include "onednn/iml_type_mapper.h"
 #include "openvino/core/type/element_type.hpp"
 #include "utils/plain_tensor.hpp"
 
@@ -27,8 +29,8 @@ struct SparseSdpaConfig {
     float scale = 1.0F;
     ov::intel_cpu::CacheSpec key_spec;
     ov::intel_cpu::CacheSpec value_spec;
-    /// The AMX prefill kernels; empty when the executor is not eligible. The config owns them, so an executor that
-    /// copies the config keeps them alive.
+    /// The AMX prefill kernels; empty when the executor is not eligible. make_*_executor() fills it (the node leaves it
+    /// empty). The config owns them, so an executor that copies the config keeps them alive.
     TileBrgemmKernels brgemm;
 };
 
@@ -48,6 +50,9 @@ struct SparseSdpaTensors {
 class SparseSdpaExecutor {
 public:
     virtual ~SparseSdpaExecutor() = default;
+    /// The implementation type the node reports: the matrix extension of the prefill kernels when it has them, else
+    /// the SIMD stages of the variant.
+    [[nodiscard]] virtual ov::intel_cpu::impl_desc_type impl_type() const = 0;
     [[nodiscard]] virtual size_t scratch_bytes(const SparseSdpaTensors& tensors,
                                                const ov::intel_cpu::CpuParallelPtr& cpu_parallel) const = 0;
     virtual void execute(const SparseSdpaTensors& tensors,
@@ -60,7 +65,8 @@ public:
 namespace ov::Extensions::Cpu::XARCH {
 
 std::shared_ptr<ov::Extensions::Cpu::SparseSdpaExecutor> make_sparse_sdpa_executor(
-    const ov::Extensions::Cpu::SparseSdpaConfig& config);
+    const ov::Extensions::Cpu::SparseSdpaConfig& config,
+    const ov::intel_cpu::MultiCachePtr& cache);
 
 // Dequantizes the rows [0, L) of the compressed cache (b, h) into dense f32 rows, `dst` is [L, D].
 void sparse_kv_dequantize_rows(const ov::intel_cpu::PlainTensor& cache,

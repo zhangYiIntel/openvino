@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#include "qsa_executor_cache.h"
+#include "nodes/kernels/sparse_attn/qsa_executor_cache.hpp"
 
 #include <common/utils.hpp>
 #include <cpu/x64/cpu_isa_traits.hpp>
@@ -15,14 +15,11 @@
 #include "nodes/kernels/x64/brgemm_kernel.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/core/type/element_type.hpp"
-#include "openvino/runtime/system_conf.hpp"
 
-namespace ov::intel_cpu::node {
+namespace ov::Extensions::Cpu::qsa {
 
-using ov::Extensions::Cpu::qsa::Config;
-using ov::Extensions::Cpu::qsa::kScoreBlockRows;
-using ov::Extensions::Cpu::qsa::score_tokens_per_call;
-using ov::Extensions::Cpu::qsa::ScoreKernels;
+using ov::intel_cpu::BrgemmKernel;
+using ov::intel_cpu::MultiCachePtr;
 
 size_t QsaExecutorKey::hash() const {
     const auto& c = config;
@@ -76,11 +73,11 @@ bool QsaExecutorKey::operator==(const QsaExecutorKey& rhs) const {
 
 namespace {
 
-// Whether this CPU runs the scorer for `precision` and head dim `dim`. The scorer is cross-compiled for AVX-512 only,
-// so the dispatcher has to select that build too.
+// Whether this CPU runs the scorer for `precision` and head dim `dim`. Only the AVX-512 variant of an executor asks
+// (the other variants have no scorer).
 bool scoreKernelSupported(const ov::element::Type& precision, size_t dim) {
     using namespace dnnl::impl::cpu::x64;
-    if (dim % 2 != 0 || !ov::with_cpu_x86_avx512f()) {
+    if (dim % 2 != 0) {
         return false;
     }
     if (precision == ov::element::bf16) {
@@ -97,7 +94,8 @@ struct ScoreKernelKey {
     size_t query_rows = 0;  // rows of the query tile: tokens x heads of a K head
     size_t dim = 0;         // head dim, the K of the product
     ov::element::Type precision;
-    bool is_k_q_gemm = false;  // C = K.Q^T, the blocks are the A matrix (one token); else C = Q.K^T, the query tile is
+    // C = K.Q^T, the blocks are the A matrix (one token); else C = Q.K^T, the query tile is the A matrix
+    bool is_k_q_gemm = false;
 
     [[nodiscard]] size_t hash() const {
         size_t seed = 0;
@@ -180,4 +178,4 @@ ScoreKernels getScoreKernels(const MultiCachePtr& cache, const Config& config) {
     return kernels;
 }
 
-}  // namespace ov::intel_cpu::node
+}  // namespace ov::Extensions::Cpu::qsa
