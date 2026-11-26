@@ -2426,7 +2426,7 @@ TEST_F(SDPAToPATest, SDPAToPA_nanoLLaVA_General) {
             ov::test::utils::make_param(element::dynamic, PartialShape{DYN, DYN, DYN, DYN}, "value_cache.0");
         auto key_cache_0 =
             ov::test::utils::make_param(element::dynamic, PartialShape{DYN, DYN, DYN, DYN}, "key_cache.0");
-        auto inputs_embeds = ov::test::utils::make_param(element::f32, PartialShape{DYN, DYN}, "inputs_embeds");
+        auto inputs_embeds = ov::test::utils::make_param(element::f32, PartialShape{DYN, 8}, "inputs_embeds");
         auto position_ids = ov::test::utils::make_param(element::i64, PartialShape{DYN}, "position_ids");
         auto score_aggregation_window = makeConst(element::i32, ov::Shape({0}), MOCK_VALUE);
         auto rotated_block_indices = makeConst(element::i32, ov::Shape({0}), {0});
@@ -6209,7 +6209,7 @@ TEST_F(SDPAToPATest, SDPATOPATest_Qwen2_5_VL_General) {
             ov::test::utils::make_param(element::dynamic, PartialShape{DYN, DYN, DYN, DYN}, "key_cache.0");
         auto score_aggregation_window =
             ov::test::utils::make_param(element::i32, PartialShape{DYN}, "score_aggregation_window");
-        auto inputs_embeds = ov::test::utils::make_param(element::f32, PartialShape{DYN, DYN}, "inputs_embeds");
+        auto inputs_embeds = ov::test::utils::make_param(element::f32, PartialShape{DYN, 16}, "inputs_embeds");
         auto position_ids = ov::test::utils::make_param(element::i64, PartialShape{3, DYN}, "position_ids");
         auto Unsqueeze0 = makeOP<v0::Unsqueeze>({inputs_embeds, 1});
         auto Const0 = makeConst(element::f32,
@@ -7764,7 +7764,7 @@ std::shared_ptr<ov::Model> make_sdpa_model(int full_v_head_size = full_head_size
 }
 
 std::shared_ptr<ov::Model> make_pa_model(int full_v_head_size = full_head_size, bool is_scale_rank1 = false) {
-    auto inputs_embeds = ov::test::utils::make_param(element::f32, PartialShape{DYN, DYN}, "inputs_embeds");
+    auto inputs_embeds = ov::test::utils::make_param(element::f32, PartialShape{DYN, hidden_size}, "inputs_embeds");
     auto processed_inputs_embeds = makeOP<v0::Unsqueeze>({inputs_embeds, 1});
     auto position_ids = ov::test::utils::make_param(element::i64, PartialShape{DYN}, "position_ids");
     auto max_context_len = ov::test::utils::make_param(element::i32, PartialShape{}, "max_context_len");
@@ -8136,7 +8136,7 @@ Output<Node> make_paged_sparse_attention(const Case& test_case,
 // beam_idx are gone, and the inputs created by the pass are added in its order.
 std::shared_ptr<ov::Model> make_model_ref(const Case& test_case) {
     const auto& data_type = test_case.data_type;
-    auto inputs_embeds = ov::test::utils::make_param(data_type, PartialShape{DYN, DYN}, "inputs_embeds");
+    auto inputs_embeds = ov::test::utils::make_param(data_type, PartialShape{DYN, hidden_size}, "inputs_embeds");
     auto selected_block_indices =
         ov::test::utils::make_param(test_case.selection_type, PartialShape{DYN, 1, DYN, 2}, "selected_block_indices");
     auto selected_block_count =

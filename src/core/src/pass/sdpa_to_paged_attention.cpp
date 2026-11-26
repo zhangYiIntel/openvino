@@ -114,7 +114,12 @@ bool ov::pass::SDPAToPagedAttention::run_on_model(const std::shared_ptr<ov::Mode
     if (input_ids_node->get_friendly_name() == "input_ids") {
         input_ids_node->set_partial_shape(PartialShape{-1});
     } else if (input_ids_node->get_friendly_name() == "inputs_embeds") {
-        input_ids_node->set_partial_shape(PartialShape{-1, -1});
+        // The hidden size is a property of the model, so it stays static when the model declares it.
+        const auto& embeds_shape = input_ids_node->get_partial_shape();
+        const auto hidden_size = embeds_shape.rank().is_static() && embeds_shape.size() > 0
+                                     ? embeds_shape[embeds_shape.size() - 1]
+                                     : Dimension::dynamic();
+        input_ids_node->set_partial_shape(PartialShape{-1, hidden_size});
     }
 
     auto input_ids_target_inputs = input_ids_node->get_output_target_inputs(0);
